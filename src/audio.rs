@@ -21,6 +21,9 @@ pub const AUDIO_SPECTROGRAM_BINS: usize = 20;
 #[derive(Clone, Debug)]
 pub struct AudioSpectrumPacket {
     pub peak_db: f32,
+    pub min_sample: f32,
+    pub max_sample: f32,
+    pub rms: f32,
     pub bins: [f32; AUDIO_SPECTROGRAM_BINS],
 }
 
@@ -42,6 +45,9 @@ pub fn start_wasapi_audio_worker(is_loopback: bool) -> Receiver<AudioSpectrumPac
                 // отправляем тишину и пробуем переподключиться через 1 сек
                 let silence = AudioSpectrumPacket {
                     peak_db: -60.0,
+                    min_sample: 0.0,
+                    max_sample: 0.0,
+                    rms: 0.0,
                     bins: [0.01; AUDIO_SPECTROGRAM_BINS],
                 };
                 let _ = tx.try_send(silence);
@@ -162,20 +168,30 @@ fn run_wasapi_capture_loop(is_loopback: bool, tx: &SyncSender<AudioSpectrumPacke
                 sample_ring.drain(0..excess);
             }
 
-            // Вычисляем RMS и 20 спектральных бинов по реальным данным
+            // Вычисляем RMS, min/max амплитуды и 20 спектральных бинов по реальным данным
             let mut packet = AudioSpectrumPacket {
                 peak_db: -60.0,
+                min_sample: 0.0,
+                max_sample: 0.0,
+                rms: 0.0,
                 bins: [0.01; AUDIO_SPECTROGRAM_BINS],
             };
 
             let n = sample_ring.len();
             if n >= 256 {
-                // 1. RMS
+                // 1. RMS и амплитудный диапазон волны (Waveform min/max)
                 let mut sum_sq = 0.0f32;
+                let mut min_val = 0.0f32;
+                let mut max_val = 0.0f32;
                 for &s in &sample_ring {
                     sum_sq += s * s;
+                    if s < min_val { min_val = s; }
+                    if s > max_val { max_val = s; }
                 }
                 let rms = (sum_sq / n as f32).sqrt();
+                packet.rms = rms;
+                packet.min_sample = min_val;
+                packet.max_sample = max_val;
                 packet.peak_db = (20.0 * rms.max(1e-4).log10()).clamp(-60.0, 0.0);
 
                 // 2. Спектральные бины через быстрое вычисление мощности частоты с окном Ханна

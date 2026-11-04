@@ -5,6 +5,7 @@ mod audio;
 mod benchmark;
 mod camera;
 mod capture;
+pub mod network;
 mod nvenc;
 mod ui;
 
@@ -147,6 +148,7 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(NanocordApp::default()))
         }),
     );
+    let _ = std::fs::write("run_result.txt", format!("{:#?}", res));
     if let Err(ref e) = res {
         let _ = std::fs::write("eframe_error.txt", format!("{:#?}", e));
     }
