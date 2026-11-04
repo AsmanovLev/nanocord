@@ -141,6 +141,7 @@ pub enum StageSource {
     RemoteCamera,
     LocalDesktop,
     LocalCamera,
+    MockSource,
 }
 
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -205,6 +206,12 @@ pub struct NanocordApp {
     pub p2p_receiver: Option<crate::network::P2PReceiver>,
     pub remote_desktop_texture: Option<egui::TextureHandle>,
     pub remote_camera_texture: Option<egui::TextureHandle>,
+
+    // Встроенный мок-источник (Test Pattern + BGM)
+    pub mock_source: Option<crate::network::InternalMockSource>,
+    pub is_mock_active: bool,
+    pub mock_desktop_texture: Option<egui::TextureHandle>,
+    pub mock_camera_texture: Option<egui::TextureHandle>,
 
     // Бенчмарк матрица
     pub benchmark_results: Option<Vec<BenchmarkResult>>,
@@ -293,6 +300,11 @@ impl Default for NanocordApp {
             p2p_receiver: Some(crate::network::P2PReceiver::start()),
             remote_desktop_texture: None,
             remote_camera_texture: None,
+
+            mock_source: Some(crate::network::InternalMockSource::start()),
+            is_mock_active: true,
+            mock_desktop_texture: None,
+            mock_camera_texture: None,
 
             benchmark_results: None,
             benchmark_matrix: Some(default_matrix),
@@ -530,7 +542,52 @@ impl eframe::App for NanocordApp {
             }
         }
 
-        // 4. Приём результатов бенчмарка
+        // 5. Приём кадров от встроенного мок-источника
+        if let Some(ref mock) = self.mock_source {
+            let mut latest_mock_dt = None;
+            while let Ok(frame) = mock.desktop_rx.try_recv() {
+                latest_mock_dt = Some(frame);
+            }
+            if let Some(frame) = latest_mock_dt {
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                    [frame.width as usize, frame.height as usize],
+                    &frame.rgba,
+                );
+                match &mut self.mock_desktop_texture {
+                    Some(tex) => tex.set(color_image, egui::TextureOptions::LINEAR),
+                    None => {
+                        self.mock_desktop_texture = Some(ctx.load_texture(
+                            "mock_desktop_live",
+                            color_image,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                    }
+                }
+            }
+
+            let mut latest_mock_cam = None;
+            while let Ok(frame) = mock.camera_rx.try_recv() {
+                latest_mock_cam = Some(frame);
+            }
+            if let Some(frame) = latest_mock_cam {
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                    [frame.width as usize, frame.height as usize],
+                    &frame.rgba,
+                );
+                match &mut self.mock_camera_texture {
+                    Some(tex) => tex.set(color_image, egui::TextureOptions::LINEAR),
+                    None => {
+                        self.mock_camera_texture = Some(ctx.load_texture(
+                            "mock_camera_live",
+                            color_image,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // 6. Приём результатов бенчмарка
         if let Some(rx) = &self.bench_rx {
             if let Ok(results) = rx.try_recv() {
                 let matrix = build_benchmark_matrix(&results, self.native_width, self.native_height, self.native_hz);
@@ -634,6 +691,7 @@ impl NanocordApp {
                 StageSource::RemoteCamera => "Камера собеседника",
                 StageSource::LocalDesktop => "Ваш рабочий стол",
                 StageSource::LocalCamera => "Ваша веб-камера",
+                StageSource::MockSource => "Мок-источник (60 FPS Test Pattern + BGM)",
             };
             ui.label(egui::RichText::new(stage_name).color(Color32::WHITE).strong().size(14.0));
 
@@ -790,10 +848,11 @@ impl NanocordApp {
             StageSource::RemoteCamera => "Камера собеседника (Выключена)",
             StageSource::LocalDesktop => "Ваш рабочий стол (DirectX 11 Live Capture)",
             StageSource::LocalCamera => "Ваша веб-камера (BisonCam,NB Pro Live)",
+            StageSource::MockSource => "Мок-источник (60 FPS Test Pattern • BGM Direct)",
         };
         let src_badge_rect = Rect::from_min_size(
             Pos2::new(video_rect.left() + 14.0, video_rect.bottom() - 36.0),
-            Vec2::new(280.0, 26.0),
+            Vec2::new(320.0, 26.0),
         );
         painter.rect_filled(src_badge_rect, CornerRadius::same(5), Color32::from_rgba_unmultiplied(12, 14, 18, 220));
         painter.text(src_badge_rect.center(), egui::Align2::CENTER_CENTER, stage_title, egui::FontId::proportional(11.0), Color32::from_rgb(220, 225, 235));
@@ -808,7 +867,7 @@ impl NanocordApp {
             let mut sb_ui = ui.new_child(egui::UiBuilder::new().max_rect(sidebar_rect.shrink(10.0)));
             sb_ui.vertical(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("УЧАСТНИКИ И ПОТОКИ (4)").strong().size(11.5).color(Color32::from_rgb(148, 155, 164)));
+                    ui.label(egui::RichText::new("УЧАСТНИКИ И ПОТОКИ (5)").strong().size(11.5).color(Color32::from_rgb(148, 155, 164)));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(egui::RichText::new("Комната: NC-7829-X").size(10.5).weak());
                     });
@@ -819,6 +878,9 @@ impl NanocordApp {
                 egui::ScrollArea::vertical()
                     .max_height(scroll_h)
                     .show(ui, |ui| {
+                        let mock_sub = if self.is_mock_active { "60 FPS • BGM Активен" } else { "60 FPS • Синтетический" };
+                        self.render_feed_card(ui, "Мок-источник (P2P Test)", mock_sub, StageSource::MockSource);
+                        ui.add_space(8.0);
                         self.render_feed_card(ui, "Экран собеседника", "1080p • Ожидание", StageSource::RemoteDesktop);
                         ui.add_space(8.0);
                         self.render_feed_card(ui, "Камера собеседника", "720p • Выключена", StageSource::RemoteCamera);
@@ -952,14 +1014,17 @@ impl NanocordApp {
                 self.active_tab = Tab::AudioAndSpectrum;
             }
 
-            // 7. Иконка P2P Сети (Mock клиент nanocord_mock.exe)
+            // 7. Иконка P2P Сети и встроенного Мок-источника
             let is_peer_connected = self.p2p_receiver.as_ref().map(|r| r.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
-            let net_bg = if is_peer_connected { Color32::from_rgb(35, 165, 90) } else { Color32::from_rgb(45, 48, 56) };
+            let net_bg = if is_peer_connected || self.is_mock_active { Color32::from_rgb(35, 165, 90) } else { Color32::from_rgb(45, 48, 56) };
             let telem_info = self.p2p_receiver.as_ref().map(|r| r.telemetry.read().unwrap().clone()).unwrap_or_default();
-            let hover_tip = if is_peer_connected {
+            let hover_tip = if self.is_mock_active {
+                let track = self.mock_source.as_ref().map(|m| m.bgm_player.lock().unwrap().current_track_name()).unwrap_or_default();
+                format!("Встроенный Мок-источник активен!\n60 FPS • Без сокетов и сетевых лагов\nТрек: {}\nНажмите для включения/выключения", track)
+            } else if is_peer_connected {
                 format!("Mock-собеседник подключен!\nFPS: {:.1} • Скорость: {:.1} Mbps • Пинг: {:.1} ms\nТрек: {}\nНажмите для перехода на удаленный экран", telem_info.fps, telem_info.bitrate_mbps, telem_info.latency_ms, telem_info.current_track)
             } else {
-                "P2P-сервер слушает 127.0.0.1:48120\nЗапустите nanocord_mock.exe для трансляции\nНажмите для запуска nanocord_mock.exe".to_string()
+                "Мок-источник (Тестовый генератор 60 FPS + BGM)\nНажмите для мгновенного запуска встроенного мока\nИли запустите nanocord_mock.exe".to_string()
             };
 
             if ui.add(egui::Button::new(egui::RichText::new("📡").size(16.0).color(Color32::WHITE))
@@ -969,10 +1034,18 @@ impl NanocordApp {
                 .on_hover_text(hover_tip)
                 .clicked()
             {
-                if is_peer_connected {
-                    self.active_stage = StageSource::RemoteDesktop;
+                if self.is_mock_active {
+                    if let Some(mock) = self.mock_source.take() {
+                        mock.stop();
+                    }
+                    self.is_mock_active = false;
+                    if self.active_stage == StageSource::MockSource {
+                        self.active_stage = StageSource::LocalDesktop;
+                    }
                 } else {
-                    let _ = std::process::Command::new(".\\nanocord_mock.exe").spawn();
+                    self.mock_source = Some(crate::network::InternalMockSource::start());
+                    self.is_mock_active = true;
+                    self.active_stage = StageSource::MockSource;
                 }
             }
 
@@ -1209,6 +1282,83 @@ impl NanocordApp {
                 }
                 }
             }
+            StageSource::MockSource => {
+                if let Some(tex) = self.mock_desktop_texture.as_ref() {
+                    let draw_rect = if self.fit_aspect_ratio {
+                        let [tw, th] = tex.size();
+                        aspect_fit(rect, tw as f32, th as f32)
+                    } else {
+                        rect
+                    };
+                    if draw_rect != rect {
+                        painter.rect_filled(rect, CornerRadius::same(6), Color32::from_rgb(12, 14, 18));
+                    }
+                    painter.image(
+                        tex.id(),
+                        draw_rect,
+                        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+
+                    // Picture-in-Picture для камеры мока
+                    if self.is_camera_pip && !is_thumb {
+                        if let Some(cam_tex) = self.mock_camera_texture.as_ref() {
+                            let pip_w = (draw_rect.width() * 0.22).clamp(120.0, 260.0);
+                            let pip_h = pip_w * (9.0 / 16.0);
+                            let pip_rect = Rect::from_min_size(
+                                Pos2::new(draw_rect.right() - pip_w - 12.0, draw_rect.bottom() - pip_h - 12.0),
+                                Vec2::new(pip_w, pip_h),
+                            );
+                            painter.rect_filled(pip_rect, CornerRadius::same(6), Color32::from_rgb(10, 12, 16));
+                            painter.rect_stroke(pip_rect, CornerRadius::same(6), Stroke::new(1.5, Color32::from_rgb(88, 101, 242)), egui::StrokeKind::Inside);
+                            painter.image(
+                                cam_tex.id(),
+                                pip_rect,
+                                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+
+                            let badge_rect = Rect::from_min_size(
+                                Pos2::new(pip_rect.left() + 6.0, pip_rect.top() + 6.0),
+                                Vec2::new(60.0, 16.0),
+                            );
+                            painter.rect_filled(badge_rect, CornerRadius::same(3), Color32::from_rgba_unmultiplied(0, 0, 0, 180));
+                            painter.text(badge_rect.center(), egui::Align2::CENTER_CENTER, "MOCK CAM", egui::FontId::proportional(8.5), Color32::WHITE);
+                        }
+                    }
+                } else {
+                    painter.rect_filled(rect, CornerRadius::same(6), Color32::from_rgb(16, 20, 28));
+                    let center = rect.center();
+                    let mon_w = 90.0;
+                    let mon_h = 56.0;
+                    let mon_rect = Rect::from_center_size(Pos2::new(center.x, center.y - (if is_thumb { 0.0 } else { 35.0 })), Vec2::new(mon_w, mon_h));
+                    if !is_thumb {
+                        painter.rect_stroke(mon_rect, CornerRadius::same(5), Stroke::new(2.0, Color32::from_rgb(88, 101, 242)), egui::StrokeKind::Inside);
+                        painter.text(
+                            Pos2::new(center.x, center.y + 20.0),
+                            egui::Align2::CENTER_CENTER,
+                            "Встроенный мок-источник 60 FPS выключен",
+                            egui::FontId::proportional(15.0),
+                            Color32::from_rgb(225, 230, 242),
+                        );
+                        painter.text(
+                            Pos2::new(center.x, center.y + 44.0),
+                            egui::Align2::CENTER_CENTER,
+                            "Нажмите кнопку 📡 в нижнем доке для мгновенного запуска",
+                            egui::FontId::proportional(12.0),
+                            Color32::from_rgb(130, 142, 165),
+                        );
+                    } else {
+                        painter.text(
+                            center,
+                            egui::Align2::CENTER_CENTER,
+                            "Мок 60 FPS",
+                            egui::FontId::proportional(11.0),
+                            Color32::from_rgb(150, 160, 180),
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -1252,10 +1402,18 @@ impl NanocordApp {
 
         // Двойной клик -> Во весь экран! Одиночный клик -> Выбор источника на сцену
         if response.double_clicked() || (response.clicked() && fs_icon_hovered) {
+            if source == StageSource::MockSource && self.mock_source.is_none() {
+                self.mock_source = Some(crate::network::InternalMockSource::start());
+                self.is_mock_active = true;
+            }
             self.active_stage = source;
             self.is_fullscreen = !self.is_fullscreen;
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
         } else if response.clicked() {
+            if source == StageSource::MockSource && self.mock_source.is_none() {
+                self.mock_source = Some(crate::network::InternalMockSource::start());
+                self.is_mock_active = true;
+            }
             self.active_stage = source;
         }
 
@@ -1280,11 +1438,23 @@ impl NanocordApp {
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(ref rx) = self.p2p_receiver {
-                    let track = rx.telemetry.read().unwrap().current_track.clone();
-                    if !track.is_empty() {
-                        ui.label(egui::RichText::new(format!("🎶 Играет: {}", track)).color(Color32::from_rgb(35, 165, 90)).strong());
+                let mut now_track = None;
+                if let Some(ref mock) = self.mock_source {
+                    let t = mock.bgm_player.lock().unwrap().current_track_name();
+                    if !t.is_empty() {
+                        now_track = Some(t);
                     }
+                }
+                if now_track.is_none() {
+                    if let Some(ref rx) = self.p2p_receiver {
+                        let track = rx.telemetry.read().unwrap().current_track.clone();
+                        if !track.is_empty() {
+                            now_track = Some(track);
+                        }
+                    }
+                }
+                if let Some(track) = now_track {
+                    ui.label(egui::RichText::new(format!("🎶 Играет: {}", track)).color(Color32::from_rgb(35, 165, 90)).strong());
                 }
             });
         });

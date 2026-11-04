@@ -207,6 +207,81 @@ impl P2PReceiver {
     }
 }
 
+/// Встроенный в Nanocord генератор мок-источника (без внешних процессов и сокетов, 60 FPS + BGM)
+pub struct InternalMockSource {
+    pub is_running: Arc<AtomicBool>,
+    pub desktop_rx: Receiver<NetworkPeerFrame>,
+    pub camera_rx: Receiver<NetworkPeerFrame>,
+    pub bgm_player: Arc<Mutex<BgmPlayer>>,
+}
+
+impl InternalMockSource {
+    pub fn start() -> Self {
+        let is_running = Arc::new(AtomicBool::new(true));
+        let (dt_tx, dt_rx) = sync_channel(2);
+        let (cam_tx, cam_rx) = sync_channel(2);
+
+        let mut player = BgmPlayer::new();
+        player.start_auto();
+        let bgm_player = Arc::new(Mutex::new(player));
+
+        let running_clone = is_running.clone();
+        let bgm_clone = bgm_player.clone();
+
+        thread::spawn(move || {
+            let mut dt_seq = 0u64;
+            let mut cam_seq = 0u64;
+            let start_time = Instant::now();
+            let frame_dur = Duration::from_millis(16); // 60 FPS
+
+            while running_clone.load(Ordering::Relaxed) {
+                let loop_start = Instant::now();
+                dt_seq += 1;
+                let elapsed = start_time.elapsed().as_secs_f32();
+                let track = bgm_clone.lock().unwrap().current_track_name();
+
+                // 1. Генерация 60 FPS экрана (1280x720)
+                let dt_rgba = generate_mock_desktop_frame(DT_WIDTH, DT_HEIGHT, dt_seq, elapsed, &track);
+                let _ = dt_tx.try_send(NetworkPeerFrame {
+                    width: DT_WIDTH,
+                    height: DT_HEIGHT,
+                    rgba: dt_rgba,
+                });
+
+                // 2. Генерация 30 FPS камеры (640x360)
+                if dt_seq % 2 == 0 {
+                    cam_seq += 1;
+                    let cam_rgba = generate_mock_camera_frame(CAM_WIDTH, CAM_HEIGHT, cam_seq, elapsed);
+                    let _ = cam_tx.try_send(NetworkPeerFrame {
+                        width: CAM_WIDTH,
+                        height: CAM_HEIGHT,
+                        rgba: cam_rgba,
+                    });
+                }
+
+                let elapsed_frame = loop_start.elapsed();
+                if frame_dur > elapsed_frame {
+                    thread::sleep(frame_dur - elapsed_frame);
+                }
+            }
+
+            bgm_clone.lock().unwrap().stop();
+        });
+
+        Self {
+            is_running,
+            desktop_rx: dt_rx,
+            camera_rx: cam_rx,
+            bgm_player,
+        }
+    }
+
+    pub fn stop(&self) {
+        self.is_running.store(false, Ordering::Relaxed);
+        self.bgm_player.lock().unwrap().stop();
+    }
+}
+
 /// Клиентский передатчик P2P потока для отдельного nanocord_mock.exe через Windows Shared Memory
 pub struct P2PSender {
     pub is_running: Arc<AtomicBool>,
