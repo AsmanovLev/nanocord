@@ -26,6 +26,7 @@ pub struct AudioWaveform {
     pub peak_db: f32,
     pub volume: f32,
     pub is_muted: bool,
+    pub smoothed_rms: f32,
 }
 
 impl AudioWaveform {
@@ -39,6 +40,7 @@ impl AudioWaveform {
             peak_db: -60.0,
             volume: 1.0,
             is_muted: false,
+            smoothed_rms: 0.0,
         }
     }
 
@@ -46,6 +48,7 @@ impl AudioWaveform {
     pub fn push_real_sample(&mut self, min_val: f32, max_val: f32, rms: f32, peak_db: f32) {
         if self.is_muted {
             self.peak_db = -60.0;
+            self.smoothed_rms = 0.0;
             self.history.pop_front();
             self.history.push_back(WaveformPoint { min_val: 0.0, max_val: 0.0, rms: 0.0 });
         } else {
@@ -54,6 +57,14 @@ impl AudioWaveform {
             let scaled_min = (min_val * vol).clamp(-1.0, 1.0);
             let scaled_max = (max_val * vol).clamp(-1.0, 1.0);
             let scaled_rms = (rms * vol).clamp(0.0, 1.0);
+
+            // Плавное сглаживание для анимации пузырька громкости в кнопке
+            if scaled_rms > self.smoothed_rms {
+                self.smoothed_rms = self.smoothed_rms * 0.35 + scaled_rms * 0.65;
+            } else {
+                self.smoothed_rms = self.smoothed_rms * 0.82 + scaled_rms * 0.18;
+            }
+
             self.history.pop_front();
             self.history.push_back(WaveformPoint {
                 min_val: scaled_min,
@@ -190,9 +201,8 @@ pub struct NanocordApp {
     pub game_waveform: AudioWaveform,
     pub anim_time: f32,
 
-    // Сетевой P2P-тест с музыкой
-    pub net_test: Option<crate::network::NetworkTestController>,
-    pub is_net_test_active: bool,
+    // Сетевой P2P-приёмник от nanocord_mock.exe
+    pub p2p_receiver: Option<crate::network::P2PReceiver>,
     pub remote_desktop_texture: Option<egui::TextureHandle>,
     pub remote_camera_texture: Option<egui::TextureHandle>,
 
@@ -280,8 +290,7 @@ impl Default for NanocordApp {
             game_waveform: AudioWaveform::new(),
             anim_time: 0.0,
 
-            net_test: None,
-            is_net_test_active: false,
+            p2p_receiver: Some(crate::network::P2PReceiver::start()),
             remote_desktop_texture: None,
             remote_camera_texture: None,
 
@@ -443,9 +452,9 @@ impl eframe::App for NanocordApp {
             }
         }
 
-        // 4. Приём кадров удаленного собеседника из локального P2P теста сети
-        if let Some(ref test) = self.net_test {
-            while let Ok(frame) = test.desktop_rx.try_recv() {
+        // 4. Приём кадров удаленного собеседника из P2P сервера (nanocord_mock.exe)
+        if let Some(ref rx) = self.p2p_receiver {
+            while let Ok(frame) = rx.desktop_rx.try_recv() {
                 let color_image = egui::ColorImage::from_rgba_unmultiplied(
                     [frame.width as usize, frame.height as usize],
                     &frame.rgba,
@@ -461,7 +470,7 @@ impl eframe::App for NanocordApp {
                     }
                 }
             }
-            while let Ok(frame) = test.camera_rx.try_recv() {
+            while let Ok(frame) = rx.camera_rx.try_recv() {
                 let color_image = egui::ColorImage::from_rgba_unmultiplied(
                     [frame.width as usize, frame.height as usize],
                     &frame.rgba,
@@ -793,18 +802,51 @@ impl NanocordApp {
         dock_ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 0.0);
 
-            // 1. Иконка Микрофона (MD круг 42px)
-            let mic_icon = if self.is_mic_muted { "🔇" } else { "🎤" };
-            let mic_bg = if self.is_mic_muted { Color32::from_rgb(218, 55, 60) } else { Color32::from_rgb(35, 165, 90) };
-            if ui.add(egui::Button::new(egui::RichText::new(mic_icon).size(16.0).color(Color32::WHITE))
-                .fill(mic_bg)
-                .min_size(Vec2::new(42.0, 42.0))
-                .corner_radius(CornerRadius::same(21)))
-                .on_hover_text(if self.is_mic_muted { "Включить микрофон (M)" } else { "Выключить микрофон (M)" })
-                .clicked()
-            {
+            // 1. Иконка Микрофона (MD круг 42px с динамическим жидким пузырьком громкости)
+            let (mic_rect, mic_resp) = ui.allocate_exact_size(Vec2::new(42.0, 42.0), egui::Sense::click());
+            let mic_center = mic_rect.center();
+            let mic_radius = 21.0;
+            let mic_painter = ui.painter();
+
+            if self.is_mic_muted {
+                // Выключен: красный круг
+                mic_painter.circle_filled(mic_center, mic_radius, Color32::from_rgb(218, 55, 60));
+                mic_painter.circle_stroke(mic_center, mic_radius, Stroke::new(1.0, Color32::from_rgb(240, 80, 85)));
+                mic_painter.text(mic_center, egui::Align2::CENTER_CENTER, "🔇", egui::FontId::proportional(16.0), Color32::WHITE);
+            } else {
+                // По умолчанию: серый круг в цвет остальных кнопок дока
+                mic_painter.circle_filled(mic_center, mic_radius, Color32::from_rgb(45, 48, 56));
+                mic_painter.circle_stroke(mic_center, mic_radius, Stroke::new(1.0, Color32::from_rgb(60, 64, 76)));
+
+                // Жидкий зелёный пузырек, поднимающийся снизу вверх от уровня громкости
+                let vol_norm = (self.mic_waveform.smoothed_rms * 3.0).clamp(0.0, 1.0);
+                if vol_norm > 0.02 {
+                    let fill_h = mic_rect.height() * vol_norm;
+                    let fill_clip = Rect::from_min_max(
+                        Pos2::new(mic_rect.left(), mic_rect.bottom() - fill_h),
+                        mic_rect.max,
+                    );
+                    mic_painter.with_clip_rect(fill_clip).circle_filled(mic_center, mic_radius, Color32::from_rgb(35, 165, 90));
+
+                    // Светящийся гребень пузырька на границе уровня
+                    let crest_y = mic_rect.bottom() - fill_h;
+                    mic_painter.line_segment(
+                        [Pos2::new(mic_rect.left() + 4.0, crest_y), Pos2::new(mic_rect.right() - 4.0, crest_y)],
+                        Stroke::new(1.5, Color32::from_rgb(95, 235, 150)),
+                    );
+                }
+
+                if mic_resp.hovered() {
+                    mic_painter.circle_stroke(mic_center, mic_radius, Stroke::new(1.5, Color32::from_rgb(88, 101, 242)));
+                }
+
+                mic_painter.text(mic_center, egui::Align2::CENTER_CENTER, "🎤", egui::FontId::proportional(16.0), Color32::WHITE);
+            }
+
+            if mic_resp.clicked() {
                 self.is_mic_muted = !self.is_mic_muted;
             }
+            mic_resp.on_hover_text(if self.is_mic_muted { "Включить микрофон (M)" } else { "Выключить микрофон (M)" });
 
             // 2. Иконка Звука системы (Deafen)
             let deaf_icon = if self.is_deafened { "🔈" } else { "🎧" };
@@ -868,26 +910,27 @@ impl NanocordApp {
                 self.active_tab = Tab::AudioAndSpectrum;
             }
 
-            // 7. Иконка Теста P2P Сети + Музыки
-            let net_bg = if self.is_net_test_active { Color32::from_rgb(35, 165, 90) } else { Color32::from_rgb(45, 48, 56) };
+            // 7. Иконка P2P Сети (Mock клиент nanocord_mock.exe)
+            let is_peer_connected = self.p2p_receiver.as_ref().map(|r| r.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+            let net_bg = if is_peer_connected { Color32::from_rgb(35, 165, 90) } else { Color32::from_rgb(45, 48, 56) };
+            let telem_info = self.p2p_receiver.as_ref().map(|r| r.telemetry.read().unwrap().clone()).unwrap_or_default();
+            let hover_tip = if is_peer_connected {
+                format!("Mock-собеседник подключен!\nFPS: {:.1} • Скорость: {:.1} Mbps • Пинг: {:.1} ms\nТрек: {}\nНажмите для перехода на удаленный экран", telem_info.fps, telem_info.bitrate_mbps, telem_info.latency_ms, telem_info.current_track)
+            } else {
+                "P2P-сервер слушает 127.0.0.1:48120\nЗапустите nanocord_mock.exe для трансляции\nНажмите для запуска nanocord_mock.exe".to_string()
+            };
+
             if ui.add(egui::Button::new(egui::RichText::new("📡").size(16.0).color(Color32::WHITE))
                 .fill(net_bg)
                 .min_size(Vec2::new(42.0, 42.0))
                 .corner_radius(CornerRadius::same(21)))
-                .on_hover_text(if self.is_net_test_active { "Остановить тест P2P сети и музыку" } else { "Запустить тест P2P сети (видеопотоки + музыка из Downloads)" })
+                .on_hover_text(hover_tip)
                 .clicked()
             {
-                if self.is_net_test_active {
-                    if let Some(ref test) = self.net_test {
-                        test.stop();
-                    }
-                    self.net_test = None;
-                    self.is_net_test_active = false;
-                } else {
-                    let test = crate::network::NetworkTestController::start();
-                    self.net_test = Some(test);
-                    self.is_net_test_active = true;
+                if is_peer_connected {
                     self.active_stage = StageSource::RemoteDesktop;
+                } else {
+                    let _ = std::process::Command::new(".\\nanocord_mock.exe").spawn();
                 }
             }
 
@@ -899,11 +942,6 @@ impl NanocordApp {
                 .on_hover_text("Завершить звонок")
                 .clicked()
             {
-                if let Some(ref test) = self.net_test {
-                    test.stop();
-                }
-                self.net_test = None;
-                self.is_net_test_active = false;
                 self.is_streaming.store(false, Ordering::Relaxed);
                 self.active_stage = StageSource::LocalDesktop;
             }
@@ -1200,8 +1238,11 @@ impl NanocordApp {
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(ref test) = self.net_test {
-                    ui.label(egui::RichText::new(format!("🎶 Играет: {}", test.current_track)).color(Color32::from_rgb(35, 165, 90)).strong());
+                if let Some(ref rx) = self.p2p_receiver {
+                    let track = rx.telemetry.read().unwrap().current_track.clone();
+                    if !track.is_empty() {
+                        ui.label(egui::RichText::new(format!("🎶 Играет: {}", track)).color(Color32::from_rgb(35, 165, 90)).strong());
+                    }
                 }
             });
         });

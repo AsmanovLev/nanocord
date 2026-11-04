@@ -1,17 +1,13 @@
 #![allow(dead_code, unused_variables, unused_imports)]
 #![windows_subsystem = "windows"]
 
-mod audio;
-mod benchmark;
-mod camera;
-mod capture;
-pub mod network;
-mod nvenc;
-mod ui;
-
-use capture::DxgiCapture;
-use nvenc::NvencEncoder;
-use ui::NanocordApp;
+use nanocord::audio;
+use nanocord::benchmark;
+use nanocord::camera;
+use nanocord::capture::{self, DxgiCapture};
+use nanocord::network;
+use nanocord::nvenc::{self, NvencEncoder};
+use nanocord::ui::{self, NanocordApp};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
 };
