@@ -932,9 +932,29 @@ impl NanocordApp {
 
 impl eframe::App for NanocordApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Проверяем статус P2P подключения
+        let is_srv_connected = self.p2p_server.as_ref().map(|s| s.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+        let is_cli_connected = self.p2p_client.as_ref().map(|c| c.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+        let is_peer_connected = is_srv_connected || is_cli_connected;
+
         // 1. Приём настоящих кадров захвата экрана
         if let Some(ref rx) = self.preview_rx {
             while let Ok(frame) = rx.try_recv() {
+                // Если собеседник подключен, отправляем захваченный кадр экрана в P2P
+                if is_peer_connected {
+                    let net_frame = crate::network::NetworkPeerFrame {
+                        width: frame.width,
+                        height: frame.height,
+                        rgba: frame.rgba.clone(),
+                    };
+                    if let Some(ref srv) = self.p2p_server {
+                        let _ = srv.outgoing_desktop_tx.try_send(net_frame.clone());
+                    }
+                    if let Some(ref cli) = self.p2p_client {
+                        let _ = cli.outgoing_desktop_tx.try_send(net_frame);
+                    }
+                }
+
                 let color_image = egui::ColorImage::from_rgba_unmultiplied(
                     [frame.width as usize, frame.height as usize],
                     &frame.rgba,
@@ -955,6 +975,21 @@ impl eframe::App for NanocordApp {
         // 2. Приём настоящих кадров с веб-камеры (nokhwa)
         if let Some(ref rx) = self.camera_rx {
             while let Ok(frame) = rx.try_recv() {
+                // Если собеседник подключен и камера включена, отправляем кадр веб-камеры
+                if is_peer_connected && self.is_camera_on {
+                    let net_frame = crate::network::NetworkPeerFrame {
+                        width: frame.width,
+                        height: frame.height,
+                        rgba: frame.rgba.clone(),
+                    };
+                    if let Some(ref srv) = self.p2p_server {
+                        let _ = srv.outgoing_camera_tx.try_send(net_frame.clone());
+                    }
+                    if let Some(ref cli) = self.p2p_client {
+                        let _ = cli.outgoing_camera_tx.try_send(net_frame);
+                    }
+                }
+
                 let color_image = egui::ColorImage::from_rgba_unmultiplied(
                     [frame.width as usize, frame.height as usize],
                     &frame.rgba,
@@ -972,11 +1007,28 @@ impl eframe::App for NanocordApp {
             }
         }
 
-        // 3. Обновление двухканальной звуковой волны (10 сек буфер) из WASAPI
+        // 3. Обновление двухканальной звуковой волны (10 сек буфер) из WASAPI и отправка в P2P
         self.mic_waveform.is_muted = self.is_mic_muted;
         if let Some(ref rx) = self.mic_audio_rx {
             while let Ok(pkt) = rx.try_recv() {
                 self.mic_waveform.push_real_sample(pkt.min_sample, pkt.max_sample, pkt.rms, pkt.peak_db);
+
+                // Отправка аудио микрофона в P2P
+                if is_peer_connected && !self.is_mic_muted {
+                    let net_audio = crate::network::NetworkAudioPacket::new(
+                        pkt.peak_db,
+                        pkt.min_sample,
+                        pkt.max_sample,
+                        pkt.rms,
+                        pkt.bins,
+                    );
+                    if let Some(ref srv) = self.p2p_server {
+                        let _ = srv.outgoing_audio_tx.try_send(net_audio.clone());
+                    }
+                    if let Some(ref cli) = self.p2p_client {
+                        let _ = cli.outgoing_audio_tx.try_send(net_audio);
+                    }
+                }
             }
         }
 
@@ -987,7 +1039,7 @@ impl eframe::App for NanocordApp {
             }
         }
 
-        // 4. Приём входящих кадров от P2P Сервера или Клиента (IPv6 + IPv4)
+        // 4. Приём входящих кадров и аудио от P2P Сервера или Клиента (IPv6 + IPv4)
         let mut latest_remote_dt = None;
         let mut latest_remote_cam = None;
 
@@ -998,6 +1050,11 @@ impl eframe::App for NanocordApp {
             while let Ok(frame) = srv.camera_rx.try_recv() {
                 latest_remote_cam = Some(frame);
             }
+            while let Ok(audio) = srv.audio_rx.try_recv() {
+                if !self.is_deafened {
+                    self.game_waveform.push_real_sample(audio.min_sample, audio.max_sample, audio.rms, audio.peak_db);
+                }
+            }
         }
         if let Some(ref cli) = self.p2p_client {
             while let Ok(frame) = cli.desktop_rx.try_recv() {
@@ -1005,6 +1062,11 @@ impl eframe::App for NanocordApp {
             }
             while let Ok(frame) = cli.camera_rx.try_recv() {
                 latest_remote_cam = Some(frame);
+            }
+            while let Ok(audio) = cli.audio_rx.try_recv() {
+                if !self.is_deafened {
+                    self.game_waveform.push_real_sample(audio.min_sample, audio.max_sample, audio.rms, audio.peak_db);
+                }
             }
         }
 

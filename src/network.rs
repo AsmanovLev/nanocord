@@ -14,6 +14,66 @@ pub struct NetworkPeerFrame {
     pub rgba: Vec<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct NetworkAudioPacket {
+    pub peak_db: f32,
+    pub min_sample: f32,
+    pub max_sample: f32,
+    pub rms: f32,
+    pub bins: [f32; 20],
+}
+
+impl Default for NetworkAudioPacket {
+    fn default() -> Self {
+        Self {
+            peak_db: -60.0,
+            min_sample: 0.0,
+            max_sample: 0.0,
+            rms: 0.0,
+            bins: [0.0; 20],
+        }
+    }
+}
+
+impl NetworkAudioPacket {
+    pub fn new(peak_db: f32, min_sample: f32, max_sample: f32, rms: f32, bins: [f32; 20]) -> Self {
+        Self { peak_db, min_sample, max_sample, rms, bins }
+    }
+
+    pub fn to_bytes(&self) -> [u8; 96] {
+        let mut buf = [0u8; 96];
+        buf[0..4].copy_from_slice(&self.peak_db.to_le_bytes());
+        buf[4..8].copy_from_slice(&self.min_sample.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.max_sample.to_le_bytes());
+        buf[12..16].copy_from_slice(&self.rms.to_le_bytes());
+        for i in 0..20 {
+            buf[16 + i * 4..20 + i * 4].copy_from_slice(&self.bins[i].to_le_bytes());
+        }
+        buf
+    }
+
+    pub fn from_bytes(slice: &[u8]) -> Option<Self> {
+        if slice.len() < 96 {
+            return None;
+        }
+        let peak_db = f32::from_le_bytes(slice[0..4].try_into().ok()?);
+        let min_sample = f32::from_le_bytes(slice[4..8].try_into().ok()?);
+        let max_sample = f32::from_le_bytes(slice[8..12].try_into().ok()?);
+        let rms = f32::from_le_bytes(slice[12..16].try_into().ok()?);
+        let mut bins = [0.0f32; 20];
+        for i in 0..20 {
+            bins[i] = f32::from_le_bytes(slice[16 + i * 4..20 + i * 4].try_into().ok()?);
+        }
+        Some(Self {
+            peak_db,
+            min_sample,
+            max_sample,
+            rms,
+            bins,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct P2PTelemetry {
     pub is_connected: bool,
@@ -261,8 +321,10 @@ pub struct P2PNetworkServer {
     pub status: Arc<RwLock<String>>,
     pub desktop_rx: Receiver<NetworkPeerFrame>,
     pub camera_rx: Receiver<NetworkPeerFrame>,
+    pub audio_rx: Receiver<NetworkAudioPacket>,
     pub outgoing_desktop_tx: SyncSender<NetworkPeerFrame>,
     pub outgoing_camera_tx: SyncSender<NetworkPeerFrame>,
+    pub outgoing_audio_tx: SyncSender<NetworkAudioPacket>,
     pub telemetry: Arc<RwLock<P2PTelemetry>>,
 }
 
@@ -276,8 +338,10 @@ impl P2PNetworkServer {
 
         let (in_dt_tx, in_dt_rx) = sync_channel(4);
         let (in_cam_tx, in_cam_rx) = sync_channel(4);
+        let (in_aud_tx, in_aud_rx) = sync_channel(16);
         let (out_dt_tx, out_dt_rx) = sync_channel(4);
         let (out_cam_tx, out_cam_rx) = sync_channel(4);
+        let (out_aud_tx, out_aud_rx) = sync_channel(16);
 
         let running_clone = is_running.clone();
         let connected_clone = is_connected.clone();
@@ -363,8 +427,10 @@ impl P2PNetworkServer {
                             connected_clone.clone(),
                             in_dt_tx.clone(),
                             in_cam_tx.clone(),
+                            in_aud_tx.clone(),
                             &out_dt_rx,
                             &out_cam_rx,
+                            &out_aud_rx,
                             telem_clone.clone(),
                         );
 
@@ -397,8 +463,10 @@ impl P2PNetworkServer {
             status,
             desktop_rx: in_dt_rx,
             camera_rx: in_cam_rx,
+            audio_rx: in_aud_rx,
             outgoing_desktop_tx: out_dt_tx,
             outgoing_camera_tx: out_cam_tx,
+            outgoing_audio_tx: out_aud_tx,
             telemetry,
         }
     }
@@ -418,8 +486,10 @@ pub struct P2PNetworkClient {
     pub status: Arc<RwLock<String>>,
     pub desktop_rx: Receiver<NetworkPeerFrame>,
     pub camera_rx: Receiver<NetworkPeerFrame>,
+    pub audio_rx: Receiver<NetworkAudioPacket>,
     pub outgoing_desktop_tx: SyncSender<NetworkPeerFrame>,
     pub outgoing_camera_tx: SyncSender<NetworkPeerFrame>,
+    pub outgoing_audio_tx: SyncSender<NetworkAudioPacket>,
     pub telemetry: Arc<RwLock<P2PTelemetry>>,
 }
 
@@ -432,8 +502,10 @@ impl P2PNetworkClient {
 
         let (in_dt_tx, in_dt_rx) = sync_channel(4);
         let (in_cam_tx, in_cam_rx) = sync_channel(4);
+        let (in_aud_tx, in_aud_rx) = sync_channel(16);
         let (out_dt_tx, out_dt_rx) = sync_channel(4);
         let (out_cam_tx, out_cam_rx) = sync_channel(4);
+        let (out_aud_tx, out_aud_rx) = sync_channel(16);
 
         let running_clone = is_running.clone();
         let connected_clone = is_connected.clone();
@@ -528,8 +600,10 @@ impl P2PNetworkClient {
                     connected_clone.clone(),
                     in_dt_tx.clone(),
                     in_cam_tx.clone(),
+                    in_aud_tx.clone(),
                     &out_dt_rx,
                     &out_cam_rx,
+                    &out_aud_rx,
                     telem_clone.clone(),
                 );
 
@@ -561,8 +635,10 @@ impl P2PNetworkClient {
             status,
             desktop_rx: in_dt_rx,
             camera_rx: in_cam_rx,
+            audio_rx: in_aud_rx,
             outgoing_desktop_tx: out_dt_tx,
             outgoing_camera_tx: out_cam_tx,
+            outgoing_audio_tx: out_aud_tx,
             telemetry,
         }
     }
@@ -580,8 +656,10 @@ fn run_p2p_socket_session(
     is_connected: Arc<AtomicBool>,
     in_dt_tx: SyncSender<NetworkPeerFrame>,
     in_cam_tx: SyncSender<NetworkPeerFrame>,
+    in_aud_tx: SyncSender<NetworkAudioPacket>,
     out_dt_rx: &Receiver<NetworkPeerFrame>,
     out_cam_rx: &Receiver<NetworkPeerFrame>,
+    out_aud_rx: &Receiver<NetworkAudioPacket>,
     telemetry: Arc<RwLock<P2PTelemetry>>,
 ) {
     let mut reader = match stream.try_clone() {
@@ -635,6 +713,10 @@ fn run_p2p_socket_session(
                             payload
                         };
                         let _ = in_cam_tx.try_send(NetworkPeerFrame { width, height, rgba });
+                    } else if msg_type == 3 {
+                        if let Some(audio_pkt) = NetworkAudioPacket::from_bytes(&payload) {
+                            let _ = in_aud_tx.try_send(audio_pkt);
+                        }
                     } else if msg_type == 4 {
                         if payload.len() == 8 {
                             let sent_ns = u64::from_le_bytes(payload.try_into().unwrap());
@@ -713,6 +795,24 @@ fn run_p2p_socket_session(
             sent_any = true;
         }
 
+        if let Ok(audio) = out_aud_rx.try_recv() {
+            let payload = audio.to_bytes();
+            let mut pkt = Vec::with_capacity(12 + payload.len());
+            pkt.extend_from_slice(&0x4E43u16.to_le_bytes());
+            pkt.push(3); // Audio
+            pkt.push(0); // flags
+            pkt.extend_from_slice(&0u16.to_le_bytes());
+            pkt.extend_from_slice(&0u16.to_le_bytes());
+            pkt.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            pkt.extend_from_slice(&payload);
+
+            if writer.write_all(&pkt).is_err() {
+                break;
+            }
+            total_bytes_sent += pkt.len() as u64;
+            sent_any = true;
+        }
+
         if last_ping.elapsed() >= Duration::from_secs(1) {
             last_ping = Instant::now();
             let now_ns = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
@@ -743,7 +843,7 @@ fn run_p2p_socket_session(
         }
 
         if !sent_any {
-            thread::sleep(Duration::from_millis(16));
+            thread::sleep(Duration::from_millis(2));
         }
     }
 
@@ -804,6 +904,197 @@ mod tests {
 
         assert!(client.is_connected.load(Ordering::Relaxed), "Client should be connected via IPv6");
         assert!(server.is_connected.load(Ordering::Relaxed), "Server should have connected client");
+
+        client.stop();
+        server.stop();
+    }
+
+    #[test]
+    fn test_audio_packet_serde() {
+        let mut bins = [0.0f32; 20];
+        bins[0] = 0.12;
+        bins[5] = 0.78;
+        bins[19] = 0.95;
+        let pkt = NetworkAudioPacket::new(-14.5, -0.62, 0.71, 0.38, bins);
+        let bytes = pkt.to_bytes();
+        assert_eq!(bytes.len(), 96);
+        let decoded = NetworkAudioPacket::from_bytes(&bytes).expect("audio decode failed");
+        assert!((decoded.peak_db - (-14.5)).abs() < 1e-4);
+        assert!((decoded.min_sample - (-0.62)).abs() < 1e-4);
+        assert!((decoded.max_sample - 0.71).abs() < 1e-4);
+        assert!((decoded.rms - 0.38).abs() < 1e-4);
+        assert!((decoded.bins[5] - 0.78).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_jpeg_encode_decode_fidelity() {
+        let (w, h) = (320u32, 240u32);
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        for (i, p) in rgba.chunks_exact_mut(4).enumerate() {
+            p[0] = ((i * 3) % 256) as u8;
+            p[1] = ((i * 7) % 256) as u8;
+            p[2] = ((i * 11) % 256) as u8;
+            p[3] = 255;
+        }
+        let jpeg = encode_frame_to_jpeg(w, h, &rgba).expect("encode failed");
+        assert!(!jpeg.is_empty());
+        assert!(jpeg.len() < rgba.len()); // compression effective
+
+        let (dw, dh, decoded_rgba) = decode_frame_from_jpeg(&jpeg).expect("decode failed");
+        assert_eq!(dw, w);
+        assert_eq!(dh, h);
+        assert_eq!(decoded_rgba.len(), rgba.len());
+        let non_zero = decoded_rgba.iter().filter(|&&b| b > 0).count();
+        assert!(non_zero > (decoded_rgba.len() / 2));
+    }
+
+    #[test]
+    fn test_e2e_video_capture_network_decode() {
+        let port = 49160;
+        let code = "Vd9".to_string();
+
+        let server = P2PNetworkServer::start(port, code.clone());
+        thread::sleep(Duration::from_millis(80));
+
+        let client = P2PNetworkClient::connect("[::1]".to_string(), port, code);
+        thread::sleep(Duration::from_millis(250));
+
+        assert!(client.is_connected.load(Ordering::Relaxed));
+        assert!(server.is_connected.load(Ordering::Relaxed));
+
+        // Real frame from GDI capture if available, or synthetic 640x360 frame
+        let (w, h, rgba) = if let Some(buf) = crate::capture::capture_desktop_gdi(640, 360) {
+            (640, 360, buf)
+        } else {
+            let mut buf = vec![42u8; 640 * 360 * 4];
+            for chunk in buf.chunks_exact_mut(4) {
+                chunk[0] = 88;
+                chunk[1] = 101;
+                chunk[2] = 242;
+                chunk[3] = 255;
+            }
+            (640, 360, buf)
+        };
+
+        // Send via client outgoing desktop queue
+        client.outgoing_desktop_tx.send(NetworkPeerFrame {
+            width: w,
+            height: h,
+            rgba: rgba.clone(),
+        }).expect("send failed");
+
+        // Server receives and decodes JPEG frame
+        let start = Instant::now();
+        let mut received = None;
+        while start.elapsed() < Duration::from_secs(3) {
+            if let Ok(frame) = server.desktop_rx.try_recv() {
+                received = Some(frame);
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let recv_frame = received.expect("Server failed to receive e2e video frame");
+        assert_eq!(recv_frame.width, w);
+        assert_eq!(recv_frame.height, h);
+        assert_eq!(recv_frame.rgba.len(), (w * h * 4) as usize);
+
+        client.stop();
+        server.stop();
+    }
+
+    #[test]
+    fn test_e2e_audio_capture_network_decode() {
+        let port = 49170;
+        let code = "Au1".to_string();
+
+        let server = P2PNetworkServer::start(port, code.clone());
+        thread::sleep(Duration::from_millis(80));
+
+        let client = P2PNetworkClient::connect("[::1]".to_string(), port, code);
+        thread::sleep(Duration::from_millis(250));
+
+        assert!(client.is_connected.load(Ordering::Relaxed));
+
+        let mut test_bins = [0.0f32; 20];
+        test_bins[2] = 0.55;
+        test_bins[9] = 0.88;
+        let audio_pkt = NetworkAudioPacket::new(-16.0, -0.70, 0.75, 0.42, test_bins);
+
+        client.outgoing_audio_tx.send(audio_pkt.clone()).expect("send audio failed");
+
+        let start = Instant::now();
+        let mut received_audio = None;
+        while start.elapsed() < Duration::from_secs(3) {
+            if let Ok(pkt) = server.audio_rx.try_recv() {
+                received_audio = Some(pkt);
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let rx_audio = received_audio.expect("Server failed to receive e2e audio packet");
+        assert!((rx_audio.peak_db - (-16.0)).abs() < 1e-4);
+        assert!((rx_audio.rms - 0.42).abs() < 1e-4);
+        assert!((rx_audio.bins[9] - 0.88).abs() < 1e-4);
+
+        client.stop();
+        server.stop();
+    }
+
+    #[test]
+    fn test_e2e_full_bidirectional_simultaneous_pipeline() {
+        let port = 49180;
+        let code = "Bi8".to_string();
+
+        let server = P2PNetworkServer::start(port, code.clone());
+        thread::sleep(Duration::from_millis(80));
+
+        let client = P2PNetworkClient::connect("[::1]".to_string(), port, code);
+        thread::sleep(Duration::from_millis(250));
+
+        assert!(client.is_connected.load(Ordering::Relaxed));
+        assert!(server.is_connected.load(Ordering::Relaxed));
+
+        // Client sends desktop video + audio to Server
+        let dummy_dt = vec![120u8; 320 * 240 * 4];
+        client.outgoing_desktop_tx.send(NetworkPeerFrame { width: 320, height: 240, rgba: dummy_dt }).unwrap();
+        client.outgoing_audio_tx.send(NetworkAudioPacket::new(-10.0, -0.5, 0.5, 0.3, [0.2; 20])).unwrap();
+
+        // Server sends camera video + audio to Client
+        let dummy_cam = vec![200u8; 160 * 120 * 4];
+        server.outgoing_camera_tx.send(NetworkPeerFrame { width: 160, height: 120, rgba: dummy_cam }).unwrap();
+        server.outgoing_audio_tx.send(NetworkAudioPacket::new(-8.0, -0.4, 0.6, 0.35, [0.4; 20])).unwrap();
+
+        let start = Instant::now();
+        let mut srv_got_dt = false;
+        let mut srv_got_aud = false;
+        let mut cli_got_cam = false;
+        let mut cli_got_aud = false;
+
+        while start.elapsed() < Duration::from_secs(3) {
+            if !srv_got_dt && server.desktop_rx.try_recv().is_ok() {
+                srv_got_dt = true;
+            }
+            if !srv_got_aud && server.audio_rx.try_recv().is_ok() {
+                srv_got_aud = true;
+            }
+            if !cli_got_cam && client.camera_rx.try_recv().is_ok() {
+                cli_got_cam = true;
+            }
+            if !cli_got_aud && client.audio_rx.try_recv().is_ok() {
+                cli_got_aud = true;
+            }
+            if srv_got_dt && srv_got_aud && cli_got_cam && cli_got_aud {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(srv_got_dt, "Server should receive desktop stream from Client");
+        assert!(srv_got_aud, "Server should receive audio stream from Client");
+        assert!(cli_got_cam, "Client should receive camera stream from Server");
+        assert!(cli_got_aud, "Client should receive audio stream from Server");
 
         client.stop();
         server.stop();
