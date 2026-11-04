@@ -1,6 +1,8 @@
 #![allow(dead_code, unused_variables, unused_imports)]
+#![windows_subsystem = "windows"]
 
 mod benchmark;
+mod camera;
 mod capture;
 mod nvenc;
 mod ui;
@@ -19,9 +21,12 @@ fn main() -> eframe::Result<()> {
     let is_bench_mode = args.iter().any(|a| a == "--benchmark");
     let is_cli_mode = args.iter().any(|a| a == "--cli");
 
-    println!("=================================================");
-    println!("   NANOCORD - Ultra-Hardcoded Native Streamer    ");
-    println!("=================================================");
+    if is_test_mode || is_bench_mode || is_cli_mode {
+        attach_console_if_cli();
+        println!("=================================================");
+        println!("   NANOCORD - Ultra-Hardcoded Native Streamer    ");
+        println!("=================================================");
+    }
 
     let cq_quality = 22; // Target Quality (18..24)
     let max_bitrate_mbps = 30; // 30 Mbps cap
@@ -35,19 +40,27 @@ fn main() -> eframe::Result<()> {
     if is_bench_mode {
         println!("[BENCHMARK MODE] Running full hardware latency probe...");
         let results = benchmark::run_full_benchmark();
-        for r in &results {
-            println!(
-                "  {} | {}: Avg Latency: {:.2} ms | Min: {:.2} ms | Max FPS: {} | IDR: {:.1} KB, P: {:.1} KB",
-                r.resolution, r.preset_name, r.avg_latency_ms, r.min_latency_ms, r.max_fps, r.idr_size_kb, r.p_frame_size_kb
-            );
+        let (native_w, native_h) = capture::get_screen_resolution();
+        let max_hz = capture::get_screen_refresh_rate();
+        let matrix = benchmark::build_benchmark_matrix(&results, native_w, native_h, max_hz);
+
+        let fps_targets = benchmark::compute_fps_targets(max_hz);
+        print!("{:<10}", "Resolution");
+        for &fps in &fps_targets {
+            print!(" | {:<12}", format!("{} FPS", fps));
         }
-        let recs = benchmark::generate_recommendations(&results);
-        println!("\n[RECOMMENDED PROFILES]");
-        for rec in &recs {
-            println!(
-                "  • {:<32} -> {:<14} ({:<10}): Latency: {:.2} ms | Budget: {:.1} ms (Headroom: +{:.0}%)",
-                rec.title, rec.res_label, rec.preset_name, rec.latency_ms, rec.frame_budget_ms, rec.headroom_percent
-            );
+        println!();
+        println!("{:-<70}", "");
+        for row in &matrix {
+            print!("{:<10}", row.res_label);
+            for cell in &row.cells {
+                if cell.is_viable {
+                    print!(" | {:<12}", format!("{} ({:.1}ms)", cell.best_preset_name, cell.latency_ms));
+                } else {
+                    print!(" | {:<12}", format!("❌ ({:.1}ms)", cell.latency_ms));
+                }
+            }
+            println!();
         }
         return Ok(());
     }
@@ -60,17 +73,38 @@ fn main() -> eframe::Result<()> {
     // Launch GUI
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([880.0, 560.0])
-            .with_min_inner_size([720.0, 480.0])
-            .with_title("NANOCORD - Ultra-Low Latency Streamer"),
+            .with_inner_size([1120.0, 680.0])
+            .with_min_inner_size([900.0, 560.0])
+            .with_title("NANOCORD"),
         ..Default::default()
     };
 
     eframe::run_native(
         "NANOCORD",
         options,
-        Box::new(|_cc| Ok(Box::new(NanocordApp::default()))),
+        Box::new(|cc| {
+            // Apply sleek dark theme
+            ui::apply_custom_theme(&cc.egui_ctx);
+            Ok(Box::new(NanocordApp::default()))
+        }),
     )
+}
+
+fn attach_console_if_cli() {
+    unsafe {
+        type AttachConsoleFn = unsafe extern "system" fn(u32) -> i32;
+        let k32_name: Vec<u16> = "kernel32.dll\0".encode_utf16().collect();
+        if let Ok(h) = windows::Win32::System::LibraryLoader::LoadLibraryW(windows::core::PCWSTR(k32_name.as_ptr())) {
+            if let Some(proc) = windows::Win32::System::LibraryLoader::GetProcAddress(
+                h,
+                windows::core::PCSTR(b"AttachConsole\0".as_ptr()),
+            ) {
+                let attach: AttachConsoleFn = std::mem::transmute(proc);
+                const ATTACH_PARENT_PROCESS: u32 = 0xFFFFFFFF;
+                let _ = attach(ATTACH_PARENT_PROCESS);
+            }
+        }
+    }
 }
 
 fn run_cli_capture(cq_quality: u8, max_bitrate_mbps: u32) {
@@ -143,7 +177,6 @@ fn run_synthetic_test(cq_quality: u8, max_bitrate_mbps: u32) {
     let width = 1920;
     let height = 1080;
 
-    // Создаем dummy устройство для захвата
     let mut dev = None;
     let mut ctx = None;
     let mut fl = windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
