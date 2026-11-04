@@ -171,24 +171,43 @@ impl DxgiCapture {
 
             let mut out_rgba = vec![0u8; dst_w * dst_h * 4];
 
-            // Быстрый билинейный/nearest пересчёт BGRA -> RGBA
-            for dy in 0..dst_h {
-                let sy = (dy * src_h) / dst_h;
-                let src_row = data_ptr.add(sy * pitch);
-                let dst_offset = dy * dst_w * 4;
+            // Быстрый 1:1 или билинейный пересчёт BGRA -> RGBA (максимальная резкость)
+            if src_w == dst_w && src_h == dst_h {
+                for dy in 0..dst_h {
+                    let src_row = data_ptr.add(dy * pitch);
+                    let dst_offset = dy * dst_w * 4;
+                    for dx in 0..dst_w {
+                        let px = src_row.add(dx * 4);
+                        let b = *px;
+                        let g = *px.add(1);
+                        let r = *px.add(2);
 
-                for dx in 0..dst_w {
-                    let sx = (dx * src_w) / dst_w;
-                    let px = src_row.add(sx * 4);
-                    let b = *px;
-                    let g = *px.add(1);
-                    let r = *px.add(2);
+                        let o = dst_offset + dx * 4;
+                        out_rgba[o] = r;
+                        out_rgba[o + 1] = g;
+                        out_rgba[o + 2] = b;
+                        out_rgba[o + 3] = 255;
+                    }
+                }
+            } else {
+                for dy in 0..dst_h {
+                    let sy = (dy * src_h) / dst_h;
+                    let src_row = data_ptr.add(sy * pitch);
+                    let dst_offset = dy * dst_w * 4;
 
-                    let o = dst_offset + dx * 4;
-                    out_rgba[o] = r;
-                    out_rgba[o + 1] = g;
-                    out_rgba[o + 2] = b;
-                    out_rgba[o + 3] = 255;
+                    for dx in 0..dst_w {
+                        let sx = (dx * src_w) / dst_w;
+                        let px = src_row.add(sx * 4);
+                        let b = *px;
+                        let g = *px.add(1);
+                        let r = *px.add(2);
+
+                        let o = dst_offset + dx * 4;
+                        out_rgba[o] = r;
+                        out_rgba[o + 1] = g;
+                        out_rgba[o + 2] = b;
+                        out_rgba[o + 3] = 255;
+                    }
                 }
             }
 
@@ -312,12 +331,14 @@ pub fn capture_desktop_gdi(target_w: u32, target_h: u32) -> Option<Vec<u8>> {
 
         let old_bm = SelectObject(hdc_mem, HGDIOBJ(hbm.0));
         let _ = BitBlt(hdc_mem, 0, 0, screen_w as i32, screen_h as i32, Some(hdc_screen), 0, 0, SRCCOPY);
+        // В Windows GDI перед вызовом GetDIBits битмап ОБЯЗАТЕЛЬНО должен быть отвязан от DC!
+        SelectObject(hdc_mem, old_bm);
 
         let mut bi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
                 biWidth: screen_w as i32,
-                biHeight: -(screen_h as i32), // Top-down DIB
+                biHeight: screen_h as i32, // Positive = Bottom-up DIB (GetDIBits requires positive height!)
                 biPlanes: 1,
                 biBitCount: 32,
                 biCompression: BI_RGB.0,
@@ -328,7 +349,7 @@ pub fn capture_desktop_gdi(target_w: u32, target_h: u32) -> Option<Vec<u8>> {
 
         let mut src_bgra = vec![0u8; (screen_w * screen_h * 4) as usize];
         let lines = GetDIBits(
-            hdc_mem,
+            hdc_screen,
             hbm,
             0,
             screen_h,
@@ -337,7 +358,6 @@ pub fn capture_desktop_gdi(target_w: u32, target_h: u32) -> Option<Vec<u8>> {
             DIB_RGB_COLORS,
         );
 
-        SelectObject(hdc_mem, old_bm);
         let _ = DeleteObject(HGDIOBJ(hbm.0));
         let _ = DeleteDC(hdc_mem);
         ReleaseDC(None, hdc_screen);
@@ -346,7 +366,7 @@ pub fn capture_desktop_gdi(target_w: u32, target_h: u32) -> Option<Vec<u8>> {
             return None;
         }
 
-        // Быстрое масштабирование BGRA -> RGBA с сохранением четкости
+        // Конвертация bottom-up BGRA -> top-down RGBA с масштабированием
         let src_w = screen_w as usize;
         let src_h = screen_h as usize;
         let dst_w = target_w as usize;
@@ -354,8 +374,11 @@ pub fn capture_desktop_gdi(target_w: u32, target_h: u32) -> Option<Vec<u8>> {
         let mut out_rgba = vec![0u8; dst_w * dst_h * 4];
 
         for dy in 0..dst_h {
-            let sy = (dy * src_h) / dst_h;
-            let src_row = sy * src_w * 4;
+            // Маппим dy (сверху вниз 0..dst_h) на sy bottom-up буфера GDI:
+            // В GDI строка 0 — это низ экрана, строка src_h - 1 — это верх экрана.
+            let sy_top = (dy * src_h) / dst_h;
+            let sy_bottom_up = src_h.saturating_sub(1 + sy_top);
+            let src_row = sy_bottom_up * src_w * 4;
             let dst_row = dy * dst_w * 4;
 
             for dx in 0..dst_w {
@@ -386,31 +409,43 @@ pub fn start_desktop_preview_worker(
     let (tx, rx) = std::sync::mpsc::sync_channel(2);
     std::thread::spawn(move || {
         let mut capture = DxgiCapture::new().ok();
-        let mut last_frame: Option<Vec<u8>> = None;
+        let mut retry_counter = 0usize;
+        let mut first_frame_sent = false;
 
         loop {
             std::thread::sleep(std::time::Duration::from_millis(33)); // ~30 FPS
             let mut new_rgba = None;
+
+            // Периодическая попытка подключить DXGI, если он был потерян
+            if capture.is_none() {
+                retry_counter += 1;
+                if retry_counter % 30 == 0 {
+                    capture = DxgiCapture::new().ok();
+                }
+            }
 
             if let Some(ref mut cap) = capture {
                 match cap.capture_preview_rgba(target_w, target_h) {
                     Ok(Some(rgba)) => {
                         new_rgba = Some(rgba);
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        // Экран статичен (DXGI timeout) — если первый кадр ещё не был отправлен, берем GDI
+                        if !first_frame_sent {
+                            new_rgba = capture_desktop_gdi(target_w, target_h);
+                        }
+                    }
                     Err(_) => {
-                        capture = DxgiCapture::new().ok();
+                        capture = None;
                     }
                 }
-            }
-
-            // Если DXGI не выдал кадр (или статический экран), используем надёжный GDI
-            if new_rgba.is_none() && last_frame.is_none() {
+            } else {
+                // Если DXGI не работает, гарантированно захватываем через быстрый GDI
                 new_rgba = capture_desktop_gdi(target_w, target_h);
             }
 
             if let Some(rgba) = new_rgba {
-                last_frame = Some(rgba.clone());
+                first_frame_sent = true;
                 let _ = tx.try_send(PreviewFrame {
                     width: target_w,
                     height: target_h,

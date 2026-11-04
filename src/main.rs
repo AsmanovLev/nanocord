@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_variables, unused_imports)]
 #![windows_subsystem = "windows"]
 
+mod audio;
 mod benchmark;
 mod camera;
 mod capture;
@@ -16,16 +17,74 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 
 fn main() -> eframe::Result<()> {
+    std::panic::set_hook(Box::new(|info| {
+        let _ = std::fs::write("panic.txt", format!("{:#?}", info));
+    }));
     let args: Vec<String> = std::env::args().collect();
     let is_test_mode = args.iter().any(|a| a == "--test");
     let is_bench_mode = args.iter().any(|a| a == "--benchmark");
     let is_cli_mode = args.iter().any(|a| a == "--cli");
+    let is_test_capture = args.iter().any(|a| a == "--test-capture");
 
-    if is_test_mode || is_bench_mode || is_cli_mode {
+    if is_test_mode || is_bench_mode || is_cli_mode || is_test_capture {
         attach_console_if_cli();
         println!("=================================================");
         println!("   NANOCORD - Ultra-Hardcoded Native Streamer    ");
         println!("=================================================");
+    }
+
+    if is_test_capture {
+        use std::io::Write;
+        let mut f = std::fs::File::create("debug_capture.txt").unwrap();
+        println!("Starting test-capture...");
+        writeln!(f, "Starting test-capture...").unwrap();
+        f.flush().unwrap();
+
+        let (native_w, native_h) = capture::get_screen_resolution();
+        println!("Detected native resolution: {}x{}", native_w, native_h);
+        writeln!(f, "Detected native resolution: {}x{}", native_w, native_h).unwrap();
+        f.flush().unwrap();
+
+        println!("Testing GDI capture...");
+        let gdi = capture::capture_desktop_gdi(native_w, native_h);
+        println!("GDI captured: is_some={}, len={:?}", gdi.is_some(), gdi.as_ref().map(|v| v.len()));
+        if let Some(ref buf) = gdi {
+            let non_zero = buf.iter().filter(|&&b| b != 0).count();
+            println!("GDI non-zero bytes count: {} / {}", non_zero, buf.len());
+            writeln!(f, "GDI non-zero bytes count: {} / {}", non_zero, buf.len()).unwrap();
+        }
+        writeln!(f, "GDI is_some: {}, len: {:?}", gdi.is_some(), gdi.as_ref().map(|v| v.len())).unwrap();
+        f.flush().unwrap();
+
+        println!("Testing DxgiCapture::new()...");
+        match capture::DxgiCapture::new() {
+            Ok(mut cap) => {
+                println!("DxgiCapture created: {}x{}", cap.width, cap.height);
+                writeln!(f, "DxgiCapture size: {}x{}", cap.width, cap.height).unwrap();
+                f.flush().unwrap();
+                match cap.capture_preview_rgba(native_w, native_h) {
+                    Ok(Some(rgba)) => {
+                        println!("capture_preview_rgba success! len={}", rgba.len());
+                        writeln!(f, "capture_preview_rgba success! len={}", rgba.len()).unwrap();
+                    }
+                    Ok(None) => {
+                        println!("capture_preview_rgba returned None (no frame update)");
+                        writeln!(f, "capture_preview_rgba returned None").unwrap();
+                    }
+                    Err(e) => {
+                        println!("capture_preview_rgba error: {:?}", e);
+                        writeln!(f, "capture_preview_rgba error: {:?}", e).unwrap();
+                    }
+                }
+                f.flush().unwrap();
+            }
+            Err(e) => {
+                println!("DxgiCapture::new failed: {:?}", e);
+                writeln!(f, "DxgiCapture::new failed: {:?}", e).unwrap();
+                f.flush().unwrap();
+            }
+        }
+        return Ok(());
     }
 
     let cq_quality = 22; // Target Quality (18..24)
@@ -79,7 +138,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let res = eframe::run_native(
         "NANOCORD",
         options,
         Box::new(|cc| {
@@ -87,7 +146,11 @@ fn main() -> eframe::Result<()> {
             ui::apply_custom_theme(&cc.egui_ctx);
             Ok(Box::new(NanocordApp::default()))
         }),
-    )
+    );
+    if let Err(ref e) = res {
+        let _ = std::fs::write("eframe_error.txt", format!("{:#?}", e));
+    }
+    res
 }
 
 fn attach_console_if_cli() {

@@ -3,6 +3,7 @@
 use crate::capture::get_screen_resolution;
 use crate::nvenc::{
     NvencEncoder, NV_ENC_PRESET_P1_GUID, NV_ENC_PRESET_P3_GUID, NV_ENC_PRESET_P4_GUID,
+    NV_ENC_PRESET_P5_GUID, NV_ENC_PRESET_P6_GUID, NV_ENC_PRESET_P7_GUID,
 };
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
@@ -69,6 +70,9 @@ pub fn run_full_benchmark() -> Vec<BenchmarkResult> {
         (NV_ENC_PRESET_P1_GUID, "P1", 1u8),
         (NV_ENC_PRESET_P3_GUID, "P3", 3u8),
         (NV_ENC_PRESET_P4_GUID, "P4", 4u8),
+        (NV_ENC_PRESET_P5_GUID, "P5", 5u8),
+        (NV_ENC_PRESET_P6_GUID, "P6", 6u8),
+        (NV_ENC_PRESET_P7_GUID, "P7", 7u8),
     ];
 
     // Dummy D3D11 Device for testing
