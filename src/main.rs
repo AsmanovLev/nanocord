@@ -1,20 +1,25 @@
+mod benchmark;
 mod capture;
 mod nvenc;
+mod ui;
 
 use capture::DxgiCapture;
 use nvenc::NvencEncoder;
+use ui::NanocordApp;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 
-fn main() {
+fn main() -> eframe::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let is_test_mode = args.iter().any(|a| a == "--test");
+    let is_bench_mode = args.iter().any(|a| a == "--benchmark");
+    let is_cli_mode = args.iter().any(|a| a == "--cli");
+
     println!("=================================================");
     println!("   NANOCORD - Ultra-Hardcoded Native Streamer    ");
     println!("=================================================");
-
-    let args: Vec<String> = std::env::args().collect();
-    let is_test_mode = args.iter().any(|a| a == "--test");
 
     let cq_quality = 22; // Target Quality (18..24)
     let max_bitrate_mbps = 30; // 30 Mbps cap
@@ -22,9 +27,43 @@ fn main() {
     if is_test_mode {
         println!("[TEST MODE] Running NVENC test with synthetic 1920x1080 frame...");
         run_synthetic_test(cq_quality, max_bitrate_mbps);
-        return;
+        return Ok(());
     }
 
+    if is_bench_mode {
+        println!("[BENCHMARK MODE] Running full hardware latency probe...");
+        let results = benchmark::run_full_benchmark();
+        for r in &results {
+            println!(
+                "  {} | {}: Avg Latency: {:.2} ms | Min: {:.2} ms | Max FPS: {} | IDR: {:.1} KB, P: {:.1} KB",
+                r.resolution, r.preset_name, r.avg_latency_ms, r.min_latency_ms, r.max_fps, r.idr_size_kb, r.p_frame_size_kb
+            );
+        }
+        return Ok(());
+    }
+
+    if is_cli_mode {
+        run_cli_capture(cq_quality, max_bitrate_mbps);
+        return Ok(());
+    }
+
+    // Launch GUI
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_inner_size([880.0, 560.0])
+            .with_min_inner_size([720.0, 480.0])
+            .with_title("NANOCORD - Ultra-Low Latency Streamer"),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "NANOCORD",
+        options,
+        Box::new(|_cc| Ok(Box::new(NanocordApp::default()))),
+    )
+}
+
+fn run_cli_capture(cq_quality: u8, max_bitrate_mbps: u32) {
     println!("[1/2] Initializing DXGI Desktop Duplication...");
     let mut capture = match DxgiCapture::new() {
         Ok(c) => c,
@@ -148,7 +187,6 @@ fn run_synthetic_test(cq_quality: u8, max_bitrate_mbps: u32) {
             nal_bytes.len(),
             if is_keyframe { "Keyframe / IDR" } else { "P-frame" }
         );
-        std::thread::sleep(std::time::Duration::from_millis(16));
     }
-    println!("\nSynthetic pipeline test complete successfully!");
+    println!("\nSynthetic test complete!");
 }
