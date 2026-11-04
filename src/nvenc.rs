@@ -1,0 +1,676 @@
+#![allow(non_snake_case, dead_code, non_camel_case_types)]
+
+use std::ffi::c_void;
+use std::mem::{size_of, zeroed, MaybeUninit};
+use windows::core::{Interface, GUID, PCWSTR, Result};
+use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0};
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+    D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ,
+    D3D11_CPU_ACCESS_WRITE, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
+    D3D11_MAP_WRITE_DISCARD, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DYNAMIC, D3D11_USAGE_STAGING,
+};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1,
+};
+use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+
+// Real NVIDIA Codec & Preset GUIDs
+pub const NV_ENC_CODEC_HEVC_GUID: GUID = GUID::from_values(0x790cdc88, 0x4522, 0x4d7b, [0x94, 0x25, 0xbd, 0xa9, 0x97, 0x5f, 0x76, 0x03]);
+pub const NV_ENC_PRESET_P1_GUID: GUID = GUID::from_values(0xfc0a8d3e, 0x45f8, 0x4cf8, [0x80, 0xc7, 0x29, 0x88, 0x71, 0x59, 0x0e, 0xbf]);
+
+pub const NV_ENC_SUCCESS: u32 = 0;
+pub const NV_ENC_DEVICE_TYPE_DIRECTX: u32 = 0;
+pub const NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX: u32 = 0;
+pub const NV_ENC_BUFFER_FORMAT_ARGB: u32 = 0x01000000;
+pub const NV_ENC_BUFFER_USAGE_INPUT_IMAGE: u32 = 0;
+
+pub const NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY: u32 = 3;
+pub const NV_ENC_PARAMS_RC_VBR: u32 = 2;
+pub const NV_ENC_PIC_STRUCT_FRAME: u32 = 1;
+pub const NV_ENC_PIC_FLAG_FORCEIDR: u32 = 0x00000004;
+
+pub const NVENCAPI_VERSION: u32 = 0x0100000D;
+pub const NV_ENCODE_API_FUNCTION_LIST_VER: u32 = 0x7102000D;
+pub const NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER: u32 = 0x7101000D;
+pub const NV_ENC_INITIALIZE_PARAMS_VER: u32 = 0xF107000D;
+pub const NV_ENC_CONFIG_VER: u32 = 0xF109000D;
+pub const NV_ENC_PRESET_CONFIG_VER: u32 = 0xF105000D;
+pub const NV_ENC_RC_PARAMS_VER: u32 = 0x7101000D;
+pub const NV_ENC_CREATE_BITSTREAM_BUFFER_VER: u32 = 0x7101000D;
+pub const NV_ENC_REGISTER_RESOURCE_VER: u32 = 0x7105000D;
+pub const NV_ENC_MAP_INPUT_RESOURCE_VER: u32 = 0x7104000D;
+pub const NV_ENC_PIC_PARAMS_VER: u32 = 0xF107000D;
+pub const NV_ENC_LOCK_BITSTREAM_VER: u32 = 0xF102000D;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct NvEncApiFunctionList {
+    pub version: u32,
+    pub reserved: u32,
+    pub nvEncOpenEncodeSession: *const c_void,
+    pub nvEncGetEncodeGUIDCount: *const c_void,
+    pub nvEncGetEncodeProfileGUIDCount: *const c_void,
+    pub nvEncGetEncodeProfileGUIDs: *const c_void,
+    pub nvEncGetEncodeGUIDs: *const c_void,
+    pub nvEncGetInputFormatCount: *const c_void,
+    pub nvEncGetInputFormats: *const c_void,
+    pub nvEncGetEncodeCaps: *const c_void,
+    pub nvEncGetEncodePresetCount: *const c_void,
+    pub nvEncGetEncodePresetGUIDs: *const c_void,
+    pub nvEncGetEncodePresetConfig: *const c_void,
+    pub nvEncInitializeEncoder: unsafe extern "system" fn(*mut c_void, *mut NvEncInitializeParams) -> u32,
+    pub nvEncCreateInputBuffer: *const c_void,
+    pub nvEncDestroyInputBuffer: *const c_void,
+    pub nvEncCreateBitstreamBuffer: unsafe extern "system" fn(*mut c_void, *mut NvEncCreateBitstreamBuffer) -> u32,
+    pub nvEncDestroyBitstreamBuffer: unsafe extern "system" fn(*mut c_void, *mut c_void) -> u32,
+    pub nvEncEncodePicture: unsafe extern "system" fn(*mut c_void, *mut NvEncPicParams) -> u32,
+    pub nvEncLockBitstream: unsafe extern "system" fn(*mut c_void, *mut NvEncLockBitstream) -> u32,
+    pub nvEncUnlockBitstream: unsafe extern "system" fn(*mut c_void, *mut c_void) -> u32,
+    pub nvEncLockInputBuffer: *const c_void,
+    pub nvEncUnlockInputBuffer: *const c_void,
+    pub nvEncGetEncodeStats: *const c_void,
+    pub nvEncGetSequenceParams: *const c_void,
+    pub nvEncRegisterAsyncEvent: *const c_void,
+    pub nvEncUnregisterAsyncEvent: *const c_void,
+    pub nvEncMapInputResource: unsafe extern "system" fn(*mut c_void, *mut NvEncMapInputResource) -> u32,
+    pub nvEncUnmapInputResource: unsafe extern "system" fn(*mut c_void, *mut c_void) -> u32,
+    pub nvEncDestroyEncoder: unsafe extern "system" fn(*mut c_void) -> u32,
+    pub nvEncInvalidateRefFrames: *const c_void,
+    pub nvEncOpenEncodeSessionEx: unsafe extern "system" fn(*mut NvEncOpenEncodeSessionExParams, *mut *mut c_void) -> u32,
+    pub nvEncRegisterResource: unsafe extern "system" fn(*mut c_void, *mut NvEncRegisterResource) -> u32,
+    pub nvEncUnregisterResource: unsafe extern "system" fn(*mut c_void, *mut c_void) -> u32,
+    pub nvEncReconfigureEncoder: *const c_void,
+    pub reserved1: *const c_void,
+    pub nvEncCreateMVBuffer: *const c_void,
+    pub nvEncDestroyMVBuffer: *const c_void,
+    pub nvEncRunMotionEstimationOnly: *const c_void,
+    pub nvEncGetLastErrorString: *const c_void,
+    pub nvEncSetIOCudaStreams: *const c_void,
+    pub nvEncGetEncodePresetConfigEx: unsafe extern "system" fn(*mut c_void, GUID, GUID, u32, *mut NvEncPresetConfig) -> u32,
+    pub nvEncGetSequenceParamEx: *const c_void,
+    pub nvEncRestoreEncoderState: *const c_void,
+    pub nvEncLookaheadPicture: *const c_void,
+    pub reserved2: [*const c_void; 275],
+}
+
+#[repr(C)]
+pub struct NvEncOpenEncodeSessionExParams {
+    pub version: u32,
+    pub deviceType: u32,
+    pub device: *mut c_void,
+    pub reserved: *mut c_void,
+    pub apiVersion: u32,
+    pub reserved1: [u32; 253],
+    pub reserved2: [*mut c_void; 64],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct NvEncRcParams {
+    pub version: u32,
+    pub rateControlMode: u32,
+    pub constQP: [u32; 3],
+    pub averageBitRate: u32,
+    pub maxBitRate: u32,
+    pub vbvBufferSize: u32,
+    pub vbvInitialDelay: u32,
+    pub flags: u32,
+    pub minQP: [u32; 3],
+    pub maxQP: [u32; 3],
+    pub initialRCQP: [u32; 3],
+    pub temporallayerIdxMask: u32,
+    pub temporalLayerInfo: [u32; 2],
+    pub targetQuality: u8,
+    pub targetQualityLSB: u8,
+    pub lookaheadDepth: u16,
+    pub lowDelayKeyFrameScale: u8,
+    pub reserved_trailing: [u8; 35],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct NvEncConfig {
+    pub version: u32,
+    pub profileGUID: GUID,
+    pub gopLength: u32,
+    pub frameIntervalP: i32,
+    pub monoChromeEncoding: u32,
+    pub frameFieldMode: u32,
+    pub mvPrecision: u32,
+    pub rcParams: NvEncRcParams,
+    pub encodeCodecConfig: [u8; 1792],
+    pub reserved: [u32; 278],
+    pub reserved2: [*mut c_void; 64],
+}
+
+#[repr(C)]
+pub struct NvEncPresetConfig {
+    pub version: u32,
+    pub reserved: u32,
+    pub presetCfg: NvEncConfig,
+    pub reserved1: [u32; 256],
+    pub reserved2: [*mut c_void; 64],
+}
+
+#[repr(C)]
+pub struct NvEncInitializeParams {
+    pub version: u32,
+    pub encodeGUID: GUID,
+    pub presetGUID: GUID,
+    pub encodeWidth: u32,
+    pub encodeHeight: u32,
+    pub darWidth: u32,
+    pub darHeight: u32,
+    pub frameRateNum: u32,
+    pub frameRateDen: u32,
+    pub enableEncodeAsync: u32,
+    pub enablePTD: u32,
+    pub bitfields: u32,
+    pub privDataSize: u32,
+    pub reserved: u32,
+    pub privData: *mut c_void,
+    pub encodeConfig: *mut NvEncConfig,
+    pub maxEncodeWidth: u32,
+    pub maxEncodeHeight: u32,
+    pub maxMEHintCountsPerBlock: [u8; 32],
+    pub tuningInfo: u32,
+    pub bufferFormat: u32,
+    pub numStateBuffers: u32,
+    pub outputStatsLevel: u32,
+    pub reserved1: [u32; 284],
+    pub reserved2: [*mut c_void; 64],
+}
+
+#[repr(C)]
+pub struct NvEncCreateBitstreamBuffer {
+    pub version: u32,
+    pub size: u32,
+    pub memoryHeap: u32,
+    pub reserved: u32,
+    pub bitstreamBuffer: *mut c_void,
+    pub bitstreamBufferPtr: *mut c_void,
+    pub reserved1: [u32; 58],
+    pub reserved2: [*mut c_void; 64],
+}
+
+#[repr(C)]
+pub struct NvEncRegisterResource {
+    pub version: u32,
+    pub resourceType: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub subResourceIndex: u32,
+    pub resourceToRegister: *mut c_void,
+    pub registeredResource: *mut c_void,
+    pub bufferFormat: u32,
+    pub bufferUsage: u32,
+    pub pInputFencePoint: *mut c_void,
+    pub chromaOffset: [u32; 2],
+    pub chromaOffsetIn: [u32; 2],
+    pub reserved1: [u32; 244],
+    pub reserved2: [*mut c_void; 61],
+}
+
+#[repr(C)]
+pub struct NvEncMapInputResource {
+    pub version: u32,
+    pub subResourceIndex: u32,
+    pub inputResource: *mut c_void,
+    pub registeredResource: *mut c_void,
+    pub mappedResource: *mut c_void,
+    pub mappedBufferFmt: u32,
+    pub reserved1: [u32; 251],
+    pub reserved2: [*mut c_void; 63],
+}
+
+#[repr(C)]
+pub struct NvEncPicParams {
+    pub version: u32,
+    pub inputWidth: u32,
+    pub inputHeight: u32,
+    pub inputPitch: u32,
+    pub encodePicFlags: u32,
+    pub frameIdx: u32,
+    pub inputTimeStamp: u64,
+    pub inputDuration: u64,
+    pub inputBuffer: *mut c_void,
+    pub outputBitstream: *mut c_void,
+    pub completionEvent: *mut c_void,
+    pub bufferFmt: u32,
+    pub pictureStruct: u32,
+    pub pictureType: u32,
+    pub _pad0: u32,
+    pub codecPicParams: [u8; 1544],
+    pub meHintCountsPerBlock: [u8; 32],
+    pub meExternalHints: *mut c_void,
+    pub reserved2: [u32; 7],
+    pub _pad1: u32,
+    pub reserved5: [*mut c_void; 2],
+    pub qpDeltaMap: *mut i8,
+    pub qpDeltaMapSize: u32,
+    pub reservedBitFields: u32,
+    pub meHintRefPicDist: [u16; 2],
+    pub diffPicNumHint: i32,
+    pub alphaBuffer: *mut c_void,
+    pub meExternalSbHints: *mut c_void,
+    pub meSbHintsCount: u32,
+    pub stateBufferIdx: u32,
+    pub outputReconBuffer: *mut c_void,
+    pub reserved3: [u32; 284],
+    pub reserved6: [*mut c_void; 57],
+}
+
+#[repr(C)]
+pub struct NvEncLockBitstream {
+    pub version: u32,
+    pub flags: u32,
+    pub outputBitstream: *mut c_void,
+    pub sliceOffsets: *mut u32,
+    pub frameIdx: u32,
+    pub hwEncodeStatus: u32,
+    pub numSlices: u32,
+    pub bitstreamSizeInBytes: u32,
+    pub outputTimeStamp: u64,
+    pub outputDuration: u64,
+    pub bitstreamBufferPtr: *mut c_void,
+    pub pictureType: u32,
+    pub pictureStruct: u32,
+    pub frameAvgQP: u32,
+    pub frameSatd: u32,
+    pub ltrFrameIdx: u32,
+    pub ltrFrameBitmap: u32,
+    pub temporalId: u32,
+    pub intraMBCount: u32,
+    pub interMBCount: u32,
+    pub averageMVX: i32,
+    pub averageMVY: i32,
+    pub alphaLayerSizeInBytes: u32,
+    pub outputStatsPtrSize: u32,
+    pub reserved: u32,
+    pub outputStatsPtr: *mut c_void,
+    pub frameIdxDisplay: u32,
+    pub reserved1: [u32; 219],
+    pub reserved2: [*mut c_void; 63],
+    pub reservedInternal: [u32; 8],
+}
+
+// Compile-time static assertions for exact C struct sizes
+const _: () = {
+    assert!(size_of::<NvEncApiFunctionList>() == 2552);
+    assert!(size_of::<NvEncOpenEncodeSessionExParams>() == 1552);
+    assert!(size_of::<NvEncInitializeParams>() == 1800);
+    assert!(size_of::<NvEncConfig>() == 3584);
+    assert!(size_of::<NvEncPresetConfig>() == 5128);
+    assert!(size_of::<NvEncRcParams>() == 128);
+    assert!(size_of::<NvEncCreateBitstreamBuffer>() == 776);
+    assert!(size_of::<NvEncRegisterResource>() == 1536);
+    assert!(size_of::<NvEncMapInputResource>() == 1544);
+    assert!(size_of::<NvEncPicParams>() == 3360);
+    assert!(size_of::<NvEncLockBitstream>() == 1544);
+};
+
+type NvEncodeAPICreateInstanceFn = unsafe extern "system" fn(*mut NvEncApiFunctionList) -> u32;
+
+pub struct NvencEncoder {
+    api: NvEncApiFunctionList,
+    encoder: *mut c_void,
+    bitstream_buffer: *mut c_void,
+    registered_resource: *mut c_void,
+    width: u32,
+    height: u32,
+    frame_count: u32,
+    pub nvidia_device: ID3D11Device,
+    pub nvidia_context: ID3D11DeviceContext,
+    opt_staging_tex: Option<ID3D11Texture2D>,
+    opt_nv_tex: Option<ID3D11Texture2D>,
+    is_cross_adapter: bool,
+}
+
+impl NvencEncoder {
+    pub fn new(
+        capture_device: &ID3D11Device,
+        width: u32,
+        height: u32,
+        cq: u8,
+        max_bitrate_mbps: u32,
+    ) -> Result<Self> {
+        unsafe {
+            // 1. Находим адаптер NVIDIA (VendorId == 0x10DE)
+            let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
+            let mut nvidia_adapter: Option<IDXGIAdapter1> = None;
+
+            for i in 0.. {
+                let adapter = match factory.EnumAdapters1(i) {
+                    Ok(a) => a,
+                    Err(_) => break,
+                };
+                let desc = adapter.GetDesc1()?;
+                if desc.VendorId == 0x10DE {
+                    println!("Found NVIDIA GPU: {}", String::from_utf16_lossy(&desc.Description));
+                    nvidia_adapter = Some(adapter);
+                    break;
+                }
+            }
+
+            let nvidia_adapter = nvidia_adapter.expect("NVIDIA GPU adapter not found on this system");
+
+            // Проверяем, на каком адаптере работает захват
+            let capture_dxgi: IDXGIDevice = capture_device.cast()?;
+            let capture_adapter = capture_dxgi.GetAdapter()?;
+            let capture_desc = capture_adapter.GetDesc()?;
+            let is_cross_adapter = capture_desc.VendorId != 0x10DE;
+
+            if is_cross_adapter {
+                println!(
+                    "Optimus Laptop detected: Screen is on {}, NVENC is on NVIDIA RTX 3060",
+                    String::from_utf16_lossy(&capture_desc.Description)
+                );
+            }
+
+            // 2. Создаем D3D11 Device на NVIDIA GPU
+            let mut dev_nv: Option<ID3D11Device> = None;
+            let mut ctx_nv: Option<ID3D11DeviceContext> = None;
+            let mut feature_level = D3D_FEATURE_LEVEL_11_0;
+
+            D3D11CreateDevice(
+                &nvidia_adapter,
+                D3D_DRIVER_TYPE_UNKNOWN,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                Some(&[D3D_FEATURE_LEVEL_11_0]),
+                D3D11_SDK_VERSION,
+                Some(&mut dev_nv),
+                Some(&mut feature_level),
+                Some(&mut ctx_nv),
+            )?;
+
+            let nvidia_device = dev_nv.unwrap();
+            let nvidia_context = ctx_nv.unwrap();
+
+            let dxgi_dev: IDXGIDevice = nvidia_device.cast()?;
+            let actual_adapter = dxgi_dev.GetAdapter()?;
+            let actual_desc = actual_adapter.GetDesc()?;
+            println!(
+                "       -> Actual adapter for nvidia_device: {} (VendorId: 0x{:04X})",
+                String::from_utf16_lossy(&actual_desc.Description),
+                actual_desc.VendorId
+            );
+            println!("       -> Device pointer: {:p}", nvidia_device.as_raw());
+
+            // 3. Загружаем nvEncodeAPI64.dll и инициализируем API
+            let dll_name: Vec<u16> = "nvEncodeAPI64.dll\0".encode_utf16().collect();
+            let h_module = LoadLibraryW(PCWSTR(dll_name.as_ptr()))?;
+
+            let create_instance_name = b"NvEncodeAPICreateInstance\0";
+            let create_instance_proc = GetProcAddress(
+                h_module,
+                windows::core::PCSTR(create_instance_name.as_ptr()),
+            ).ok_or_else(|| windows::core::Error::from_thread())?;
+
+            let create_instance: NvEncodeAPICreateInstanceFn = std::mem::transmute(create_instance_proc);
+
+            let mut api_uninit = MaybeUninit::<NvEncApiFunctionList>::zeroed();
+            let api_ptr = api_uninit.as_mut_ptr();
+            (*api_ptr).version = NV_ENCODE_API_FUNCTION_LIST_VER;
+
+            let status = create_instance(api_ptr);
+            if status != NV_ENC_SUCCESS {
+                panic!("NvEncodeAPICreateInstance failed with code {}", status);
+            }
+            let api = api_uninit.assume_init();
+
+            // 4. Открываем сессию кодирования с NVIDIA D3D11 Device
+            let mut session_params: NvEncOpenEncodeSessionExParams = zeroed();
+            session_params.version = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
+            session_params.deviceType = NV_ENC_DEVICE_TYPE_DIRECTX;
+            session_params.device = nvidia_device.as_raw() as *mut c_void;
+            session_params.apiVersion = NVENCAPI_VERSION;
+
+            let mut encoder: *mut c_void = std::ptr::null_mut();
+            let status = (api.nvEncOpenEncodeSessionEx)(&mut session_params, &mut encoder);
+            if status != NV_ENC_SUCCESS {
+                panic!("nvEncOpenEncodeSessionEx failed with code {}", status);
+            }
+
+            // 5. Инициализация энкодера с пресетом P1 Ultra-Low-Latency
+            let mut init_params: NvEncInitializeParams = zeroed();
+            init_params.version = NV_ENC_INITIALIZE_PARAMS_VER;
+            init_params.encodeGUID = NV_ENC_CODEC_HEVC_GUID;
+            init_params.presetGUID = NV_ENC_PRESET_P1_GUID;
+            init_params.tuningInfo = NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
+            init_params.encodeWidth = width;
+            init_params.encodeHeight = height;
+            init_params.darWidth = width;
+            init_params.darHeight = height;
+            init_params.frameRateNum = 60;
+            init_params.frameRateDen = 1;
+            init_params.enablePTD = 1;
+            init_params.encodeConfig = std::ptr::null_mut();
+
+            let status = (api.nvEncInitializeEncoder)(encoder, &mut init_params);
+            if status != NV_ENC_SUCCESS {
+                panic!("nvEncInitializeEncoder failed with code {}", status);
+            }
+
+            // 7. Создаем буфер для выходного битстрима (4 МБ)
+            let mut bitstream_params: NvEncCreateBitstreamBuffer = zeroed();
+            bitstream_params.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
+            bitstream_params.size = 4 * 1024 * 1024;
+
+            let status = (api.nvEncCreateBitstreamBuffer)(encoder, &mut bitstream_params);
+            if status != NV_ENC_SUCCESS {
+                panic!("nvEncCreateBitstreamBuffer failed with code {}", status);
+            }
+
+            // 8. Если разные адаптеры, подготавливаем staging-текстуру на capture GPU и dynamic-текстуру на NVIDIA GPU
+            let mut opt_staging_tex = None;
+            let mut opt_nv_tex = None;
+            let mut registered_resource: *mut c_void = std::ptr::null_mut();
+
+            if is_cross_adapter {
+                let staging_desc = D3D11_TEXTURE2D_DESC {
+                    Width: width,
+                    Height: height,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                    Usage: D3D11_USAGE_STAGING,
+                    BindFlags: 0,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                    MiscFlags: 0,
+                };
+                let mut st = None;
+                capture_device.CreateTexture2D(&staging_desc, None, Some(&mut st))?;
+                opt_staging_tex = st;
+
+                let nv_desc = D3D11_TEXTURE2D_DESC {
+                    Width: width,
+                    Height: height,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                    Usage: D3D11_USAGE_DYNAMIC,
+                    BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+                    MiscFlags: 0,
+                };
+                let mut nt = None;
+                nvidia_device.CreateTexture2D(&nv_desc, None, Some(&mut nt))?;
+                let nt = nt.unwrap();
+
+                // Регистрируем текстуру в NVENC заранее 1 раз!
+                let mut reg_res: NvEncRegisterResource = zeroed();
+                reg_res.version = NV_ENC_REGISTER_RESOURCE_VER;
+                reg_res.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
+                reg_res.width = width;
+                reg_res.height = height;
+                reg_res.resourceToRegister = nt.as_raw() as *mut c_void;
+                reg_res.bufferFormat = NV_ENC_BUFFER_FORMAT_ARGB;
+                reg_res.bufferUsage = NV_ENC_BUFFER_USAGE_INPUT_IMAGE;
+
+                let status = (api.nvEncRegisterResource)(encoder, &mut reg_res);
+                if status != NV_ENC_SUCCESS {
+                    panic!("nvEncRegisterResource failed: {}", status);
+                }
+                registered_resource = reg_res.registeredResource;
+                opt_nv_tex = Some(nt);
+            }
+
+            println!(
+                "NVENC H.265 (HEVC) Encoder initialized! {}x{} @ 60 FPS, CQ: {}, Max: {} Mbps",
+                width, height, cq, max_bitrate_mbps
+            );
+
+            Ok(Self {
+                api,
+                encoder,
+                bitstream_buffer: bitstream_params.bitstreamBuffer,
+                registered_resource,
+                width,
+                height,
+                frame_count: 0,
+                nvidia_device,
+                nvidia_context,
+                opt_staging_tex,
+                opt_nv_tex,
+                is_cross_adapter,
+            })
+        }
+    }
+
+    /// Кодирует захваченный кадр в NAL-поток H.265.
+    pub fn encode_texture(
+        &mut self,
+        capture_texture: &ID3D11Texture2D,
+        capture_context: &ID3D11DeviceContext,
+        force_idr: bool,
+    ) -> Result<Vec<u8>> {
+        unsafe {
+            let mut reg_to_cleanup: *mut c_void = std::ptr::null_mut();
+            let registered_res = if self.is_cross_adapter {
+                let staging = self.opt_staging_tex.as_ref().unwrap();
+                let nv_tex = self.opt_nv_tex.as_ref().unwrap();
+
+                // 1. Копируем кадр на capture GPU в staging
+                capture_context.CopyResource(staging, capture_texture);
+
+                // 2. Map staging для чтения
+                let mut mapped_src = D3D11_MAPPED_SUBRESOURCE::default();
+                capture_context.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped_src))?;
+
+                // 3. Map nv_tex для записи
+                let mut mapped_dst = D3D11_MAPPED_SUBRESOURCE::default();
+                self.nvidia_context.Map(nv_tex, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped_dst))?;
+
+                // 4. Построчный быстрый memcpy
+                let row_bytes = self.width as usize * 4;
+                for y in 0..self.height as usize {
+                    let src_ptr = (mapped_src.pData as *const u8).add(y * mapped_src.RowPitch as usize);
+                    let dst_ptr = (mapped_dst.pData as *mut u8).add(y * mapped_dst.RowPitch as usize);
+                    std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, row_bytes);
+                }
+
+                self.nvidia_context.Unmap(nv_tex, 0);
+                capture_context.Unmap(staging, 0);
+
+                self.registered_resource
+            } else {
+                // Прямой zero-copy режим (одинаковый GPU)
+                let mut reg_res: NvEncRegisterResource = zeroed();
+                reg_res.version = NV_ENC_REGISTER_RESOURCE_VER;
+                reg_res.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
+                reg_res.width = self.width;
+                reg_res.height = self.height;
+                reg_res.resourceToRegister = capture_texture.as_raw() as *mut c_void;
+                reg_res.bufferFormat = NV_ENC_BUFFER_FORMAT_ARGB;
+                reg_res.bufferUsage = NV_ENC_BUFFER_USAGE_INPUT_IMAGE;
+
+                let status = (self.api.nvEncRegisterResource)(self.encoder, &mut reg_res);
+                if status != NV_ENC_SUCCESS {
+                    panic!("nvEncRegisterResource failed: {}", status);
+                }
+                reg_to_cleanup = reg_res.registeredResource;
+                reg_res.registeredResource
+            };
+
+            // Мапим ресурс для чтения энкодером
+            let mut map_res: NvEncMapInputResource = zeroed();
+            map_res.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
+            map_res.registeredResource = registered_res;
+
+            let status = (self.api.nvEncMapInputResource)(self.encoder, &mut map_res);
+            if status != NV_ENC_SUCCESS {
+                panic!("nvEncMapInputResource failed: {}", status);
+            }
+
+            // Отправляем кадр на кодирование
+            let mut pic_params: NvEncPicParams = zeroed();
+            pic_params.version = NV_ENC_PIC_PARAMS_VER;
+            pic_params.inputWidth = self.width;
+            pic_params.inputHeight = self.height;
+            pic_params.inputBuffer = map_res.mappedResource;
+            pic_params.outputBitstream = self.bitstream_buffer;
+            pic_params.bufferFmt = NV_ENC_BUFFER_FORMAT_ARGB;
+            pic_params.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
+            pic_params.frameIdx = self.frame_count;
+            if force_idr {
+                pic_params.encodePicFlags |= NV_ENC_PIC_FLAG_FORCEIDR;
+            }
+
+            let status = (self.api.nvEncEncodePicture)(self.encoder, &mut pic_params);
+            if status != NV_ENC_SUCCESS {
+                panic!("nvEncEncodePicture failed: {}", status);
+            }
+
+            (self.api.nvEncUnmapInputResource)(self.encoder, map_res.mappedResource);
+            if !reg_to_cleanup.is_null() {
+                (self.api.nvEncUnregisterResource)(self.encoder, reg_to_cleanup);
+            }
+
+            // Считываем сжатый NAL битстрим
+            let mut lock_params: NvEncLockBitstream = zeroed();
+            lock_params.version = NV_ENC_LOCK_BITSTREAM_VER;
+            lock_params.outputBitstream = self.bitstream_buffer;
+            lock_params.flags = 0; // doNotWait = 0
+
+            let status = (self.api.nvEncLockBitstream)(self.encoder, &mut lock_params);
+            if status != NV_ENC_SUCCESS {
+                panic!("nvEncLockBitstream failed: {}", status);
+            }
+
+            let byte_slice = std::slice::from_raw_parts(
+                lock_params.bitstreamBufferPtr as *const u8,
+                lock_params.bitstreamSizeInBytes as usize,
+            );
+            let encoded_bytes = byte_slice.to_vec();
+
+            (self.api.nvEncUnlockBitstream)(self.encoder, self.bitstream_buffer);
+
+            self.frame_count += 1;
+            Ok(encoded_bytes)
+        }
+    }
+}
+
+impl Drop for NvencEncoder {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.registered_resource.is_null() {
+                (self.api.nvEncUnregisterResource)(self.encoder, self.registered_resource);
+            }
+            if !self.bitstream_buffer.is_null() {
+                (self.api.nvEncDestroyBitstreamBuffer)(self.encoder, self.bitstream_buffer);
+            }
+            if !self.encoder.is_null() {
+                (self.api.nvEncDestroyEncoder)(self.encoder);
+            }
+        }
+    }
+}
