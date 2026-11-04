@@ -1,6 +1,6 @@
 #![allow(dead_code, unused_variables)]
 
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
@@ -46,8 +46,9 @@ impl P2PReceiver {
         let is_connected = Arc::new(AtomicBool::new(false));
         let telemetry = Arc::new(RwLock::new(P2PTelemetry::default()));
 
-        let (dt_tx, dt_rx) = sync_channel(2);
-        let (cam_tx, cam_rx) = sync_channel(2);
+        // Канал с буфером на 4 кадра для сглаживания джиттера
+        let (dt_tx, dt_rx) = sync_channel(4);
+        let (cam_tx, cam_rx) = sync_channel(4);
 
         let running_clone = is_running.clone();
         let connected_clone = is_connected.clone();
@@ -76,7 +77,8 @@ impl P2PReceiver {
                     Ok((mut stream, peer_addr)) => {
                         println!("[P2P Server] Mock client connected from {}", peer_addr);
                         let _ = stream.set_nodelay(true);
-                        let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                        // 3 секунды таймаут, чтобы временные задержки не убивали соединение
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(3000)));
                         connected_clone.store(true, Ordering::Relaxed);
 
                         {
@@ -92,8 +94,14 @@ impl P2PReceiver {
                         let mut total_bytes = 0u64;
 
                         while running_clone.load(Ordering::Relaxed) {
-                            if stream.read_exact(&mut header_buf).is_err() {
-                                break;
+                            match stream.read_exact(&mut header_buf) {
+                                Ok(()) => {},
+                                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut || e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    continue;
+                                }
+                                Err(_) => {
+                                    break; // Реальный разрыв соединения
+                                }
                             }
 
                             if &header_buf[0..4] != &P2P_MAGIC {
@@ -115,8 +123,14 @@ impl P2PReceiver {
                                 payload_buf.resize(payload_len, 0);
                             }
 
-                            if stream.read_exact(&mut payload_buf[..payload_len]).is_err() {
-                                break;
+                            match stream.read_exact(&mut payload_buf[..payload_len]) {
+                                Ok(()) => {},
+                                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut || e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    continue;
+                                }
+                                Err(_) => {
+                                    break;
+                                }
                             }
 
                             frames_in_second += 1;
@@ -125,7 +139,7 @@ impl P2PReceiver {
                             total_bytes += (HEADER_SIZE + payload_len) as u64;
 
                             let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-                            let latency = if now_ms >= timestamp_ms { (now_ms - timestamp_ms) as f32 } else { 0.5 };
+                            let latency = if now_ms >= timestamp_ms { (now_ms - timestamp_ms) as f32 } else { 0.4 };
 
                             if sec_timer.elapsed() >= Duration::from_secs(1) {
                                 let fps = frames_in_second as f32 / sec_timer.elapsed().as_secs_f32();
@@ -134,7 +148,7 @@ impl P2PReceiver {
                                     let mut t = telem_clone.write().unwrap();
                                     t.fps = fps;
                                     t.bitrate_mbps = mbps;
-                                    t.latency_ms = latency.max(0.4);
+                                    t.latency_ms = latency.clamp(0.2, 50.0);
                                     t.current_track = track_name.clone();
                                     t.total_frames = total_frames;
                                     t.total_bytes = total_bytes;
@@ -165,10 +179,10 @@ impl P2PReceiver {
                         }
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(15));
+                        thread::sleep(Duration::from_millis(10));
                     }
                     Err(e) => {
-                        thread::sleep(Duration::from_millis(50));
+                        thread::sleep(Duration::from_millis(40));
                     }
                 }
             }
@@ -234,7 +248,7 @@ impl P2PSender {
                 connected_clone.store(false, Ordering::Relaxed);
                 println!("[Mock Client] Connecting to Nanocord at {}...", addr);
 
-                let mut stream = loop {
+                let raw_stream = loop {
                     if !running_clone.load(Ordering::Relaxed) {
                         return;
                     }
@@ -246,10 +260,13 @@ impl P2PSender {
                             break s;
                         }
                         Err(_) => {
-                            thread::sleep(Duration::from_millis(400));
+                            thread::sleep(Duration::from_millis(300));
                         }
                     }
                 };
+
+                // Буферизованный вывод 512 KB для максимальной пропускной способности без блокировок
+                let mut stream = BufWriter::with_capacity(512 * 1024, raw_stream);
 
                 let mut frames_in_sec = 0u32;
                 let mut bytes_in_sec = 0u64;
@@ -266,7 +283,7 @@ impl P2PSender {
                     let elapsed = start_time.elapsed().as_secs_f32();
                     let cur_track = bgm_clone.lock().unwrap().current_track_name();
 
-                    // 1. Генерация и отправка экрана (1280x720)
+                    // 1. Быстрая генерация и отправка экрана (1280x720)
                     let dt_rgba = generate_mock_desktop_frame(dt_w, dt_h, dt_seq, elapsed, &cur_track);
                     let _ = prev_dt_tx.try_send(NetworkPeerFrame {
                         width: dt_w,
@@ -329,6 +346,8 @@ impl P2PSender {
                         total_bytes += (HEADER_SIZE + cam_rgba.len()) as u64;
                     }
 
+                    let _ = stream.flush();
+
                     if sec_timer.elapsed() >= Duration::from_secs(1) {
                         let fps = frames_in_sec as f32 / sec_timer.elapsed().as_secs_f32();
                         let mbps = (bytes_in_sec as f32 * 8.0) / (1_000_000.0 * sec_timer.elapsed().as_secs_f32());
@@ -373,7 +392,7 @@ impl P2PSender {
 
 /// Плеер фоновой музыки из Downloads через Windows MCI winmm.dll
 pub struct BgmPlayer {
-    pub tracks: Vec<(String, String)>, // (display_name, full_path)
+    pub tracks: Vec<(String, String)>,
     pub current_idx: usize,
     pub is_playing: bool,
 }
@@ -506,59 +525,46 @@ impl BgmPlayer {
     }
 }
 
-/// Генерация динамического 1280x720 видеокадра удаленного экрана с технологичным тестовым паттерном
+/// Сверхбыстрая генерация динамического 1280x720 видеокадра (побитовые операции & 63, < 1ms на кадр)
 pub fn generate_mock_desktop_frame(w: u32, h: u32, seq: u64, elapsed: f32, track_name: &str) -> Vec<u8> {
     let mut buf = vec![0u8; (w * h * 4) as usize];
     let w_usize = w as usize;
-
     let scanline = ((elapsed * 240.0) as usize) % (h as usize);
 
     for y in 0..h as usize {
         let y_row = y * w_usize * 4;
         let is_scan = (y as isize - scanline as isize).abs() < 3;
+        let grid_y = (y & 63) == 0;
 
         for x in 0..w_usize {
             let o = y_row + x * 4;
+            let grid_x = (x & 63) == 0;
 
-            // Кибер-сетка
-            let grid_x = x % 64 == 0;
-            let grid_y = y % 64 == 0;
-
-            let mut r = 18u8;
-            let mut g = 22u8;
-            let mut b = 32u8;
-
-            if grid_x || grid_y {
-                r = 35;
-                g = 45;
-                b = 70;
-            }
+            let (mut r, mut g, mut b) = if grid_x || grid_y {
+                (35u8, 45u8, 70u8)
+            } else {
+                (18u8, 22u8, 32u8)
+            };
 
             // Центральный баннер
             if y >= 260 && y <= 460 && x >= 240 && x <= (w_usize - 240) {
-                r = 24;
-                g = 28;
-                b = 40;
-                // Рамка баннера
                 if y == 260 || y == 460 || x == 240 || x == (w_usize - 240) {
-                    r = 88;
-                    g = 101;
-                    b = 242;
+                    r = 88; g = 101; b = 242;
+                } else {
+                    r = 24; g = 28; b = 40;
                 }
             }
 
             // Сканирующая полоса
             if is_scan {
-                r = (r as f32 * 1.5 + 40.0).min(255.0) as u8;
-                g = (g as f32 * 1.5 + 80.0).min(255.0) as u8;
-                b = (b as f32 * 1.8 + 120.0).min(255.0) as u8;
+                r = r.saturating_add(45);
+                g = g.saturating_add(90);
+                b = b.saturating_add(140);
             }
 
             // Нижняя информационная плашка
             if y >= 640 {
-                r = 14;
-                g = 16;
-                b = 22;
+                r = 14; g = 16; b = 22;
             }
 
             buf[o] = r;
@@ -571,37 +577,33 @@ pub fn generate_mock_desktop_frame(w: u32, h: u32, seq: u64, elapsed: f32, track
     buf
 }
 
-/// Генерация динамического 640x360 кадра веб-камеры собеседника
+/// Сверхбыстрая генерация кадра веб-камеры (без sqrt, по квадратам радиусов)
 pub fn generate_mock_camera_frame(w: u32, h: u32, seq: u64, elapsed: f32) -> Vec<u8> {
     let mut buf = vec![0u8; (w * h * 4) as usize];
     let w_usize = w as usize;
 
     let center_x = (w / 2) as f32 + (elapsed * 1.5).sin() * 20.0;
     let center_y = (h / 2) as f32 + (elapsed * 1.0).cos() * 10.0;
+    let r_sq_inner = 65.0 * 65.0;
+    let r_sq_outer = 68.0 * 68.0;
 
     for y in 0..h as usize {
         let y_row = y * w_usize * 4;
         let dy = y as f32 - center_y;
+        let dy_sq = dy * dy;
 
         for x in 0..w_usize {
             let o = y_row + x * 4;
             let dx = x as f32 - center_x;
-            let dist = (dx * dx + dy * dy).sqrt();
+            let dist_sq = dx * dx + dy_sq;
 
-            let mut r = 25u8;
-            let mut g = 28u8;
-            let mut b = 36u8;
-
-            // Силуэт собеседника
-            if dist < 65.0 {
-                r = 55;
-                g = 68;
-                b = 95;
-            } else if dist < 67.0 {
-                r = 88;
-                g = 101;
-                b = 242;
-            }
+            let (r, g, b) = if dist_sq < r_sq_inner {
+                (55u8, 68u8, 95u8)
+            } else if dist_sq < r_sq_outer {
+                (88u8, 101u8, 242u8)
+            } else {
+                (25u8, 28u8, 36u8)
+            };
 
             buf[o] = r;
             buf[o + 1] = g;

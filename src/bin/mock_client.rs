@@ -50,8 +50,12 @@ impl MockClientApp {
 
 impl eframe::App for MockClientApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Приём локальных кадров превью для собственного окна
+        // Приём локальных кадров превью для собственного окна (только последний кадр)
+        let mut latest_dt = None;
         while let Ok(frame) = self.sender.preview_dt_rx.try_recv() {
+            latest_dt = Some(frame);
+        }
+        if let Some(frame) = latest_dt {
             let img = egui::ColorImage::from_rgba_unmultiplied(
                 [frame.width as usize, frame.height as usize],
                 &frame.rgba,
@@ -62,7 +66,11 @@ impl eframe::App for MockClientApp {
             }
         }
 
+        let mut latest_cam = None;
         while let Ok(frame) = self.sender.preview_cam_rx.try_recv() {
+            latest_cam = Some(frame);
+        }
+        if let Some(frame) = latest_cam {
             let img = egui::ColorImage::from_rgba_unmultiplied(
                 [frame.width as usize, frame.height as usize],
                 &frame.rgba,

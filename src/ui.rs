@@ -342,6 +342,38 @@ pub fn apply_custom_theme(ctx: &egui::Context) {
 }
 
 impl NanocordApp {
+    /// Отрисовка высококонтрастной бирки навигации (белый читабельный текст по умолчанию, белый фон + темный текст при выборе/наведении)
+    fn render_nav_tab_pill(ui: &mut egui::Ui, current: &mut Tab, tab: Tab, label: &str) {
+        let is_selected = *current == tab;
+        let text_w = label.len() as f32 * 7.5 + 24.0;
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(text_w, 28.0), egui::Sense::click());
+        if resp.clicked() {
+            *current = tab;
+        }
+        let is_hovered = resp.hovered();
+
+        let (bg_color, text_color, stroke) = if is_selected {
+            // Выбран: белый фон, тёмный читабельный текст
+            (Color32::WHITE, Color32::from_rgb(18, 20, 26), Stroke::new(1.0, Color32::WHITE))
+        } else if is_hovered {
+            // При наведении: белый/светлый фон, тёмный текст
+            (Color32::from_rgb(230, 235, 245), Color32::from_rgb(18, 20, 26), Stroke::new(1.0, Color32::from_rgb(230, 235, 245)))
+        } else {
+            // По умолчанию: тёмная плашка, чистый белый читабельный текст (инвертировано)
+            (Color32::from_rgb(45, 48, 56), Color32::WHITE, Stroke::new(1.0, Color32::from_rgb(60, 64, 76)))
+        };
+
+        ui.painter().rect_filled(rect, CornerRadius::same(6), bg_color);
+        ui.painter().rect_stroke(rect, CornerRadius::same(6), stroke, egui::StrokeKind::Inside);
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::proportional(12.0),
+            text_color,
+        );
+    }
+
     pub fn get_effective_preset(&self) -> (u8, &'static str) {
         match self.preset_mode {
             PresetMode::ManualP1 => (1, "P1"),
@@ -454,7 +486,11 @@ impl eframe::App for NanocordApp {
 
         // 4. Приём кадров удаленного собеседника из P2P сервера (nanocord_mock.exe)
         if let Some(ref rx) = self.p2p_receiver {
+            let mut latest_desktop = None;
             while let Ok(frame) = rx.desktop_rx.try_recv() {
+                latest_desktop = Some(frame);
+            }
+            if let Some(frame) = latest_desktop {
                 let color_image = egui::ColorImage::from_rgba_unmultiplied(
                     [frame.width as usize, frame.height as usize],
                     &frame.rgba,
@@ -470,7 +506,12 @@ impl eframe::App for NanocordApp {
                     }
                 }
             }
+
+            let mut latest_camera = None;
             while let Ok(frame) = rx.camera_rx.try_recv() {
+                latest_camera = Some(frame);
+            }
+            if let Some(frame) = latest_camera {
                 let color_image = egui::ColorImage::from_rgba_unmultiplied(
                     [frame.width as usize, frame.height as usize],
                     &frame.rgba,
@@ -531,11 +572,11 @@ impl eframe::App for NanocordApp {
 
                     ui.add_space(20.0);
 
-                    // Вкладки
-                    ui.selectable_value(&mut self.active_tab, Tab::CallAndStream, "Звонок и Стрим");
-                    ui.selectable_value(&mut self.active_tab, Tab::BenchmarkMatrix, "Матрица профилей");
-                    ui.selectable_value(&mut self.active_tab, Tab::AudioAndSpectrum, "Аудио и Спектрограмма");
-                    ui.selectable_value(&mut self.active_tab, Tab::EncoderSettings, "Настройки NVENC");
+                    // Высококонтрастные бирки вкладок (белый текст по умолчанию, инвертированный белый фон при выборе/наведении)
+                    Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::CallAndStream, "Звонок и Стрим");
+                    Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::BenchmarkMatrix, "Матрица профилей");
+                    Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::AudioAndSpectrum, "Аудио и Спектрограмма");
+                    Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::EncoderSettings, "Настройки NVENC");
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.is_streaming.load(Ordering::Relaxed) {
