@@ -345,8 +345,9 @@ impl NanocordApp {
     /// Отрисовка высококонтрастной бирки навигации (белый читабельный текст по умолчанию, белый фон + темный текст при выборе/наведении)
     fn render_nav_tab_pill(ui: &mut egui::Ui, current: &mut Tab, tab: Tab, label: &str) {
         let is_selected = *current == tab;
-        let text_w = label.len() as f32 * 7.5 + 24.0;
-        let (rect, resp) = ui.allocate_exact_size(Vec2::new(text_w, 28.0), egui::Sense::click());
+        let galley = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(12.0), Color32::WHITE);
+        let pill_w = galley.size().x + 14.0; // аккуратная компактная ширина строго по размеру текста
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(pill_w, 25.0), egui::Sense::click());
         if resp.clicked() {
             *current = tab;
         }
@@ -550,7 +551,7 @@ impl eframe::App for NanocordApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
         }
 
-        ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
 
         // ЕСЛИ ВКЛЮЧЕН ПОЛНОЭКРАННЫЙ РЕЖИМ (FULLSCREEN)
         if self.is_fullscreen {

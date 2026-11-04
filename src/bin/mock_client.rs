@@ -81,7 +81,7 @@ impl eframe::App for MockClientApp {
             }
         }
 
-        ctx.request_repaint_after(Duration::from_millis(33));
+        ctx.request_repaint_after(Duration::from_millis(16));
 
         let is_connected = self.sender.is_connected.load(Ordering::Relaxed);
         let telem = self.sender.telemetry.read().unwrap().clone();

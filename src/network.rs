@@ -1,16 +1,48 @@
 #![allow(dead_code, unused_variables)]
 
-use std::io::{BufWriter, Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows::Win32::System::Memory::{
+    CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile,
+    FILE_MAP_ALL_ACCESS, FILE_MAP_READ, PAGE_READWRITE,
+};
 
-pub const P2P_DEFAULT_PORT: u16 = 48120;
-pub const P2P_MAGIC: [u8; 4] = *b"NC01";
-pub const HEADER_SIZE: usize = 93;
+pub const SHM_HEADER_SIZE: usize = 256;
+pub const DT_WIDTH: u32 = 1280;
+pub const DT_HEIGHT: u32 = 720;
+pub const DT_SIZE: usize = (DT_WIDTH * DT_HEIGHT * 4) as usize; // 3,686,400 bytes
+
+pub const CAM_WIDTH: u32 = 640;
+pub const CAM_HEIGHT: u32 = 360;
+pub const CAM_SIZE: usize = (CAM_WIDTH * CAM_HEIGHT * 4) as usize; // 921,600 bytes
+
+pub const SHM_TOTAL_SIZE: usize = SHM_HEADER_SIZE + DT_SIZE + CAM_SIZE; // ~4.61 MB
+pub const SHM_MAGIC: u32 = 0x4E433031; // "NC01"
+
+#[repr(C)]
+pub struct ShmHeader {
+    pub magic: u32,
+    pub is_active: u32,
+    pub dt_seq: u64,
+    pub dt_w: u32,
+    pub dt_h: u32,
+    pub dt_offset: u32,
+    pub dt_size: u32,
+    pub cam_seq: u64,
+    pub cam_w: u32,
+    pub cam_h: u32,
+    pub cam_offset: u32,
+    pub cam_size: u32,
+    pub fps: f32,
+    pub bitrate_mbps: f32,
+    pub latency_ms: f32,
+    pub track_name: [u8; 128],
+}
 
 #[derive(Clone)]
 pub struct NetworkPeerFrame {
@@ -31,7 +63,7 @@ pub struct P2PTelemetry {
     pub total_bytes: u64,
 }
 
-/// Серверный приёмник входящего P2P-потока в основном приложении nanocord.exe
+/// Серверный аппаратный приёмник входящего P2P-потока через Windows Shared Memory (0% сетевых фризов)
 pub struct P2PReceiver {
     is_running: Arc<AtomicBool>,
     pub is_connected: Arc<AtomicBool>,
@@ -46,143 +78,116 @@ impl P2PReceiver {
         let is_connected = Arc::new(AtomicBool::new(false));
         let telemetry = Arc::new(RwLock::new(P2PTelemetry::default()));
 
-        // Канал с буфером на 4 кадра для сглаживания джиттера
-        let (dt_tx, dt_rx) = sync_channel(4);
-        let (cam_tx, cam_rx) = sync_channel(4);
+        // Канал с буфером на 2 кадра
+        let (dt_tx, dt_rx) = sync_channel(2);
+        let (cam_tx, cam_rx) = sync_channel(2);
 
         let running_clone = is_running.clone();
         let connected_clone = is_connected.clone();
         let telem_clone = telemetry.clone();
 
         thread::spawn(move || {
-            let addr = format!("127.0.0.1:{}", P2P_DEFAULT_PORT);
-            let listener = match TcpListener::bind(&addr) {
-                Ok(l) => {
-                    let _ = l.set_nonblocking(true);
-                    l
-                }
-                Err(e) => {
-                    eprintln!("[P2P Server] Failed to bind to {}: {}", addr, e);
-                    return;
-                }
-            };
-
-            println!("[P2P Server] Listening for mock client on {}", addr);
-
-            let mut header_buf = [0u8; HEADER_SIZE];
-            let mut payload_buf = vec![0u8; 1920 * 1080 * 4];
+            let shm_name_utf16: Vec<u16> = "Local\\Nanocord_P2P_SharedMem_v2\0".encode_utf16().collect();
+            let mut last_dt_seq = 0u64;
+            let mut last_cam_seq = 0u64;
+            let mut dt_frame_buf = vec![0u8; DT_SIZE];
+            let mut cam_frame_buf = vec![0u8; CAM_SIZE];
 
             while running_clone.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((mut stream, peer_addr)) => {
-                        println!("[P2P Server] Mock client connected from {}", peer_addr);
-                        let _ = stream.set_nodelay(true);
-                        // 3 секунды таймаут, чтобы временные задержки не убивали соединение
-                        let _ = stream.set_read_timeout(Some(Duration::from_millis(3000)));
-                        connected_clone.store(true, Ordering::Relaxed);
+                // Попытка открыть именованную разделяемую память от mock-клиента
+                let h_map = unsafe {
+                    OpenFileMappingW(
+                        FILE_MAP_READ.0,
+                        false,
+                        PCWSTR(shm_name_utf16.as_ptr()),
+                    )
+                };
 
-                        {
-                            let mut t = telem_clone.write().unwrap();
-                            t.is_connected = true;
-                            t.peer_addr = peer_addr.to_string();
-                        }
+                match h_map {
+                    Ok(handle) if !handle.is_invalid() => {
+                        let view_ptr = unsafe {
+                            MapViewOfFile(
+                                handle,
+                                FILE_MAP_READ,
+                                0,
+                                0,
+                                SHM_TOTAL_SIZE,
+                            )
+                        };
 
-                        let mut frames_in_second = 0u32;
-                        let mut bytes_in_second = 0u64;
-                        let mut sec_timer = Instant::now();
-                        let mut total_frames = 0u64;
-                        let mut total_bytes = 0u64;
+                        if !view_ptr.Value.is_null() {
+                            println!("[P2P Server] Attached to Windows Shared Memory pipeline!");
+                            connected_clone.store(true, Ordering::Relaxed);
 
-                        while running_clone.load(Ordering::Relaxed) {
-                            match stream.read_exact(&mut header_buf) {
-                                Ok(()) => {},
-                                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut || e.kind() == std::io::ErrorKind::WouldBlock => {
-                                    continue;
-                                }
-                                Err(_) => {
-                                    break; // Реальный разрыв соединения
-                                }
-                            }
+                            let header_ptr = view_ptr.Value as *const ShmHeader;
+                            let dt_ptr = unsafe { (view_ptr.Value as *const u8).add(SHM_HEADER_SIZE) };
+                            let cam_ptr = unsafe { (view_ptr.Value as *const u8).add(SHM_HEADER_SIZE + DT_SIZE) };
 
-                            if &header_buf[0..4] != &P2P_MAGIC {
-                                break;
-                            }
-
-                            let pkt_type = header_buf[4];
-                            let width = u16::from_le_bytes([header_buf[5], header_buf[6]]) as u32;
-                            let height = u16::from_le_bytes([header_buf[7], header_buf[8]]) as u32;
-                            let seq = u64::from_le_bytes(header_buf[9..17].try_into().unwrap());
-                            let timestamp_ms = u64::from_le_bytes(header_buf[17..25].try_into().unwrap());
-                            let payload_len = u32::from_le_bytes(header_buf[25..29].try_into().unwrap()) as usize;
-
-                            let track_bytes = &header_buf[29..93];
-                            let track_end = track_bytes.iter().position(|&b| b == 0).unwrap_or(track_bytes.len());
-                            let track_name = String::from_utf8_lossy(&track_bytes[..track_end]).to_string();
-
-                            if payload_len > payload_buf.len() {
-                                payload_buf.resize(payload_len, 0);
-                            }
-
-                            match stream.read_exact(&mut payload_buf[..payload_len]) {
-                                Ok(()) => {},
-                                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut || e.kind() == std::io::ErrorKind::WouldBlock => {
-                                    continue;
-                                }
-                                Err(_) => {
+                            while running_clone.load(Ordering::Relaxed) {
+                                let header = unsafe { &*header_ptr };
+                                if header.magic != SHM_MAGIC || header.is_active == 0 {
                                     break;
                                 }
-                            }
 
-                            frames_in_second += 1;
-                            bytes_in_second += (HEADER_SIZE + payload_len) as u64;
-                            total_frames += 1;
-                            total_bytes += (HEADER_SIZE + payload_len) as u64;
+                                // 1. Чтение нового кадра рабочего стола
+                                if header.dt_seq != last_dt_seq {
+                                    last_dt_seq = header.dt_seq;
+                                    unsafe {
+                                        std::ptr::copy_nonoverlapping(dt_ptr, dt_frame_buf.as_mut_ptr(), DT_SIZE);
+                                    }
+                                    let _ = dt_tx.try_send(NetworkPeerFrame {
+                                        width: header.dt_w,
+                                        height: header.dt_h,
+                                        rgba: dt_frame_buf.clone(),
+                                    });
+                                }
 
-                            let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-                            let latency = if now_ms >= timestamp_ms { (now_ms - timestamp_ms) as f32 } else { 0.4 };
+                                // 2. Чтение нового кадра камеры
+                                if header.cam_seq != last_cam_seq {
+                                    last_cam_seq = header.cam_seq;
+                                    unsafe {
+                                        std::ptr::copy_nonoverlapping(cam_ptr, cam_frame_buf.as_mut_ptr(), CAM_SIZE);
+                                    }
+                                    let _ = cam_tx.try_send(NetworkPeerFrame {
+                                        width: header.cam_w,
+                                        height: header.cam_h,
+                                        rgba: cam_frame_buf.clone(),
+                                    });
+                                }
 
-                            if sec_timer.elapsed() >= Duration::from_secs(1) {
-                                let fps = frames_in_second as f32 / sec_timer.elapsed().as_secs_f32();
-                                let mbps = (bytes_in_second as f32 * 8.0) / (1_000_000.0 * sec_timer.elapsed().as_secs_f32());
+                                // 3. Обновление телеметрии
+                                let track_end = header.track_name.iter().position(|&b| b == 0).unwrap_or(header.track_name.len());
+                                let track_str = String::from_utf8_lossy(&header.track_name[..track_end]).to_string();
                                 {
                                     let mut t = telem_clone.write().unwrap();
-                                    t.fps = fps;
-                                    t.bitrate_mbps = mbps;
-                                    t.latency_ms = latency.clamp(0.2, 50.0);
-                                    t.current_track = track_name.clone();
-                                    t.total_frames = total_frames;
-                                    t.total_bytes = total_bytes;
+                                    t.is_connected = true;
+                                    t.fps = header.fps;
+                                    t.bitrate_mbps = header.bitrate_mbps;
+                                    t.latency_ms = header.latency_ms;
+                                    t.current_track = track_str;
+                                    t.total_frames = header.dt_seq;
+                                    t.total_bytes = header.dt_seq * (DT_SIZE as u64);
                                 }
-                                frames_in_second = 0;
-                                bytes_in_second = 0;
-                                sec_timer = Instant::now();
+
+                                thread::sleep(Duration::from_millis(8)); // ~120 Hz проверка обновления
                             }
 
-                            let frame = NetworkPeerFrame {
-                                width,
-                                height,
-                                rgba: payload_buf[..payload_len].to_vec(),
-                            };
-
-                            if pkt_type == 1 {
-                                let _ = dt_tx.try_send(frame);
-                            } else if pkt_type == 2 {
-                                let _ = cam_tx.try_send(frame);
+                            unsafe {
+                                let _ = UnmapViewOfFile(view_ptr);
                             }
                         }
 
-                        println!("[P2P Server] Mock client disconnected");
+                        unsafe {
+                            let _ = CloseHandle(handle);
+                        }
+                    }
+                    _ => {
                         connected_clone.store(false, Ordering::Relaxed);
                         {
                             let mut t = telem_clone.write().unwrap();
                             t.is_connected = false;
                         }
-                    }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(e) => {
-                        thread::sleep(Duration::from_millis(40));
+                        thread::sleep(Duration::from_millis(250));
                     }
                 }
             }
@@ -202,7 +207,7 @@ impl P2PReceiver {
     }
 }
 
-/// Клиентский передатчик P2P потока для отдельного nanocord_mock.exe
+/// Клиентский передатчик P2P потока для отдельного nanocord_mock.exe через Windows Shared Memory
 pub struct P2PSender {
     pub is_running: Arc<AtomicBool>,
     pub is_connected: Arc<AtomicBool>,
@@ -234,142 +239,151 @@ impl P2PSender {
         let telem_clone = telemetry.clone();
 
         thread::spawn(move || {
-            let addr = format!("127.0.0.1:{}", P2P_DEFAULT_PORT);
+            let shm_name_utf16: Vec<u16> = "Local\\Nanocord_P2P_SharedMem_v2\0".encode_utf16().collect();
             let mut dt_seq = 0u64;
             let mut cam_seq = 0u64;
             let start_time = Instant::now();
 
-            let dt_w = 1280u32;
-            let dt_h = 720u32;
-            let cam_w = 640u32;
-            let cam_h = 360u32;
+            let h_map: windows::core::Result<HANDLE> = unsafe {
+                CreateFileMappingW(
+                    INVALID_HANDLE_VALUE,
+                    None::<*const windows::Win32::Security::SECURITY_ATTRIBUTES>,
+                    PAGE_READWRITE,
+                    0,
+                    SHM_TOTAL_SIZE as u32,
+                    PCWSTR(shm_name_utf16.as_ptr()),
+                )
+            };
+
+            let handle = match h_map {
+                Ok(h) if !h.is_invalid() => h,
+                _ => {
+                    eprintln!("[Mock Client] Failed to create Windows Shared Memory");
+                    return;
+                }
+            };
+
+            let view_ptr = unsafe {
+                MapViewOfFile(
+                    handle,
+                    FILE_MAP_ALL_ACCESS,
+                    0,
+                    0,
+                    SHM_TOTAL_SIZE,
+                )
+            };
+
+            if view_ptr.Value.is_null() {
+                eprintln!("[Mock Client] Failed to map view of Windows Shared Memory");
+                unsafe { let _ = CloseHandle(handle); }
+                return;
+            }
+
+            println!("[Mock Client] Windows Shared Memory pipeline ready (4.6 MB zero-copy RAM)");
+            connected_clone.store(true, Ordering::Relaxed);
+
+            let header_ptr = view_ptr.Value as *mut ShmHeader;
+            let dt_ptr = unsafe { (view_ptr.Value as *mut u8).add(SHM_HEADER_SIZE) };
+            let cam_ptr = unsafe { (view_ptr.Value as *mut u8).add(SHM_HEADER_SIZE + DT_SIZE) };
+
+            let mut frames_in_sec = 0u32;
+            let mut sec_timer = Instant::now();
 
             while running_clone.load(Ordering::Relaxed) {
-                connected_clone.store(false, Ordering::Relaxed);
-                println!("[Mock Client] Connecting to Nanocord at {}...", addr);
+                let cur_fps = fps_clone.load(Ordering::Relaxed).clamp(15, 144);
+                let frame_interval = Duration::from_secs_f32(1.0 / cur_fps as f32);
+                let loop_start = Instant::now();
 
-                let raw_stream = loop {
-                    if !running_clone.load(Ordering::Relaxed) {
-                        return;
+                dt_seq += 1;
+                let elapsed = start_time.elapsed().as_secs_f32();
+                let cur_track = bgm_clone.lock().unwrap().current_track_name();
+
+                // 1. Быстрая генерация и запись экрана в разделяемую память (1280x720)
+                let dt_rgba = generate_mock_desktop_frame(DT_WIDTH, DT_HEIGHT, dt_seq, elapsed, &cur_track);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(dt_rgba.as_ptr(), dt_ptr, DT_SIZE);
+                }
+                let _ = prev_dt_tx.try_send(NetworkPeerFrame {
+                    width: DT_WIDTH,
+                    height: DT_HEIGHT,
+                    rgba: dt_rgba,
+                });
+
+                // 2. Генерация и запись камеры в разделяемую память (640x360)
+                if dt_seq % 2 == 0 {
+                    cam_seq += 1;
+                    let cam_rgba = generate_mock_camera_frame(CAM_WIDTH, CAM_HEIGHT, cam_seq, elapsed);
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(cam_rgba.as_ptr(), cam_ptr, CAM_SIZE);
                     }
-                    match TcpStream::connect(&addr) {
-                        Ok(s) => {
-                            let _ = s.set_nodelay(true);
-                            println!("[Mock Client] Connected to Nanocord!");
-                            connected_clone.store(true, Ordering::Relaxed);
-                            break s;
-                        }
-                        Err(_) => {
-                            thread::sleep(Duration::from_millis(300));
-                        }
-                    }
+                    let _ = prev_cam_tx.try_send(NetworkPeerFrame {
+                        width: CAM_WIDTH,
+                        height: CAM_HEIGHT,
+                        rgba: cam_rgba,
+                    });
+                }
+
+                frames_in_sec += 1;
+                let now_fps = if sec_timer.elapsed() >= Duration::from_secs(1) {
+                    let f = frames_in_sec as f32 / sec_timer.elapsed().as_secs_f32();
+                    frames_in_sec = 0;
+                    sec_timer = Instant::now();
+                    f
+                } else {
+                    cur_fps as f32
                 };
 
-                // Буферизованный вывод 512 KB для максимальной пропускной способности без блокировок
-                let mut stream = BufWriter::with_capacity(512 * 1024, raw_stream);
+                // 3. Обновление заголовка в Shared Memory
+                let mut track_bytes = [0u8; 128];
+                let tb = cur_track.as_bytes();
+                let clen = tb.len().min(127);
+                track_bytes[..clen].copy_from_slice(&tb[..clen]);
 
-                let mut frames_in_sec = 0u32;
-                let mut bytes_in_sec = 0u64;
-                let mut sec_timer = Instant::now();
-                let mut total_frames = 0u64;
-                let mut total_bytes = 0u64;
+                let bitrate = (now_fps * (DT_SIZE + CAM_SIZE / 2) as f32 * 8.0) / 1_000_000.0;
 
-                while running_clone.load(Ordering::Relaxed) {
-                    let cur_fps = fps_clone.load(Ordering::Relaxed).clamp(15, 144);
-                    let frame_interval = Duration::from_secs_f32(1.0 / cur_fps as f32);
-                    let loop_start = Instant::now();
-
-                    dt_seq += 1;
-                    let elapsed = start_time.elapsed().as_secs_f32();
-                    let cur_track = bgm_clone.lock().unwrap().current_track_name();
-
-                    // 1. Быстрая генерация и отправка экрана (1280x720)
-                    let dt_rgba = generate_mock_desktop_frame(dt_w, dt_h, dt_seq, elapsed, &cur_track);
-                    let _ = prev_dt_tx.try_send(NetworkPeerFrame {
-                        width: dt_w,
-                        height: dt_h,
-                        rgba: dt_rgba.clone(),
-                    });
-
-                    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-                    let mut header = [0u8; HEADER_SIZE];
-                    header[0..4].copy_from_slice(&P2P_MAGIC);
-                    header[4] = 1; // 1 = Desktop
-                    header[5..7].copy_from_slice(&(dt_w as u16).to_le_bytes());
-                    header[7..9].copy_from_slice(&(dt_h as u16).to_le_bytes());
-                    header[9..17].copy_from_slice(&dt_seq.to_le_bytes());
-                    header[17..25].copy_from_slice(&now_ms.to_le_bytes());
-                    header[25..29].copy_from_slice(&(dt_rgba.len() as u32).to_le_bytes());
-
-                    let track_bytes = cur_track.as_bytes();
-                    let copy_len = track_bytes.len().min(63);
-                    header[29..29 + copy_len].copy_from_slice(&track_bytes[..copy_len]);
-
-                    if stream.write_all(&header).is_err() || stream.write_all(&dt_rgba).is_err() {
-                        println!("[Mock Client] Connection to Nanocord lost");
-                        break;
-                    }
-
-                    frames_in_sec += 1;
-                    bytes_in_sec += (HEADER_SIZE + dt_rgba.len()) as u64;
-                    total_frames += 1;
-                    total_bytes += (HEADER_SIZE + dt_rgba.len()) as u64;
-
-                    // 2. Генерация и отправка камеры (640x360 ~ 30 FPS)
-                    if dt_seq % 2 == 0 {
-                        cam_seq += 1;
-                        let cam_rgba = generate_mock_camera_frame(cam_w, cam_h, cam_seq, elapsed);
-                        let _ = prev_cam_tx.try_send(NetworkPeerFrame {
-                            width: cam_w,
-                            height: cam_h,
-                            rgba: cam_rgba.clone(),
-                        });
-
-                        let mut cam_header = [0u8; HEADER_SIZE];
-                        cam_header[0..4].copy_from_slice(&P2P_MAGIC);
-                        cam_header[4] = 2; // 2 = Camera
-                        cam_header[5..7].copy_from_slice(&(cam_w as u16).to_le_bytes());
-                        cam_header[7..9].copy_from_slice(&(cam_h as u16).to_le_bytes());
-                        cam_header[9..17].copy_from_slice(&cam_seq.to_le_bytes());
-                        cam_header[17..25].copy_from_slice(&now_ms.to_le_bytes());
-                        cam_header[25..29].copy_from_slice(&(cam_rgba.len() as u32).to_le_bytes());
-                        cam_header[29..29 + copy_len].copy_from_slice(&track_bytes[..copy_len]);
-
-                        if stream.write_all(&cam_header).is_err() || stream.write_all(&cam_rgba).is_err() {
-                            println!("[Mock Client] Connection to Nanocord lost");
-                            break;
-                        }
-
-                        frames_in_sec += 1;
-                        bytes_in_sec += (HEADER_SIZE + cam_rgba.len()) as u64;
-                        total_frames += 1;
-                        total_bytes += (HEADER_SIZE + cam_rgba.len()) as u64;
-                    }
-
-                    let _ = stream.flush();
-
-                    if sec_timer.elapsed() >= Duration::from_secs(1) {
-                        let fps = frames_in_sec as f32 / sec_timer.elapsed().as_secs_f32();
-                        let mbps = (bytes_in_sec as f32 * 8.0) / (1_000_000.0 * sec_timer.elapsed().as_secs_f32());
-                        {
-                            let mut t = telem_clone.write().unwrap();
-                            t.is_connected = true;
-                            t.fps = fps;
-                            t.bitrate_mbps = mbps;
-                            t.current_track = cur_track;
-                            t.total_frames = total_frames;
-                            t.total_bytes = total_bytes;
-                        }
-                        frames_in_sec = 0;
-                        bytes_in_sec = 0;
-                        sec_timer = Instant::now();
-                    }
-
-                    let elapsed_frame = loop_start.elapsed();
-                    if frame_interval > elapsed_frame {
-                        thread::sleep(frame_interval - elapsed_frame);
-                    }
+                unsafe {
+                    *header_ptr = ShmHeader {
+                        magic: SHM_MAGIC,
+                        is_active: 1,
+                        dt_seq,
+                        dt_w: DT_WIDTH,
+                        dt_h: DT_HEIGHT,
+                        dt_offset: SHM_HEADER_SIZE as u32,
+                        dt_size: DT_SIZE as u32,
+                        cam_seq,
+                        cam_w: CAM_WIDTH,
+                        cam_h: CAM_HEIGHT,
+                        cam_offset: (SHM_HEADER_SIZE + DT_SIZE) as u32,
+                        cam_size: CAM_SIZE as u32,
+                        fps: now_fps,
+                        bitrate_mbps: bitrate,
+                        latency_ms: 0.1, // Нулевая задержка памяти
+                        track_name: track_bytes,
+                    };
                 }
+
+                {
+                    let mut t = telem_clone.write().unwrap();
+                    t.is_connected = true;
+                    t.fps = now_fps;
+                    t.bitrate_mbps = bitrate;
+                    t.latency_ms = 0.1;
+                    t.current_track = cur_track;
+                    t.total_frames = dt_seq;
+                    t.total_bytes = dt_seq * (DT_SIZE as u64);
+                }
+
+                let elapsed_frame = loop_start.elapsed();
+                if frame_interval > elapsed_frame {
+                    thread::sleep(frame_interval - elapsed_frame);
+                }
+            }
+
+            // Завершение работы
+            unsafe {
+                (*header_ptr).is_active = 0;
+                let _ = UnmapViewOfFile(view_ptr);
+                let _ = CloseHandle(handle);
             }
         });
 
