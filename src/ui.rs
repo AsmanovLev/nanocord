@@ -367,276 +367,475 @@ pub fn apply_custom_theme(ctx: &egui::Context) {
 impl NanocordApp {
     /// Начальный экран (Lobby): запуск P2P-сервера со случайным кодом, подключение по IPv6/IPv4, буфер обмена
     fn render_lobby(&mut self, ui: &mut egui::Ui) {
-        let avail_w = ui.available_width();
-        let avail_h = ui.available_height();
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let avail_w = ui.available_width();
+                let content_w = avail_w.min(840.0).max(320.0);
+                let pad_x = ((avail_w - content_w) * 0.5).max(0.0);
 
-        // Верхний заголовок экрана
-        ui.vertical_centered(|ui| {
-            ui.add_space(10.0);
-            ui.label(egui::RichText::new("НАЧАЛЬНЫЙ ЭКРАН P2P КОМНАТЫ").size(22.0).strong().color(Color32::WHITE));
-            ui.label(egui::RichText::new("Прямой видеозвонок и стриминг экрана без серверов • Поддержка IPv6 [::] и IPv4 • Мгновенное подключение").size(12.5).color(Color32::from_rgb(160, 170, 188)));
-            ui.add_space(14.0);
-        });
+                ui.horizontal(|ui| {
+                    if pad_x > 0.0 {
+                        ui.add_space(pad_x);
+                    }
 
-        // Всплывающее уведомление (Toast) о копировании / вставке
-        if let Some((ref msg, time)) = self.copy_toast {
-            if time.elapsed() < Duration::from_secs(3) {
-                ui.vertical_centered(|ui| {
-                    egui::Frame::new()
-                        .fill(Color32::from_rgb(35, 165, 90))
-                        .corner_radius(CornerRadius::same(6))
-                        .inner_margin(egui::Margin::symmetric(16, 6))
-                        .show(ui, |ui| {
-                            ui.label(egui::RichText::new(msg).strong().color(Color32::WHITE));
+                    ui.vertical(|ui| {
+                        ui.set_width(content_w);
+
+                        // Верхний заголовок экрана
+                        ui.add_space(14.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                egui::RichText::new("P2P ВИДЕОКОМНАТА")
+                                    .size(22.0)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            );
+                            ui.add_space(3.0);
+                            ui.label(
+                                egui::RichText::new(
+                                    "Прямой видеозвонок и стриминг экрана без серверов • Поддержка IPv6 [::] и IPv4",
+                                )
+                                .size(12.5)
+                                .color(Color32::from_rgb(160, 170, 188)),
+                            );
                         });
-                    ui.add_space(8.0);
-                });
-            } else {
-                self.copy_toast = None;
-            }
-        }
+                        ui.add_space(16.0);
 
-        // Две большие карточки: Слева - Сервер (Хост), Справа - Клиент (Подключение)
-        let card_w = ((avail_w - 32.0) * 0.5).max(320.0);
-        let card_h = (avail_h - 90.0).max(370.0);
-
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-
-            // ==========================================
-            // КАРТОЧКА 1: СОЗДАТЬ СЕРВЕР (ХОСТ)
-            // ==========================================
-            egui::Frame::new()
-                .fill(Color32::from_rgb(26, 28, 32))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(45, 48, 56)))
-                .corner_radius(CornerRadius::same(12))
-                .inner_margin(18.0)
-                .show(ui, |ui| {
-                    ui.set_width(card_w);
-                    ui.set_height(card_h);
-
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("👑").size(20.0));
-                        ui.label(egui::RichText::new("СОЗДАТЬ КОМНАТУ (СЕРВЕР)").size(15.5).strong().color(Color32::WHITE));
-                    });
-                    ui.label(egui::RichText::new("Запустите сервер на порту с 3-значным кодом доступа и отправьте адрес собеседнику.").size(11.5).color(Color32::from_rgb(148, 155, 164)));
-                    ui.add_space(14.0);
-
-                    // Поле: Порт
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Порт сервера:").size(13.0).color(Color32::WHITE));
-                        ui.add(egui::TextEdit::singleline(&mut self.server_port_str).desired_width(80.0));
-                        ui.label(egui::RichText::new("(IPv6 + IPv4)").weak().size(11.0));
-                    });
-                    ui.add_space(8.0);
-
-                    // Поле: Случайный код [A-z0-9]
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Код доступа комнаты:").size(13.0).color(Color32::WHITE));
-                        ui.add(egui::TextEdit::singleline(&mut self.server_code_str).desired_width(65.0));
-                        if ui.button("🎲 Новый код").on_hover_text("Сгенерировать случайный 3-значный код [A-Za-z0-9]").clicked() {
-                            self.server_code_str = crate::network::generate_random_room_code();
+                        // Всплывающее уведомление (Toast) о копировании / вставке
+                        if let Some((ref msg, time)) = self.copy_toast {
+                            if time.elapsed() < Duration::from_secs(3) {
+                                ui.vertical_centered(|ui| {
+                                    egui::Frame::new()
+                                        .fill(Color32::from_rgb(35, 165, 90))
+                                        .corner_radius(CornerRadius::same(6))
+                                        .inner_margin(egui::Margin::symmetric(16, 6))
+                                        .show(ui, |ui| {
+                                            ui.label(egui::RichText::new(msg).strong().color(Color32::WHITE));
+                                        });
+                                });
+                                ui.add_space(10.0);
+                            } else {
+                                self.copy_toast = None;
+                            }
                         }
-                    });
-                    ui.add_space(14.0);
 
-                    // Плашка готового адреса для приглашения
-                    let invite_link_v6 = format!("[::1]:{}#{}", self.server_port_str.trim(), self.server_code_str.trim());
-                    let invite_link_v4 = format!("{}:{}#{}", self.local_ipv4_hint, self.server_port_str.trim(), self.server_code_str.trim());
+                        // 2 Равные колонки с гарантией отсутствия горизонтального переполнения и дрейфа
+                        ui.columns(2, |cols| {
+                            // ==========================================
+                            // КАРТОЧКА 1: СОЗДАТЬ СЕРВЕР (ХОСТ)
+                            // ==========================================
+                            egui::Frame::new()
+                                .fill(Color32::from_rgb(26, 28, 32))
+                                .stroke(Stroke::new(1.0, Color32::from_rgb(45, 48, 56)))
+                                .corner_radius(CornerRadius::same(12))
+                                .inner_margin(16.0)
+                                .show(&mut cols[0], |ui| {
+                                    let col_w = ui.available_width();
 
-                    egui::Frame::new()
-                        .fill(Color32::from_rgb(18, 20, 24))
-                        .stroke(Stroke::new(1.0, Color32::from_rgb(38, 41, 48)))
-                        .corner_radius(CornerRadius::same(8))
-                        .inner_margin(10.0)
-                        .show(ui, |ui| {
-                            ui.label(egui::RichText::new("Адрес для отправки собеседнику:").size(11.0).color(Color32::from_rgb(160, 170, 185)));
-                            ui.label(egui::RichText::new(&invite_link_v6).strong().size(13.0).color(Color32::from_rgb(88, 101, 242)));
-                            ui.label(egui::RichText::new(format!("IPv4 LAN: {}", invite_link_v4)).size(10.5).weak());
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new("👑").size(18.0));
+                                        ui.label(
+                                            egui::RichText::new("СОЗДАТЬ КОМНАТУ")
+                                                .size(15.0)
+                                                .strong()
+                                                .color(Color32::WHITE),
+                                        );
+                                    });
+                                    ui.add_space(2.0);
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Запустите сервер на порту с 3-значным кодом и отправьте адрес собеседнику.",
+                                        )
+                                        .size(11.0)
+                                        .color(Color32::from_rgb(148, 155, 164)),
+                                    );
+                                    ui.add_space(12.0);
+
+                                    // Поле: Порт
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new("Порт:").size(12.5).color(Color32::WHITE));
+                                        ui.add(egui::TextEdit::singleline(&mut self.server_port_str).desired_width(70.0));
+                                        ui.label(egui::RichText::new("(IPv6 + IPv4)").weak().size(11.0));
+                                    });
+                                    ui.add_space(6.0);
+
+                                    // Поле: Случайный код [A-z0-9]
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new("Код доступа:").size(12.5).color(Color32::WHITE));
+                                        ui.add(egui::TextEdit::singleline(&mut self.server_code_str).desired_width(60.0));
+                                        if ui
+                                            .button("🎲 Новый")
+                                            .on_hover_text("Сгенерировать случайный 3-значный код [A-Za-z0-9]")
+                                            .clicked()
+                                        {
+                                            self.server_code_str = crate::network::generate_random_room_code();
+                                        }
+                                    });
+                                    ui.add_space(12.0);
+
+                                    // Плашка готового адреса для приглашения
+                                    let invite_link_v6 = format!(
+                                        "[::1]:{}#{}",
+                                        self.server_port_str.trim(),
+                                        self.server_code_str.trim()
+                                    );
+                                    let invite_link_v4 = format!(
+                                        "{}:{}#{}",
+                                        self.local_ipv4_hint,
+                                        self.server_port_str.trim(),
+                                        self.server_code_str.trim()
+                                    );
+
+                                    egui::Frame::new()
+                                        .fill(Color32::from_rgb(18, 20, 24))
+                                        .stroke(Stroke::new(1.0, Color32::from_rgb(38, 41, 48)))
+                                        .corner_radius(CornerRadius::same(8))
+                                        .inner_margin(10.0)
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new("Адрес для собеседника:")
+                                                    .size(10.5)
+                                                    .color(Color32::from_rgb(160, 170, 185)),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(&invite_link_v6)
+                                                    .strong()
+                                                    .size(12.5)
+                                                    .color(Color32::from_rgb(88, 101, 242)),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(format!("IPv4 LAN: {}", invite_link_v4))
+                                                    .size(10.0)
+                                                    .weak(),
+                                            );
+                                        });
+
+                                    ui.add_space(10.0);
+
+                                    // Кнопка: Скопировать адрес сервера + код в буфер обмена
+                                    if ui
+                                        .add_sized(
+                                            [col_w, 36.0],
+                                            egui::Button::new(
+                                                egui::RichText::new("📋 Скопировать адрес + код")
+                                                    .strong()
+                                                    .size(12.0)
+                                                    .color(Color32::WHITE),
+                                            )
+                                            .fill(Color32::from_rgb(60, 66, 82))
+                                            .corner_radius(CornerRadius::same(8)),
+                                        )
+                                        .clicked()
+                                    {
+                                        ui.ctx().copy_text(invite_link_v6.clone());
+                                        crate::network::set_clipboard_text(&invite_link_v6);
+                                        self.copy_toast = Some((
+                                            format!("Скопировано: {}", invite_link_v6),
+                                            Instant::now(),
+                                        ));
+                                    }
+
+                                    ui.add_space(10.0);
+
+                                    // Кнопка: Запустить / Остановить сервер
+                                    let is_srv_running = self
+                                        .p2p_server
+                                        .as_ref()
+                                        .map(|s| s.is_running.load(Ordering::Relaxed))
+                                        .unwrap_or(false);
+                                    let is_srv_connected = self
+                                        .p2p_server
+                                        .as_ref()
+                                        .map(|s| s.is_connected.load(Ordering::Relaxed))
+                                        .unwrap_or(false);
+
+                                    if !is_srv_running {
+                                        if ui
+                                            .add_sized(
+                                                [col_w, 38.0],
+                                                egui::Button::new(
+                                                    egui::RichText::new("▶ Запустить сервер (IPv6 + IPv4)")
+                                                        .strong()
+                                                        .size(12.5)
+                                                        .color(Color32::WHITE),
+                                                )
+                                                .fill(Color32::from_rgb(35, 165, 90))
+                                                .corner_radius(CornerRadius::same(8)),
+                                            )
+                                            .clicked()
+                                        {
+                                            let port = self
+                                                .server_port_str
+                                                .trim()
+                                                .parse::<u16>()
+                                                .unwrap_or(48120);
+                                            let code = self.server_code_str.trim().to_string();
+                                            self.p2p_server =
+                                                Some(crate::network::P2PNetworkServer::start(port, code));
+                                        }
+                                    } else {
+                                        if ui
+                                            .add_sized(
+                                                [col_w, 38.0],
+                                                egui::Button::new(
+                                                    egui::RichText::new("⏹ Остановить сервер")
+                                                        .strong()
+                                                        .size(12.5)
+                                                        .color(Color32::WHITE),
+                                                )
+                                                .fill(Color32::from_rgb(218, 55, 60))
+                                                .corner_radius(CornerRadius::same(8)),
+                                            )
+                                            .clicked()
+                                        {
+                                            if let Some(srv) = self.p2p_server.take() {
+                                                srv.stop();
+                                            }
+                                        }
+                                    }
+
+                                    ui.add_space(8.0);
+
+                                    // Статус сервера
+                                    if let Some(ref srv) = self.p2p_server {
+                                        let st = srv.status.read().unwrap().clone();
+                                        let peer = srv.peer_addr.read().unwrap().clone();
+
+                                        if is_srv_connected {
+                                            ui.label(
+                                                egui::RichText::new(format!("🟢 Собеседник: {}", peer))
+                                                    .color(Color32::from_rgb(35, 165, 90))
+                                                    .strong()
+                                                    .size(11.5),
+                                            );
+                                            ui.add_space(6.0);
+                                            if ui
+                                                .add_sized(
+                                                    [col_w, 30.0],
+                                                    egui::Button::new(
+                                                        egui::RichText::new("Перейти к звонку →")
+                                                            .strong()
+                                                            .size(11.5)
+                                                            .color(Color32::WHITE),
+                                                    )
+                                                    .fill(Color32::from_rgb(88, 101, 242))
+                                                    .corner_radius(CornerRadius::same(6)),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.active_tab = Tab::CallAndStream;
+                                            }
+                                        } else {
+                                            ui.label(
+                                                egui::RichText::new(format!("🟡 {}", st))
+                                                    .color(Color32::from_rgb(234, 179, 8))
+                                                    .size(11.0),
+                                            );
+                                        }
+                                    } else {
+                                        ui.label(egui::RichText::new("⚪ Сервер не запущен").weak().size(11.0));
+                                    }
+                                });
+
+                            // ==========================================
+                            // КАРТОЧКА 2: ПОДКЛЮЧИТЬСЯ К КОМНАТЕ (КЛИЕНТ)
+                            // ==========================================
+                            egui::Frame::new()
+                                .fill(Color32::from_rgb(26, 28, 32))
+                                .stroke(Stroke::new(1.0, Color32::from_rgb(45, 48, 56)))
+                                .corner_radius(CornerRadius::same(12))
+                                .inner_margin(16.0)
+                                .show(&mut cols[1], |ui| {
+                                    let col_w = ui.available_width();
+
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new("🔗").size(18.0));
+                                        ui.label(
+                                            egui::RichText::new("ПОДКЛЮЧИТЬСЯ")
+                                                .size(15.0)
+                                                .strong()
+                                                .color(Color32::WHITE),
+                                        );
+                                    });
+                                    ui.add_space(2.0);
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Подключитесь к хосту по IPv6 / IPv4 адресу и 3-значному коду.",
+                                        )
+                                        .size(11.0)
+                                        .color(Color32::from_rgb(148, 155, 164)),
+                                    );
+                                    ui.add_space(12.0);
+
+                                    // Поле ввода: Адрес сервера + код
+                                    ui.label(
+                                        egui::RichText::new("Адрес сервера и код:")
+                                            .size(12.0)
+                                            .color(Color32::WHITE),
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.add_sized(
+                                        [col_w, 24.0],
+                                        egui::TextEdit::singleline(&mut self.client_target_str)
+                                            .hint_text("[::1]:48120#код или 192.168.1.5:48120#код"),
+                                    );
+
+                                    ui.add_space(12.0);
+
+                                    // Кнопка: Подключиться из буфера обмена
+                                    if ui
+                                        .add_sized(
+                                            [col_w, 36.0],
+                                            egui::Button::new(
+                                                egui::RichText::new("📋 Вставить из буфера и подключиться")
+                                                    .strong()
+                                                    .size(11.5)
+                                                    .color(Color32::WHITE),
+                                            )
+                                            .fill(Color32::from_rgb(88, 101, 242))
+                                            .corner_radius(CornerRadius::same(8)),
+                                        )
+                                        .clicked()
+                                    {
+                                        if let Some(clip) = crate::network::get_clipboard_text() {
+                                            if let Some((host, port, code)) =
+                                                crate::network::parse_room_target(&clip)
+                                            {
+                                                self.client_target_str =
+                                                    format!("{}:{}#{}", host, port, code);
+                                                self.copy_toast = Some((
+                                                    format!("Вставлено: {}:{}#{}", host, port, code),
+                                                    Instant::now(),
+                                                ));
+                                                self.connect_client(host, port, code);
+                                            } else {
+                                                self.copy_toast = Some((
+                                                    "Не удалось распознать адрес комнаты в буфере".to_string(),
+                                                    Instant::now(),
+                                                ));
+                                            }
+                                        } else {
+                                            self.copy_toast =
+                                                Some(("Буфер обмена пуст".to_string(), Instant::now()));
+                                        }
+                                    }
+
+                                    ui.add_space(10.0);
+
+                                    // Кнопка: Подключиться
+                                    let is_cli_connected = self
+                                        .p2p_client
+                                        .as_ref()
+                                        .map(|c| c.is_connected.load(Ordering::Relaxed))
+                                        .unwrap_or(false);
+                                    let is_cli_running = self
+                                        .p2p_client
+                                        .as_ref()
+                                        .map(|c| c.is_running.load(Ordering::Relaxed))
+                                        .unwrap_or(false);
+
+                                    if !is_cli_connected && !is_cli_running {
+                                        if ui
+                                            .add_sized(
+                                                [col_w, 38.0],
+                                                egui::Button::new(
+                                                    egui::RichText::new("Подключиться к серверу")
+                                                        .strong()
+                                                        .size(12.5)
+                                                        .color(Color32::WHITE),
+                                                )
+                                                .fill(Color32::from_rgb(35, 165, 90))
+                                                .corner_radius(CornerRadius::same(8)),
+                                            )
+                                            .clicked()
+                                        {
+                                            if let Some((host, port, code)) =
+                                                crate::network::parse_room_target(&self.client_target_str)
+                                            {
+                                                self.connect_client(host, port, code);
+                                            } else {
+                                                self.client_status_msg =
+                                                    "Укажите адрес в формате [::1]:48120#код".to_string();
+                                            }
+                                        }
+                                    } else {
+                                        if ui
+                                            .add_sized(
+                                                [col_w, 38.0],
+                                                egui::Button::new(
+                                                    egui::RichText::new("Отключиться")
+                                                        .strong()
+                                                        .size(12.5)
+                                                        .color(Color32::WHITE),
+                                                )
+                                                .fill(Color32::from_rgb(218, 55, 60))
+                                                .corner_radius(CornerRadius::same(8)),
+                                            )
+                                            .clicked()
+                                        {
+                                            if let Some(cli) = self.p2p_client.take() {
+                                                cli.stop();
+                                            }
+                                            self.client_status_msg = "Отключено".to_string();
+                                        }
+                                    }
+
+                                    ui.add_space(8.0);
+
+                                    // Статус клиента
+                                    if let Some(ref cli) = self.p2p_client {
+                                        let st = cli.status.read().unwrap().clone();
+                                        if is_cli_connected {
+                                            ui.label(
+                                                egui::RichText::new(format!("🟢 {}", st))
+                                                    .color(Color32::from_rgb(35, 165, 90))
+                                                    .strong()
+                                                    .size(11.5),
+                                            );
+                                            ui.add_space(6.0);
+                                            if ui
+                                                .add_sized(
+                                                    [col_w, 30.0],
+                                                    egui::Button::new(
+                                                        egui::RichText::new("Перейти к звонку →")
+                                                            .strong()
+                                                            .size(11.5)
+                                                            .color(Color32::WHITE),
+                                                    )
+                                                    .fill(Color32::from_rgb(88, 101, 242))
+                                                    .corner_radius(CornerRadius::same(6)),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.active_tab = Tab::CallAndStream;
+                                            }
+                                        } else {
+                                            ui.label(
+                                                egui::RichText::new(format!("⏳ {}", st))
+                                                    .color(Color32::from_rgb(234, 179, 8))
+                                                    .size(11.0),
+                                            );
+                                        }
+                                    } else if !self.client_status_msg.is_empty() {
+                                        let col = if self.client_status_msg.starts_with("Ошибка") {
+                                            Color32::from_rgb(218, 55, 60)
+                                        } else {
+                                            Color32::from_rgb(148, 155, 164)
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(&self.client_status_msg)
+                                                .color(col)
+                                                .size(11.0),
+                                        );
+                                    }
+                                });
                         });
 
-                    ui.add_space(12.0);
-
-                    // Кнопка: Скопировать адрес сервера + код в буфер обмена
-                    if ui.add(egui::Button::new(egui::RichText::new("📋 Скопировать адрес сервера + код в буфер").strong().size(12.5).color(Color32::WHITE))
-                        .fill(Color32::from_rgb(60, 66, 82))
-                        .min_size(Vec2::new(card_w - 36.0, 36.0))
-                        .corner_radius(CornerRadius::same(8)))
-                        .clicked()
-                    {
-                        ui.ctx().copy_text(invite_link_v6.clone());
-                        crate::network::set_clipboard_text(&invite_link_v6);
-                        self.copy_toast = Some((format!("Скопировано в буфер: {}", invite_link_v6), Instant::now()));
-                    }
-
-                    ui.add_space(12.0);
-
-                    // Кнопка: Запустить / Остановить сервер
-                    let is_srv_running = self.p2p_server.as_ref().map(|s| s.is_running.load(Ordering::Relaxed)).unwrap_or(false);
-                    let is_srv_connected = self.p2p_server.as_ref().map(|s| s.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
-
-                    if !is_srv_running {
-                        if ui.add(egui::Button::new(egui::RichText::new("▶ Запустить сервер (IPv6 + IPv4)").strong().size(13.5).color(Color32::WHITE))
-                            .fill(Color32::from_rgb(35, 165, 90))
-                            .min_size(Vec2::new(card_w - 36.0, 40.0))
-                            .corner_radius(CornerRadius::same(8)))
-                            .clicked()
-                        {
-                            let port = self.server_port_str.trim().parse::<u16>().unwrap_or(48120);
-                            let code = self.server_code_str.trim().to_string();
-                            self.p2p_server = Some(crate::network::P2PNetworkServer::start(port, code));
-                        }
-                    } else {
-                        if ui.add(egui::Button::new(egui::RichText::new("⏹ Остановить сервер").strong().size(13.5).color(Color32::WHITE))
-                            .fill(Color32::from_rgb(218, 55, 60))
-                            .min_size(Vec2::new(card_w - 36.0, 40.0))
-                            .corner_radius(CornerRadius::same(8)))
-                            .clicked()
-                        {
-                            if let Some(srv) = self.p2p_server.take() {
-                                srv.stop();
-                            }
-                        }
-                    }
-
-                    ui.add_space(10.0);
-
-                    // Статус сервера
-                    if let Some(ref srv) = self.p2p_server {
-                        let st = srv.status.read().unwrap().clone();
-                        let peer = srv.peer_addr.read().unwrap().clone();
-
-                        if is_srv_connected {
-                            ui.label(egui::RichText::new(format!("🟢 Собеседник подключен: {}", peer)).color(Color32::from_rgb(35, 165, 90)).strong().size(12.0));
-                            ui.add_space(6.0);
-                            if ui.add(egui::Button::new(egui::RichText::new("Перейти к звонку и стриму →").strong().size(12.5).color(Color32::WHITE))
-                                .fill(Color32::from_rgb(88, 101, 242))
-                                .min_size(Vec2::new(card_w - 36.0, 32.0))
-                                .corner_radius(CornerRadius::same(6)))
-                                .clicked()
-                            {
-                                self.active_tab = Tab::CallAndStream;
-                            }
-                        } else {
-                            ui.label(egui::RichText::new(format!("🟡 {}", st)).color(Color32::from_rgb(234, 179, 8)).size(11.5));
-                        }
-                    } else {
-                        ui.label(egui::RichText::new("⚪ Сервер не запущен").weak().size(11.5));
-                    }
-                });
-
-            ui.add_space(12.0);
-
-            // ==========================================
-            // КАРТОЧКА 2: ПОДКЛЮЧИТЬСЯ К КОМНАТЕ (КЛИЕНТ)
-            // ==========================================
-            egui::Frame::new()
-                .fill(Color32::from_rgb(26, 28, 32))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(45, 48, 56)))
-                .corner_radius(CornerRadius::same(12))
-                .inner_margin(18.0)
-                .show(ui, |ui| {
-                    ui.set_width(card_w);
-                    ui.set_height(card_h);
-
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("🔗").size(20.0));
-                        ui.label(egui::RichText::new("ПОДКЛЮЧИТЬСЯ К КОМНАТЕ").size(15.5).strong().color(Color32::WHITE));
+                        ui.add_space(20.0);
                     });
-                    ui.label(egui::RichText::new("Подключитесь к серверу собеседника по IPv6 / IPv4 адресу и 3-значному коду доступа.").size(11.5).color(Color32::from_rgb(148, 155, 164)));
-                    ui.add_space(14.0);
-
-                    // Поле ввода: Адрес сервера + код
-                    ui.label(egui::RichText::new("Адрес сервера и код (например [::1]:48120#7xK):").size(12.5).color(Color32::WHITE));
-                    ui.add_space(4.0);
-                    ui.add(egui::TextEdit::singleline(&mut self.client_target_str)
-                        .hint_text("[::1]:48120#7xK или 192.168.1.5:48120#7xK")
-                        .desired_width(card_w - 36.0));
-
-                    ui.add_space(12.0);
-
-                    // Кнопка: Подключиться из буфера обмена
-                    if ui.add(egui::Button::new(egui::RichText::new("📋 Подключиться из буфера обмена").strong().size(12.5).color(Color32::WHITE))
-                        .fill(Color32::from_rgb(88, 101, 242))
-                        .min_size(Vec2::new(card_w - 36.0, 36.0))
-                        .corner_radius(CornerRadius::same(8)))
-                        .clicked()
-                    {
-                        if let Some(clip) = crate::network::get_clipboard_text() {
-                            if let Some((host, port, code)) = crate::network::parse_room_target(&clip) {
-                                self.client_target_str = format!("{}:{}#{}", host, port, code);
-                                self.copy_toast = Some((format!("Вставлено из буфера: {}:{}#{}", host, port, code), Instant::now()));
-                                self.connect_client(host, port, code);
-                            } else {
-                                self.copy_toast = Some(("Не удалось распознать адрес комнаты в буфере".to_string(), Instant::now()));
-                            }
-                        } else {
-                            self.copy_toast = Some(("Буфер обмена пуст".to_string(), Instant::now()));
-                        }
-                    }
-
-                    ui.add_space(12.0);
-
-                    // Кнопка: Подключиться
-                    let is_cli_connected = self.p2p_client.as_ref().map(|c| c.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
-                    let is_cli_running = self.p2p_client.as_ref().map(|c| c.is_running.load(Ordering::Relaxed)).unwrap_or(false);
-
-                    if !is_cli_connected && !is_cli_running {
-                        if ui.add(egui::Button::new(egui::RichText::new("Подключиться к серверу").strong().size(13.5).color(Color32::WHITE))
-                            .fill(Color32::from_rgb(35, 165, 90))
-                            .min_size(Vec2::new(card_w - 36.0, 40.0))
-                            .corner_radius(CornerRadius::same(8)))
-                            .clicked()
-                        {
-                            if let Some((host, port, code)) = crate::network::parse_room_target(&self.client_target_str) {
-                                self.connect_client(host, port, code);
-                            } else {
-                                self.client_status_msg = "Укажите адрес в формате [::1]:48120#код".to_string();
-                            }
-                        }
-                    } else {
-                        if ui.add(egui::Button::new(egui::RichText::new("Отключиться").strong().size(13.5).color(Color32::WHITE))
-                            .fill(Color32::from_rgb(218, 55, 60))
-                            .min_size(Vec2::new(card_w - 36.0, 40.0))
-                            .corner_radius(CornerRadius::same(8)))
-                            .clicked()
-                        {
-                            if let Some(cli) = self.p2p_client.take() {
-                                cli.stop();
-                            }
-                            self.client_status_msg = "Отключено".to_string();
-                        }
-                    }
-
-                    ui.add_space(10.0);
-
-                    // Статус клиента
-                    if let Some(ref cli) = self.p2p_client {
-                        let st = cli.status.read().unwrap().clone();
-                        if is_cli_connected {
-                            ui.label(egui::RichText::new(format!("🟢 {}", st)).color(Color32::from_rgb(35, 165, 90)).strong().size(12.0));
-                            ui.add_space(6.0);
-                            if ui.add(egui::Button::new(egui::RichText::new("Перейти к звонку и стриму →").strong().size(12.5).color(Color32::WHITE))
-                                .fill(Color32::from_rgb(88, 101, 242))
-                                .min_size(Vec2::new(card_w - 36.0, 32.0))
-                                .corner_radius(CornerRadius::same(6)))
-                                .clicked()
-                            {
-                                self.active_tab = Tab::CallAndStream;
-                            }
-                        } else {
-                            ui.label(egui::RichText::new(format!("⏳ {}", st)).color(Color32::from_rgb(234, 179, 8)).size(11.5));
-                        }
-                    } else if !self.client_status_msg.is_empty() {
-                        let col = if self.client_status_msg.starts_with("Ошибка") {
-                            Color32::from_rgb(218, 55, 60)
-                        } else {
-                            Color32::from_rgb(148, 155, 164)
-                        };
-                        ui.label(egui::RichText::new(&self.client_status_msg).color(col).size(11.5));
-                    }
                 });
-        });
+            });
     }
 
     fn connect_client(&mut self, host: String, port: u16, code: String) {
