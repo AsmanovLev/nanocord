@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 pub const WAVEFORM_SAMPLES: usize = 500; // 500 срезов истории (~10 секунд)
 
@@ -141,11 +142,11 @@ pub enum StageSource {
     RemoteCamera,
     LocalDesktop,
     LocalCamera,
-    MockSource,
 }
 
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum Tab {
+    Lobby,
     CallAndStream,
     BenchmarkMatrix,
     AudioAndSpectrum,
@@ -202,16 +203,20 @@ pub struct NanocordApp {
     pub game_waveform: AudioWaveform,
     pub anim_time: f32,
 
-    // Сетевой P2P-приёмник от nanocord_mock.exe
-    pub p2p_receiver: Option<crate::network::P2PReceiver>,
+    // Сетевой P2P сервер и клиент (IPv6 + IPv4)
+    pub p2p_server: Option<crate::network::P2PNetworkServer>,
+    pub p2p_client: Option<crate::network::P2PNetworkClient>,
     pub remote_desktop_texture: Option<egui::TextureHandle>,
     pub remote_camera_texture: Option<egui::TextureHandle>,
 
-    // Встроенный мок-источник (Test Pattern + BGM)
-    pub mock_source: Option<crate::network::InternalMockSource>,
-    pub is_mock_active: bool,
-    pub mock_desktop_texture: Option<egui::TextureHandle>,
-    pub mock_camera_texture: Option<egui::TextureHandle>,
+    // Поля начального экрана (Комната / Lobby)
+    pub server_port_str: String,
+    pub server_code_str: String,
+    pub client_target_str: String,
+    pub client_status_msg: String,
+    pub copy_toast: Option<(String, Instant)>,
+    pub local_ipv6_hint: String,
+    pub local_ipv4_hint: String,
 
     // Бенчмарк матрица
     pub benchmark_results: Option<Vec<BenchmarkResult>>,
@@ -259,13 +264,15 @@ impl Default for NanocordApp {
             let _ = image::save_buffer(path, &rgba, native_w, native_h, image::ColorType::Rgba8);
         }
 
+        let (hint_v6, hint_v4) = crate::network::get_local_ip_hint();
+
         Self {
-            active_tab: Tab::CallAndStream,
+            active_tab: Tab::Lobby,
             is_fullscreen: false,
             is_sidebar_collapsed: false,
             fit_aspect_ratio: true,
 
-            active_stage: StageSource::LocalDesktop,
+            active_stage: StageSource::RemoteDesktop,
             is_streaming: Arc::new(AtomicBool::new(false)),
             is_mic_muted: false,
             is_deafened: false,
@@ -297,14 +304,18 @@ impl Default for NanocordApp {
             game_waveform: AudioWaveform::new(),
             anim_time: 0.0,
 
-            p2p_receiver: Some(crate::network::P2PReceiver::start()),
+            p2p_server: None,
+            p2p_client: None,
             remote_desktop_texture: None,
             remote_camera_texture: None,
 
-            mock_source: Some(crate::network::InternalMockSource::start()),
-            is_mock_active: true,
-            mock_desktop_texture: None,
-            mock_camera_texture: None,
+            server_port_str: "48120".to_string(),
+            server_code_str: crate::network::generate_random_room_code(),
+            client_target_str: String::new(),
+            client_status_msg: "Не подключен".to_string(),
+            copy_toast: None,
+            local_ipv6_hint: hint_v6,
+            local_ipv4_hint: hint_v4,
 
             benchmark_results: None,
             benchmark_matrix: Some(default_matrix),
@@ -354,6 +365,286 @@ pub fn apply_custom_theme(ctx: &egui::Context) {
 }
 
 impl NanocordApp {
+    /// Начальный экран (Lobby): запуск P2P-сервера со случайным кодом, подключение по IPv6/IPv4, буфер обмена
+    fn render_lobby(&mut self, ui: &mut egui::Ui) {
+        let avail_w = ui.available_width();
+        let avail_h = ui.available_height();
+
+        // Верхний заголовок экрана
+        ui.vertical_centered(|ui| {
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new("НАЧАЛЬНЫЙ ЭКРАН P2P КОМНАТЫ").size(22.0).strong().color(Color32::WHITE));
+            ui.label(egui::RichText::new("Прямой видеозвонок и стриминг экрана без серверов • Поддержка IPv6 [::] и IPv4 • Мгновенное подключение").size(12.5).color(Color32::from_rgb(160, 170, 188)));
+            ui.add_space(14.0);
+        });
+
+        // Всплывающее уведомление (Toast) о копировании / вставке
+        if let Some((ref msg, time)) = self.copy_toast {
+            if time.elapsed() < Duration::from_secs(3) {
+                ui.vertical_centered(|ui| {
+                    egui::Frame::new()
+                        .fill(Color32::from_rgb(35, 165, 90))
+                        .corner_radius(CornerRadius::same(6))
+                        .inner_margin(egui::Margin::symmetric(16, 6))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(msg).strong().color(Color32::WHITE));
+                        });
+                    ui.add_space(8.0);
+                });
+            } else {
+                self.copy_toast = None;
+            }
+        }
+
+        // Две большие карточки: Слева - Сервер (Хост), Справа - Клиент (Подключение)
+        let card_w = ((avail_w - 32.0) * 0.5).max(320.0);
+        let card_h = (avail_h - 90.0).max(370.0);
+
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+
+            // ==========================================
+            // КАРТОЧКА 1: СОЗДАТЬ СЕРВЕР (ХОСТ)
+            // ==========================================
+            egui::Frame::new()
+                .fill(Color32::from_rgb(26, 28, 32))
+                .stroke(Stroke::new(1.0, Color32::from_rgb(45, 48, 56)))
+                .corner_radius(CornerRadius::same(12))
+                .inner_margin(18.0)
+                .show(ui, |ui| {
+                    ui.set_width(card_w);
+                    ui.set_height(card_h);
+
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("👑").size(20.0));
+                        ui.label(egui::RichText::new("СОЗДАТЬ КОМНАТУ (СЕРВЕР)").size(15.5).strong().color(Color32::WHITE));
+                    });
+                    ui.label(egui::RichText::new("Запустите сервер на порту с 3-значным кодом доступа и отправьте адрес собеседнику.").size(11.5).color(Color32::from_rgb(148, 155, 164)));
+                    ui.add_space(14.0);
+
+                    // Поле: Порт
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Порт сервера:").size(13.0).color(Color32::WHITE));
+                        ui.add(egui::TextEdit::singleline(&mut self.server_port_str).desired_width(80.0));
+                        ui.label(egui::RichText::new("(IPv6 + IPv4)").weak().size(11.0));
+                    });
+                    ui.add_space(8.0);
+
+                    // Поле: Случайный код [A-z0-9]
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Код доступа комнаты:").size(13.0).color(Color32::WHITE));
+                        ui.add(egui::TextEdit::singleline(&mut self.server_code_str).desired_width(65.0));
+                        if ui.button("🎲 Новый код").on_hover_text("Сгенерировать случайный 3-значный код [A-Za-z0-9]").clicked() {
+                            self.server_code_str = crate::network::generate_random_room_code();
+                        }
+                    });
+                    ui.add_space(14.0);
+
+                    // Плашка готового адреса для приглашения
+                    let invite_link_v6 = format!("[::1]:{}#{}", self.server_port_str.trim(), self.server_code_str.trim());
+                    let invite_link_v4 = format!("{}:{}#{}", self.local_ipv4_hint, self.server_port_str.trim(), self.server_code_str.trim());
+
+                    egui::Frame::new()
+                        .fill(Color32::from_rgb(18, 20, 24))
+                        .stroke(Stroke::new(1.0, Color32::from_rgb(38, 41, 48)))
+                        .corner_radius(CornerRadius::same(8))
+                        .inner_margin(10.0)
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("Адрес для отправки собеседнику:").size(11.0).color(Color32::from_rgb(160, 170, 185)));
+                            ui.label(egui::RichText::new(&invite_link_v6).strong().size(13.0).color(Color32::from_rgb(88, 101, 242)));
+                            ui.label(egui::RichText::new(format!("IPv4 LAN: {}", invite_link_v4)).size(10.5).weak());
+                        });
+
+                    ui.add_space(12.0);
+
+                    // Кнопка: Скопировать адрес сервера + код в буфер обмена
+                    if ui.add(egui::Button::new(egui::RichText::new("📋 Скопировать адрес сервера + код в буфер").strong().size(12.5).color(Color32::WHITE))
+                        .fill(Color32::from_rgb(60, 66, 82))
+                        .min_size(Vec2::new(card_w - 36.0, 36.0))
+                        .corner_radius(CornerRadius::same(8)))
+                        .clicked()
+                    {
+                        ui.ctx().copy_text(invite_link_v6.clone());
+                        crate::network::set_clipboard_text(&invite_link_v6);
+                        self.copy_toast = Some((format!("Скопировано в буфер: {}", invite_link_v6), Instant::now()));
+                    }
+
+                    ui.add_space(12.0);
+
+                    // Кнопка: Запустить / Остановить сервер
+                    let is_srv_running = self.p2p_server.as_ref().map(|s| s.is_running.load(Ordering::Relaxed)).unwrap_or(false);
+                    let is_srv_connected = self.p2p_server.as_ref().map(|s| s.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+
+                    if !is_srv_running {
+                        if ui.add(egui::Button::new(egui::RichText::new("▶ Запустить сервер (IPv6 + IPv4)").strong().size(13.5).color(Color32::WHITE))
+                            .fill(Color32::from_rgb(35, 165, 90))
+                            .min_size(Vec2::new(card_w - 36.0, 40.0))
+                            .corner_radius(CornerRadius::same(8)))
+                            .clicked()
+                        {
+                            let port = self.server_port_str.trim().parse::<u16>().unwrap_or(48120);
+                            let code = self.server_code_str.trim().to_string();
+                            self.p2p_server = Some(crate::network::P2PNetworkServer::start(port, code));
+                        }
+                    } else {
+                        if ui.add(egui::Button::new(egui::RichText::new("⏹ Остановить сервер").strong().size(13.5).color(Color32::WHITE))
+                            .fill(Color32::from_rgb(218, 55, 60))
+                            .min_size(Vec2::new(card_w - 36.0, 40.0))
+                            .corner_radius(CornerRadius::same(8)))
+                            .clicked()
+                        {
+                            if let Some(srv) = self.p2p_server.take() {
+                                srv.stop();
+                            }
+                        }
+                    }
+
+                    ui.add_space(10.0);
+
+                    // Статус сервера
+                    if let Some(ref srv) = self.p2p_server {
+                        let st = srv.status.read().unwrap().clone();
+                        let peer = srv.peer_addr.read().unwrap().clone();
+
+                        if is_srv_connected {
+                            ui.label(egui::RichText::new(format!("🟢 Собеседник подключен: {}", peer)).color(Color32::from_rgb(35, 165, 90)).strong().size(12.0));
+                            ui.add_space(6.0);
+                            if ui.add(egui::Button::new(egui::RichText::new("Перейти к звонку и стриму →").strong().size(12.5).color(Color32::WHITE))
+                                .fill(Color32::from_rgb(88, 101, 242))
+                                .min_size(Vec2::new(card_w - 36.0, 32.0))
+                                .corner_radius(CornerRadius::same(6)))
+                                .clicked()
+                            {
+                                self.active_tab = Tab::CallAndStream;
+                            }
+                        } else {
+                            ui.label(egui::RichText::new(format!("🟡 {}", st)).color(Color32::from_rgb(234, 179, 8)).size(11.5));
+                        }
+                    } else {
+                        ui.label(egui::RichText::new("⚪ Сервер не запущен").weak().size(11.5));
+                    }
+                });
+
+            ui.add_space(12.0);
+
+            // ==========================================
+            // КАРТОЧКА 2: ПОДКЛЮЧИТЬСЯ К КОМНАТЕ (КЛИЕНТ)
+            // ==========================================
+            egui::Frame::new()
+                .fill(Color32::from_rgb(26, 28, 32))
+                .stroke(Stroke::new(1.0, Color32::from_rgb(45, 48, 56)))
+                .corner_radius(CornerRadius::same(12))
+                .inner_margin(18.0)
+                .show(ui, |ui| {
+                    ui.set_width(card_w);
+                    ui.set_height(card_h);
+
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("🔗").size(20.0));
+                        ui.label(egui::RichText::new("ПОДКЛЮЧИТЬСЯ К КОМНАТЕ").size(15.5).strong().color(Color32::WHITE));
+                    });
+                    ui.label(egui::RichText::new("Подключитесь к серверу собеседника по IPv6 / IPv4 адресу и 3-значному коду доступа.").size(11.5).color(Color32::from_rgb(148, 155, 164)));
+                    ui.add_space(14.0);
+
+                    // Поле ввода: Адрес сервера + код
+                    ui.label(egui::RichText::new("Адрес сервера и код (например [::1]:48120#7xK):").size(12.5).color(Color32::WHITE));
+                    ui.add_space(4.0);
+                    ui.add(egui::TextEdit::singleline(&mut self.client_target_str)
+                        .hint_text("[::1]:48120#7xK или 192.168.1.5:48120#7xK")
+                        .desired_width(card_w - 36.0));
+
+                    ui.add_space(12.0);
+
+                    // Кнопка: Подключиться из буфера обмена
+                    if ui.add(egui::Button::new(egui::RichText::new("📋 Подключиться из буфера обмена").strong().size(12.5).color(Color32::WHITE))
+                        .fill(Color32::from_rgb(88, 101, 242))
+                        .min_size(Vec2::new(card_w - 36.0, 36.0))
+                        .corner_radius(CornerRadius::same(8)))
+                        .clicked()
+                    {
+                        if let Some(clip) = crate::network::get_clipboard_text() {
+                            if let Some((host, port, code)) = crate::network::parse_room_target(&clip) {
+                                self.client_target_str = format!("{}:{}#{}", host, port, code);
+                                self.copy_toast = Some((format!("Вставлено из буфера: {}:{}#{}", host, port, code), Instant::now()));
+                                self.connect_client(host, port, code);
+                            } else {
+                                self.copy_toast = Some(("Не удалось распознать адрес комнаты в буфере".to_string(), Instant::now()));
+                            }
+                        } else {
+                            self.copy_toast = Some(("Буфер обмена пуст".to_string(), Instant::now()));
+                        }
+                    }
+
+                    ui.add_space(12.0);
+
+                    // Кнопка: Подключиться
+                    let is_cli_connected = self.p2p_client.as_ref().map(|c| c.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+                    let is_cli_running = self.p2p_client.as_ref().map(|c| c.is_running.load(Ordering::Relaxed)).unwrap_or(false);
+
+                    if !is_cli_connected && !is_cli_running {
+                        if ui.add(egui::Button::new(egui::RichText::new("Подключиться к серверу").strong().size(13.5).color(Color32::WHITE))
+                            .fill(Color32::from_rgb(35, 165, 90))
+                            .min_size(Vec2::new(card_w - 36.0, 40.0))
+                            .corner_radius(CornerRadius::same(8)))
+                            .clicked()
+                        {
+                            if let Some((host, port, code)) = crate::network::parse_room_target(&self.client_target_str) {
+                                self.connect_client(host, port, code);
+                            } else {
+                                self.client_status_msg = "Укажите адрес в формате [::1]:48120#код".to_string();
+                            }
+                        }
+                    } else {
+                        if ui.add(egui::Button::new(egui::RichText::new("Отключиться").strong().size(13.5).color(Color32::WHITE))
+                            .fill(Color32::from_rgb(218, 55, 60))
+                            .min_size(Vec2::new(card_w - 36.0, 40.0))
+                            .corner_radius(CornerRadius::same(8)))
+                            .clicked()
+                        {
+                            if let Some(cli) = self.p2p_client.take() {
+                                cli.stop();
+                            }
+                            self.client_status_msg = "Отключено".to_string();
+                        }
+                    }
+
+                    ui.add_space(10.0);
+
+                    // Статус клиента
+                    if let Some(ref cli) = self.p2p_client {
+                        let st = cli.status.read().unwrap().clone();
+                        if is_cli_connected {
+                            ui.label(egui::RichText::new(format!("🟢 {}", st)).color(Color32::from_rgb(35, 165, 90)).strong().size(12.0));
+                            ui.add_space(6.0);
+                            if ui.add(egui::Button::new(egui::RichText::new("Перейти к звонку и стриму →").strong().size(12.5).color(Color32::WHITE))
+                                .fill(Color32::from_rgb(88, 101, 242))
+                                .min_size(Vec2::new(card_w - 36.0, 32.0))
+                                .corner_radius(CornerRadius::same(6)))
+                                .clicked()
+                            {
+                                self.active_tab = Tab::CallAndStream;
+                            }
+                        } else {
+                            ui.label(egui::RichText::new(format!("⏳ {}", st)).color(Color32::from_rgb(234, 179, 8)).size(11.5));
+                        }
+                    } else if !self.client_status_msg.is_empty() {
+                        let col = if self.client_status_msg.starts_with("Ошибка") {
+                            Color32::from_rgb(218, 55, 60)
+                        } else {
+                            Color32::from_rgb(148, 155, 164)
+                        };
+                        ui.label(egui::RichText::new(&self.client_status_msg).color(col).size(11.5));
+                    }
+                });
+        });
+    }
+
+    fn connect_client(&mut self, host: String, port: u16, code: String) {
+        if let Some(old) = self.p2p_client.take() {
+            old.stop();
+        }
+        self.p2p_client = Some(crate::network::P2PNetworkClient::connect(host, port, code));
+    }
     /// Отрисовка высококонтрастной бирки навигации (белый читабельный текст по умолчанию, белый фон + темный текст при выборе/наведении)
     fn render_nav_tab_pill(ui: &mut egui::Ui, current: &mut Tab, tab: Tab, label: &str) {
         let is_selected = *current == tab;
@@ -497,97 +788,72 @@ impl eframe::App for NanocordApp {
             }
         }
 
-        // 4. Приём кадров удаленного собеседника из P2P сервера (nanocord_mock.exe)
-        if let Some(ref rx) = self.p2p_receiver {
-            let mut latest_desktop = None;
-            while let Ok(frame) = rx.desktop_rx.try_recv() {
-                latest_desktop = Some(frame);
-            }
-            if let Some(frame) = latest_desktop {
-                let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                    [frame.width as usize, frame.height as usize],
-                    &frame.rgba,
-                );
-                match &mut self.remote_desktop_texture {
-                    Some(tex) => tex.set(color_image, egui::TextureOptions::LINEAR),
-                    None => {
-                        self.remote_desktop_texture = Some(ctx.load_texture(
-                            "remote_desktop_preview",
-                            color_image,
-                            egui::TextureOptions::LINEAR,
-                        ));
-                    }
-                }
-            }
+        // 4. Приём входящих кадров от P2P Сервера или Клиента (IPv6 + IPv4)
+        let mut latest_remote_dt = None;
+        let mut latest_remote_cam = None;
 
-            let mut latest_camera = None;
-            while let Ok(frame) = rx.camera_rx.try_recv() {
-                latest_camera = Some(frame);
+        if let Some(ref srv) = self.p2p_server {
+            while let Ok(frame) = srv.desktop_rx.try_recv() {
+                latest_remote_dt = Some(frame);
             }
-            if let Some(frame) = latest_camera {
-                let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                    [frame.width as usize, frame.height as usize],
-                    &frame.rgba,
-                );
-                match &mut self.remote_camera_texture {
-                    Some(tex) => tex.set(color_image, egui::TextureOptions::LINEAR),
-                    None => {
-                        self.remote_camera_texture = Some(ctx.load_texture(
-                            "remote_camera_preview",
-                            color_image,
-                            egui::TextureOptions::LINEAR,
-                        ));
-                    }
+            while let Ok(frame) = srv.camera_rx.try_recv() {
+                latest_remote_cam = Some(frame);
+            }
+        }
+        if let Some(ref cli) = self.p2p_client {
+            while let Ok(frame) = cli.desktop_rx.try_recv() {
+                latest_remote_dt = Some(frame);
+            }
+            while let Ok(frame) = cli.camera_rx.try_recv() {
+                latest_remote_cam = Some(frame);
+            }
+        }
+
+        if let Some(frame) = latest_remote_dt {
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                [frame.width as usize, frame.height as usize],
+                &frame.rgba,
+            );
+            match &mut self.remote_desktop_texture {
+                Some(tex) => tex.set(color_image, egui::TextureOptions::LINEAR),
+                None => {
+                    self.remote_desktop_texture = Some(ctx.load_texture(
+                        "remote_desktop_live",
+                        color_image,
+                        egui::TextureOptions::LINEAR,
+                    ));
                 }
             }
         }
 
-        // 5. Приём кадров от встроенного мок-источника
-        if let Some(ref mock) = self.mock_source {
-            let mut latest_mock_dt = None;
-            while let Ok(frame) = mock.desktop_rx.try_recv() {
-                latest_mock_dt = Some(frame);
-            }
-            if let Some(frame) = latest_mock_dt {
-                let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                    [frame.width as usize, frame.height as usize],
-                    &frame.rgba,
-                );
-                match &mut self.mock_desktop_texture {
-                    Some(tex) => tex.set(color_image, egui::TextureOptions::LINEAR),
-                    None => {
-                        self.mock_desktop_texture = Some(ctx.load_texture(
-                            "mock_desktop_live",
-                            color_image,
-                            egui::TextureOptions::LINEAR,
-                        ));
-                    }
-                }
-            }
-
-            let mut latest_mock_cam = None;
-            while let Ok(frame) = mock.camera_rx.try_recv() {
-                latest_mock_cam = Some(frame);
-            }
-            if let Some(frame) = latest_mock_cam {
-                let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                    [frame.width as usize, frame.height as usize],
-                    &frame.rgba,
-                );
-                match &mut self.mock_camera_texture {
-                    Some(tex) => tex.set(color_image, egui::TextureOptions::LINEAR),
-                    None => {
-                        self.mock_camera_texture = Some(ctx.load_texture(
-                            "mock_camera_live",
-                            color_image,
-                            egui::TextureOptions::LINEAR,
-                        ));
-                    }
+        if let Some(frame) = latest_remote_cam {
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                [frame.width as usize, frame.height as usize],
+                &frame.rgba,
+            );
+            match &mut self.remote_camera_texture {
+                Some(tex) => tex.set(color_image, egui::TextureOptions::LINEAR),
+                None => {
+                    self.remote_camera_texture = Some(ctx.load_texture(
+                        "remote_camera_live",
+                        color_image,
+                        egui::TextureOptions::LINEAR,
+                    ));
                 }
             }
         }
 
-        // 6. Приём результатов бенчмарка
+        // Авто-переход во вкладку "Звонок и Стрим", если собеседник подключился
+        if self.active_tab == Tab::Lobby {
+            let srv_conn = self.p2p_server.as_ref().map(|s| s.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+            let cli_conn = self.p2p_client.as_ref().map(|c| c.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+            if srv_conn || cli_conn {
+                self.active_tab = Tab::CallAndStream;
+                self.active_stage = StageSource::RemoteDesktop;
+            }
+        }
+
+        // 5. Приём результатов бенчмарка
         if let Some(rx) = &self.bench_rx {
             if let Ok(results) = rx.try_recv() {
                 let matrix = build_benchmark_matrix(&results, self.native_width, self.native_height, self.native_hz);
@@ -598,7 +864,7 @@ impl eframe::App for NanocordApp {
             }
         }
 
-        // 5. Клавиши управления (Esc, F11, F12)
+        // 6. Клавиши управления (Esc, F11)
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.is_fullscreen {
             self.is_fullscreen = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
@@ -631,13 +897,22 @@ impl eframe::App for NanocordApp {
                     ui.add_space(20.0);
 
                     // Высококонтрастные бирки вкладок (белый текст по умолчанию, инвертированный белый фон при выборе/наведении)
+                    Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::Lobby, "Комната");
                     Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::CallAndStream, "Звонок и Стрим");
                     Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::BenchmarkMatrix, "Матрица профилей");
                     Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::AudioAndSpectrum, "Аудио и Спектрограмма");
                     Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::EncoderSettings, "Настройки NVENC");
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.is_streaming.load(Ordering::Relaxed) {
+                        let is_srv_conn = self.p2p_server.as_ref().map(|s| s.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+                        let is_cli_conn = self.p2p_client.as_ref().map(|c| c.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+                        let is_srv_running = self.p2p_server.as_ref().map(|s| s.is_running.load(Ordering::Relaxed)).unwrap_or(false);
+
+                        if is_srv_conn || is_cli_conn {
+                            ui.label(egui::RichText::new("🟢 В СЕТИ (P2P IPv6)").color(Color32::from_rgb(35, 165, 90)).strong());
+                        } else if is_srv_running {
+                            ui.label(egui::RichText::new("🟡 СЕРВЕР СЛУШАЕТ").color(Color32::from_rgb(234, 179, 8)).strong());
+                        } else if self.is_streaming.load(Ordering::Relaxed) {
                             ui.label(egui::RichText::new("В ЭФИРЕ (60 FPS)").color(Color32::from_rgb(220, 38, 38)).strong());
                         } else if self.is_benchmarking {
                             ui.label(egui::RichText::new("ТЕСТ КРЕМНИЯ...").color(Color32::from_rgb(217, 119, 6)).strong());
@@ -653,6 +928,7 @@ impl eframe::App for NanocordApp {
             .frame(egui::Frame::new().fill(Color32::from_rgb(17, 18, 20)).inner_margin(8.0))
             .show(ctx, |ui| {
                 match self.active_tab {
+                    Tab::Lobby => self.render_lobby(ui),
                     Tab::CallAndStream => self.render_call_and_stream(ui),
                     Tab::BenchmarkMatrix => self.render_benchmark_matrix(ui),
                     Tab::AudioAndSpectrum => self.render_audio_and_spectrum(ui),
@@ -691,7 +967,6 @@ impl NanocordApp {
                 StageSource::RemoteCamera => "Камера собеседника",
                 StageSource::LocalDesktop => "Ваш рабочий стол",
                 StageSource::LocalCamera => "Ваша веб-камера",
-                StageSource::MockSource => "Мок-источник (60 FPS Test Pattern + BGM)",
             };
             ui.label(egui::RichText::new(stage_name).color(Color32::WHITE).strong().size(14.0));
 
@@ -848,7 +1123,6 @@ impl NanocordApp {
             StageSource::RemoteCamera => "Камера собеседника (Выключена)",
             StageSource::LocalDesktop => "Ваш рабочий стол (DirectX 11 Live Capture)",
             StageSource::LocalCamera => "Ваша веб-камера (BisonCam,NB Pro Live)",
-            StageSource::MockSource => "Мок-источник (60 FPS Test Pattern • BGM Direct)",
         };
         let src_badge_rect = Rect::from_min_size(
             Pos2::new(video_rect.left() + 14.0, video_rect.bottom() - 36.0),
@@ -867,9 +1141,14 @@ impl NanocordApp {
             let mut sb_ui = ui.new_child(egui::UiBuilder::new().max_rect(sidebar_rect.shrink(10.0)));
             sb_ui.vertical(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("УЧАСТНИКИ И ПОТОКИ (5)").strong().size(11.5).color(Color32::from_rgb(148, 155, 164)));
+                    ui.label(egui::RichText::new("УЧАСТНИКИ И ПОТОКИ (4)").strong().size(11.5).color(Color32::from_rgb(148, 155, 164)));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new("Комната: NC-7829-X").size(10.5).weak());
+                        let room_label = if !self.server_code_str.is_empty() {
+                            format!("Код: {}", self.server_code_str)
+                        } else {
+                            "Комната P2P".to_string()
+                        };
+                        ui.label(egui::RichText::new(room_label).size(10.5).weak());
                     });
                 });
                 ui.add_space(8.0);
@@ -878,9 +1157,6 @@ impl NanocordApp {
                 egui::ScrollArea::vertical()
                     .max_height(scroll_h)
                     .show(ui, |ui| {
-                        let mock_sub = if self.is_mock_active { "60 FPS • BGM Активен" } else { "60 FPS • Синтетический" };
-                        self.render_feed_card(ui, "Мок-источник (P2P Test)", mock_sub, StageSource::MockSource);
-                        ui.add_space(8.0);
                         self.render_feed_card(ui, "Экран собеседника", "1080p • Ожидание", StageSource::RemoteDesktop);
                         ui.add_space(8.0);
                         self.render_feed_card(ui, "Камера собеседника", "720p • Выключена", StageSource::RemoteCamera);
@@ -896,7 +1172,7 @@ impl NanocordApp {
         // 3. ПЛАВАЮЩИЙ НИЖНИЙ DOCK УПРАВЛЕНИЯ ЗВОНКОМ (MATERIAL DESIGN ICON STYLE)
         // ==========================================
         let dock_center = dock_rect.center();
-        let dock_pill_w = (490.0_f32).min(total_w - 20.0);
+        let dock_pill_w = (320.0_f32).min(total_w - 20.0);
         let dock_pill_rect = Rect::from_center_size(dock_center, Vec2::new(dock_pill_w, 52.0));
 
         painter.rect_filled(dock_pill_rect, CornerRadius::same(26), Color32::from_rgb(30, 31, 36));
@@ -1003,62 +1279,22 @@ impl NanocordApp {
                 self.is_camera_pip = !self.is_camera_pip;
             }
 
-            // 6. Иконка Звуковой волны (10 сек)
-            if ui.add(egui::Button::new(egui::RichText::new("〰").size(16.0).color(Color32::WHITE))
-                .fill(Color32::from_rgb(45, 48, 56))
-                .min_size(Vec2::new(42.0, 42.0))
-                .corner_radius(CornerRadius::same(21)))
-                .on_hover_text("Открыть звуковую волну (10 сек буфер на черном фоне)")
-                .clicked()
-            {
-                self.active_tab = Tab::AudioAndSpectrum;
-            }
-
-            // 7. Иконка P2P Сети и встроенного Мок-источника
-            let is_peer_connected = self.p2p_receiver.as_ref().map(|r| r.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
-            let net_bg = if is_peer_connected || self.is_mock_active { Color32::from_rgb(35, 165, 90) } else { Color32::from_rgb(45, 48, 56) };
-            let telem_info = self.p2p_receiver.as_ref().map(|r| r.telemetry.read().unwrap().clone()).unwrap_or_default();
-            let hover_tip = if self.is_mock_active {
-                let track = self.mock_source.as_ref().map(|m| m.bgm_player.lock().unwrap().current_track_name()).unwrap_or_default();
-                format!("Встроенный Мок-источник активен!\n60 FPS • Без сокетов и сетевых лагов\nТрек: {}\nНажмите для включения/выключения", track)
-            } else if is_peer_connected {
-                format!("Mock-собеседник подключен!\nFPS: {:.1} • Скорость: {:.1} Mbps • Пинг: {:.1} ms\nТрек: {}\nНажмите для перехода на удаленный экран", telem_info.fps, telem_info.bitrate_mbps, telem_info.latency_ms, telem_info.current_track)
-            } else {
-                "Мок-источник (Тестовый генератор 60 FPS + BGM)\nНажмите для мгновенного запуска встроенного мока\nИли запустите nanocord_mock.exe".to_string()
-            };
-
-            if ui.add(egui::Button::new(egui::RichText::new("📡").size(16.0).color(Color32::WHITE))
-                .fill(net_bg)
-                .min_size(Vec2::new(42.0, 42.0))
-                .corner_radius(CornerRadius::same(21)))
-                .on_hover_text(hover_tip)
-                .clicked()
-            {
-                if self.is_mock_active {
-                    if let Some(mock) = self.mock_source.take() {
-                        mock.stop();
-                    }
-                    self.is_mock_active = false;
-                    if self.active_stage == StageSource::MockSource {
-                        self.active_stage = StageSource::LocalDesktop;
-                    }
-                } else {
-                    self.mock_source = Some(crate::network::InternalMockSource::start());
-                    self.is_mock_active = true;
-                    self.active_stage = StageSource::MockSource;
-                }
-            }
-
-            // 8. Иконка Отключения (красная телефонная трубка)
+            // 6. Иконка Отключения (красная телефонная трубка) -> Выход в начальный экран
             if ui.add(egui::Button::new(egui::RichText::new("📞").size(16.0).color(Color32::WHITE))
                 .fill(Color32::from_rgb(218, 55, 60))
                 .min_size(Vec2::new(42.0, 42.0))
                 .corner_radius(CornerRadius::same(21)))
-                .on_hover_text("Завершить звонок")
+                .on_hover_text("Выйти из комнаты (Начальный экран)")
                 .clicked()
             {
                 self.is_streaming.store(false, Ordering::Relaxed);
-                self.active_stage = StageSource::LocalDesktop;
+                if let Some(cli) = self.p2p_client.take() {
+                    cli.stop();
+                }
+                if let Some(srv) = self.p2p_server.take() {
+                    srv.stop();
+                }
+                self.active_tab = Tab::Lobby;
             }
         });
     }
@@ -1282,83 +1518,6 @@ impl NanocordApp {
                 }
                 }
             }
-            StageSource::MockSource => {
-                if let Some(tex) = self.mock_desktop_texture.as_ref() {
-                    let draw_rect = if self.fit_aspect_ratio {
-                        let [tw, th] = tex.size();
-                        aspect_fit(rect, tw as f32, th as f32)
-                    } else {
-                        rect
-                    };
-                    if draw_rect != rect {
-                        painter.rect_filled(rect, CornerRadius::same(6), Color32::from_rgb(12, 14, 18));
-                    }
-                    painter.image(
-                        tex.id(),
-                        draw_rect,
-                        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
-
-                    // Picture-in-Picture для камеры мока
-                    if self.is_camera_pip && !is_thumb {
-                        if let Some(cam_tex) = self.mock_camera_texture.as_ref() {
-                            let pip_w = (draw_rect.width() * 0.22).clamp(120.0, 260.0);
-                            let pip_h = pip_w * (9.0 / 16.0);
-                            let pip_rect = Rect::from_min_size(
-                                Pos2::new(draw_rect.right() - pip_w - 12.0, draw_rect.bottom() - pip_h - 12.0),
-                                Vec2::new(pip_w, pip_h),
-                            );
-                            painter.rect_filled(pip_rect, CornerRadius::same(6), Color32::from_rgb(10, 12, 16));
-                            painter.rect_stroke(pip_rect, CornerRadius::same(6), Stroke::new(1.5, Color32::from_rgb(88, 101, 242)), egui::StrokeKind::Inside);
-                            painter.image(
-                                cam_tex.id(),
-                                pip_rect,
-                                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                                Color32::WHITE,
-                            );
-
-                            let badge_rect = Rect::from_min_size(
-                                Pos2::new(pip_rect.left() + 6.0, pip_rect.top() + 6.0),
-                                Vec2::new(60.0, 16.0),
-                            );
-                            painter.rect_filled(badge_rect, CornerRadius::same(3), Color32::from_rgba_unmultiplied(0, 0, 0, 180));
-                            painter.text(badge_rect.center(), egui::Align2::CENTER_CENTER, "MOCK CAM", egui::FontId::proportional(8.5), Color32::WHITE);
-                        }
-                    }
-                } else {
-                    painter.rect_filled(rect, CornerRadius::same(6), Color32::from_rgb(16, 20, 28));
-                    let center = rect.center();
-                    let mon_w = 90.0;
-                    let mon_h = 56.0;
-                    let mon_rect = Rect::from_center_size(Pos2::new(center.x, center.y - (if is_thumb { 0.0 } else { 35.0 })), Vec2::new(mon_w, mon_h));
-                    if !is_thumb {
-                        painter.rect_stroke(mon_rect, CornerRadius::same(5), Stroke::new(2.0, Color32::from_rgb(88, 101, 242)), egui::StrokeKind::Inside);
-                        painter.text(
-                            Pos2::new(center.x, center.y + 20.0),
-                            egui::Align2::CENTER_CENTER,
-                            "Встроенный мок-источник 60 FPS выключен",
-                            egui::FontId::proportional(15.0),
-                            Color32::from_rgb(225, 230, 242),
-                        );
-                        painter.text(
-                            Pos2::new(center.x, center.y + 44.0),
-                            egui::Align2::CENTER_CENTER,
-                            "Нажмите кнопку 📡 в нижнем доке для мгновенного запуска",
-                            egui::FontId::proportional(12.0),
-                            Color32::from_rgb(130, 142, 165),
-                        );
-                    } else {
-                        painter.text(
-                            center,
-                            egui::Align2::CENTER_CENTER,
-                            "Мок 60 FPS",
-                            egui::FontId::proportional(11.0),
-                            Color32::from_rgb(150, 160, 180),
-                        );
-                    }
-                }
-            }
         }
     }
 
@@ -1402,18 +1561,10 @@ impl NanocordApp {
 
         // Двойной клик -> Во весь экран! Одиночный клик -> Выбор источника на сцену
         if response.double_clicked() || (response.clicked() && fs_icon_hovered) {
-            if source == StageSource::MockSource && self.mock_source.is_none() {
-                self.mock_source = Some(crate::network::InternalMockSource::start());
-                self.is_mock_active = true;
-            }
             self.active_stage = source;
             self.is_fullscreen = !self.is_fullscreen;
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
         } else if response.clicked() {
-            if source == StageSource::MockSource && self.mock_source.is_none() {
-                self.mock_source = Some(crate::network::InternalMockSource::start());
-                self.is_mock_active = true;
-            }
             self.active_stage = source;
         }
 
@@ -1438,23 +1589,10 @@ impl NanocordApp {
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let mut now_track = None;
-                if let Some(ref mock) = self.mock_source {
-                    let t = mock.bgm_player.lock().unwrap().current_track_name();
-                    if !t.is_empty() {
-                        now_track = Some(t);
-                    }
-                }
-                if now_track.is_none() {
-                    if let Some(ref rx) = self.p2p_receiver {
-                        let track = rx.telemetry.read().unwrap().current_track.clone();
-                        if !track.is_empty() {
-                            now_track = Some(track);
-                        }
-                    }
-                }
-                if let Some(track) = now_track {
-                    ui.label(egui::RichText::new(format!("🎶 Играет: {}", track)).color(Color32::from_rgb(35, 165, 90)).strong());
+                let is_srv_conn = self.p2p_server.as_ref().map(|s| s.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+                let is_cli_conn = self.p2p_client.as_ref().map(|c| c.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+                if is_srv_conn || is_cli_conn {
+                    ui.label(egui::RichText::new("🟢 P2P Аудиопоток активен").color(Color32::from_rgb(35, 165, 90)).strong());
                 }
             });
         });
