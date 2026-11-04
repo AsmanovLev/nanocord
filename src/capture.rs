@@ -132,3 +132,31 @@ impl DxgiCapture {
         }
     }
 }
+
+/// Определяет физическое разрешение основного активного монитора
+pub fn get_screen_resolution() -> (u32, u32) {
+    unsafe {
+        if let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() {
+            for i in 0.. {
+                let adapter = match factory.EnumAdapters1(i) {
+                    Ok(a) => a,
+                    Err(_) => break,
+                };
+                if let Ok(output) = adapter.EnumOutputs(0) {
+                    if let Ok(output1) = output.cast::<IDXGIOutput1>() {
+                        if let Ok(desc) = output1.GetDesc() {
+                            if desc.AttachedToDesktop.as_bool() {
+                                let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left) as u32;
+                                let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top) as u32;
+                                if width > 0 && height > 0 {
+                                    return (width, height);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (1920, 1080)
+}

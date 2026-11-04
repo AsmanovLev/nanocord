@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_variables, unused_imports)]
+
 mod benchmark;
 mod capture;
 mod nvenc;
@@ -37,6 +39,14 @@ fn main() -> eframe::Result<()> {
             println!(
                 "  {} | {}: Avg Latency: {:.2} ms | Min: {:.2} ms | Max FPS: {} | IDR: {:.1} KB, P: {:.1} KB",
                 r.resolution, r.preset_name, r.avg_latency_ms, r.min_latency_ms, r.max_fps, r.idr_size_kb, r.p_frame_size_kb
+            );
+        }
+        let recs = benchmark::generate_recommendations(&results);
+        println!("\n[RECOMMENDED PROFILES]");
+        for rec in &recs {
+            println!(
+                "  • {:<32} -> {:<14} ({:<10}): Latency: {:.2} ms | Budget: {:.1} ms (Headroom: +{:.0}%)",
+                rec.title, rec.res_label, rec.preset_name, rec.latency_ms, rec.frame_budget_ms, rec.headroom_percent
             );
         }
         return Ok(());
