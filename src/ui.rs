@@ -14,6 +14,26 @@ use std::time::{Duration, Instant};
 
 pub const WAVEFORM_SAMPLES: usize = 500; // 500 срезов истории (~10 секунд)
 
+// Google Material Icons символы (шрифт MaterialIcons-Regular.ttf)
+pub const ICON_MIC: &str = "\u{e029}";
+pub const ICON_MIC_OFF: &str = "\u{e02b}";
+pub const ICON_HEADSET: &str = "\u{e310}";
+pub const ICON_HEADSET_OFF: &str = "\u{e33a}";
+pub const ICON_VIDEOCAM: &str = "\u{e04b}";
+pub const ICON_VIDEOCAM_OFF: &str = "\u{e04c}";
+pub const ICON_SCREEN_SHARE: &str = "\u{e0e2}";
+pub const ICON_STOP_SCREEN_SHARE: &str = "\u{e0e3}";
+pub const ICON_CALL_END: &str = "\u{e0b1}";
+pub const ICON_SUN: &str = "\u{e430}";
+pub const ICON_MOON: &str = "\u{e51c}";
+pub const ICON_FULLSCREEN: &str = "\u{e5d0}";
+pub const ICON_FULLSCREEN_EXIT: &str = "\u{e5d1}";
+pub const ICON_SETTINGS: &str = "\u{e8b8}";
+pub const ICON_REFRESH: &str = "\u{e5d5}";
+pub const ICON_LANGUAGE: &str = "\u{e894}";
+
+pub use crate::i18n::AppLanguage;
+
 #[derive(Clone, Copy)]
 pub struct WaveformPoint {
     pub min_val: f32,
@@ -53,7 +73,7 @@ impl AudioWaveform {
             self.history.pop_front();
             self.history.push_back(WaveformPoint { min_val: 0.0, max_val: 0.0, rms: 0.0 });
         } else {
-            let vol = self.volume.clamp(0.0, 1.5);
+            let vol = self.volume.clamp(0.0, 2.0);
             self.peak_db = (peak_db + (vol - 1.0) * 12.0).clamp(-60.0, 0.0);
             let scaled_min = (min_val * vol).clamp(-1.0, 1.0);
             let scaled_max = (max_val * vol).clamp(-1.0, 1.0);
@@ -145,6 +165,86 @@ pub enum StageSource {
 }
 
 #[derive(PartialEq, Clone, Copy, Debug)]
+pub enum AppTheme {
+    DarkDiscord,
+    OledMidnight,
+    LightClean,
+}
+
+#[derive(Clone, Copy)]
+pub struct ThemeColors {
+    pub bg_app: Color32,
+    pub bg_top_nav: Color32,
+    pub bg_card: Color32,
+    pub bg_card_secondary: Color32,
+    pub bg_stage: Color32,
+    pub bg_dock: Color32,
+    pub border: Color32,
+    pub border_faint: Color32,
+    pub text_main: Color32,
+    pub text_sub: Color32,
+    pub pill_inactive_bg: Color32,
+    pub pill_inactive_fg: Color32,
+    pub pill_active_bg: Color32,
+    pub pill_active_fg: Color32,
+}
+
+impl AppTheme {
+    pub fn colors(&self) -> ThemeColors {
+        match self {
+            AppTheme::DarkDiscord => ThemeColors {
+                bg_app: Color32::from_rgb(17, 18, 20),
+                bg_top_nav: Color32::from_rgb(30, 31, 34),
+                bg_card: Color32::from_rgb(26, 28, 32),
+                bg_card_secondary: Color32::from_rgb(18, 20, 24),
+                bg_stage: Color32::from_rgb(14, 16, 20),
+                bg_dock: Color32::from_rgb(30, 31, 36),
+                border: Color32::from_rgb(45, 48, 56),
+                border_faint: Color32::from_rgb(38, 41, 48),
+                text_main: Color32::from_rgb(242, 243, 245),
+                text_sub: Color32::from_rgb(160, 170, 185),
+                pill_inactive_bg: Color32::from_rgb(45, 48, 56),
+                pill_inactive_fg: Color32::WHITE,
+                pill_active_bg: Color32::WHITE,
+                pill_active_fg: Color32::from_rgb(18, 20, 26),
+            },
+            AppTheme::OledMidnight => ThemeColors {
+                bg_app: Color32::BLACK,
+                bg_top_nav: Color32::from_rgb(10, 10, 12),
+                bg_card: Color32::from_rgb(14, 14, 18),
+                bg_card_secondary: Color32::from_rgb(8, 8, 10),
+                bg_stage: Color32::BLACK,
+                bg_dock: Color32::from_rgb(16, 16, 20),
+                border: Color32::from_rgb(32, 32, 40),
+                border_faint: Color32::from_rgb(22, 22, 28),
+                text_main: Color32::WHITE,
+                text_sub: Color32::from_rgb(180, 185, 200),
+                pill_inactive_bg: Color32::from_rgb(22, 22, 28),
+                pill_inactive_fg: Color32::WHITE,
+                pill_active_bg: Color32::from_rgb(88, 101, 242),
+                pill_active_fg: Color32::WHITE,
+            },
+            AppTheme::LightClean => ThemeColors {
+                bg_app: Color32::from_rgb(240, 242, 247),
+                bg_top_nav: Color32::WHITE,
+                bg_card: Color32::WHITE,
+                bg_card_secondary: Color32::from_rgb(244, 246, 250),
+                bg_stage: Color32::from_rgb(230, 234, 242),
+                bg_dock: Color32::WHITE,
+                border: Color32::from_rgb(212, 218, 230),
+                border_faint: Color32::from_rgb(225, 230, 240),
+                text_main: Color32::from_rgb(20, 24, 32),
+                text_sub: Color32::from_rgb(80, 88, 104),
+                pill_inactive_bg: Color32::from_rgb(228, 232, 242),
+                pill_inactive_fg: Color32::from_rgb(30, 34, 44),
+                pill_active_bg: Color32::from_rgb(88, 101, 242),
+                pill_active_fg: Color32::WHITE,
+            },
+        }
+    }
+}
+
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum Tab {
     Lobby,
     CallAndStream,
@@ -156,6 +256,13 @@ pub enum Tab {
 pub struct NanocordApp {
     // Вкладка
     pub active_tab: Tab,
+
+    // Тема оформления
+    pub app_theme: AppTheme,
+    pub applied_theme: Option<AppTheme>,
+
+    // Язык интерфейса
+    pub app_language: AppLanguage,
 
     // Режим Fullscreen
     pub is_fullscreen: bool,
@@ -170,7 +277,7 @@ pub struct NanocordApp {
     pub is_mic_muted: bool,
     pub is_deafened: bool,
     pub is_camera_on: bool,
-    pub is_camera_pip: bool, // Запекание веб-камеры в рабочий стол (Picture-in-Picture)
+    pub is_camera_pip: bool,
 
     // Реальный захват рабочего стола (DXGI + GDI)
     pub desktop_texture: Option<egui::TextureHandle>,
@@ -182,7 +289,19 @@ pub struct NanocordApp {
 
     // Реальный захват аудио (Windows WASAPI)
     mic_audio_rx: Option<Receiver<AudioSpectrumPacket>>,
+    mic_is_running: Arc<AtomicBool>,
     game_audio_rx: Option<Receiver<AudioSpectrumPacket>>,
+    game_is_running: Arc<AtomicBool>,
+
+    // Воспроизведение звука и устройства
+    pub audio_player: Arc<crate::audio::WasapiAudioPlayer>,
+    pub listen_to_mic_sidetone: bool,
+    pub input_devices: Vec<crate::audio::AudioDevice>,
+    pub output_devices: Vec<crate::audio::AudioDevice>,
+    pub selected_input_device_idx: usize,
+    pub selected_output_device_idx: usize,
+    pub applied_input_device_id: String,
+    pub applied_output_device_id: String,
 
     // Разрешение экрана и стрима
     pub native_width: u32,
@@ -203,11 +322,16 @@ pub struct NanocordApp {
     pub game_waveform: AudioWaveform,
     pub anim_time: f32,
 
+    pub opus_encoder: crate::audio::NanocordOpusEncoder,
+    pub opus_decoder: crate::audio::NanocordOpusDecoder,
+
     // Сетевой P2P сервер и клиент (IPv6 + IPv4)
     pub p2p_server: Option<crate::network::P2PNetworkServer>,
     pub p2p_client: Option<crate::network::P2PNetworkClient>,
     pub remote_desktop_texture: Option<egui::TextureHandle>,
     pub remote_camera_texture: Option<egui::TextureHandle>,
+    pub last_remote_desktop_time: Option<Instant>,
+    pub last_remote_camera_time: Option<Instant>,
 
     // Поля начального экрана (Комната / Lobby)
     pub server_port_str: String,
@@ -255,8 +379,10 @@ impl Default for NanocordApp {
         let rx_camera = start_camera_worker();
 
         // 3. Запуск реального захвата аудио через Windows WASAPI (микрофон и loopback системы)
-        let rx_mic = start_wasapi_audio_worker(false);
-        let rx_game = start_wasapi_audio_worker(true);
+        let mic_is_running = Arc::new(AtomicBool::new(true));
+        let rx_mic = start_wasapi_audio_worker(false, None, mic_is_running.clone());
+        let game_is_running = Arc::new(AtomicBool::new(true));
+        let rx_game = start_wasapi_audio_worker(true, None, game_is_running.clone());
 
         // 4. Сохранение контрольного скриншота экрана для инспекции
         if let Some(rgba) = capture_desktop_gdi(native_w, native_h) {
@@ -265,9 +391,16 @@ impl Default for NanocordApp {
         }
 
         let (hint_v6, hint_v4) = crate::network::get_local_ip_hint();
+        let in_devs = crate::audio::enumerate_audio_devices(true);
+        let out_devs = crate::audio::enumerate_audio_devices(false);
+        let initial_in_id = in_devs.get(0).map(|d| d.id.clone()).unwrap_or_else(|| "default".to_string());
+        let initial_out_id = out_devs.get(0).map(|d| d.id.clone()).unwrap_or_else(|| "default".to_string());
 
         Self {
             active_tab: Tab::Lobby,
+            app_theme: AppTheme::DarkDiscord,
+            applied_theme: None,
+            app_language: AppLanguage::Ru,
             is_fullscreen: false,
             is_sidebar_collapsed: false,
             fit_aspect_ratio: true,
@@ -286,7 +419,18 @@ impl Default for NanocordApp {
             camera_rx: Some(rx_camera),
 
             mic_audio_rx: Some(rx_mic),
+            mic_is_running,
             game_audio_rx: Some(rx_game),
+            game_is_running,
+
+            audio_player: Arc::new(crate::audio::WasapiAudioPlayer::new()),
+            listen_to_mic_sidetone: false,
+            input_devices: in_devs,
+            output_devices: out_devs,
+            selected_input_device_idx: 0,
+            selected_output_device_idx: 0,
+            applied_input_device_id: initial_in_id,
+            applied_output_device_id: initial_out_id,
 
             native_width: native_w,
             native_height: native_h,
@@ -304,10 +448,15 @@ impl Default for NanocordApp {
             game_waveform: AudioWaveform::new(),
             anim_time: 0.0,
 
+            opus_encoder: crate::audio::NanocordOpusEncoder::new(),
+            opus_decoder: crate::audio::NanocordOpusDecoder::new(),
+
             p2p_server: None,
             p2p_client: None,
             remote_desktop_texture: None,
             remote_camera_texture: None,
+            last_remote_desktop_time: None,
+            last_remote_camera_time: None,
 
             server_port_str: "48120".to_string(),
             server_code_str: crate::network::generate_random_room_code(),
@@ -326,47 +475,487 @@ impl Default for NanocordApp {
     }
 }
 
-/// Чистая системная светлая тема (белая, контрастная, аккуратная)
+pub fn apply_theme_mode(ctx: &egui::Context, theme: AppTheme) {
+    match theme {
+        AppTheme::DarkDiscord => {
+            let mut visuals = egui::Visuals::dark();
+            visuals.dark_mode = true;
+            visuals.override_text_color = Some(Color32::from_rgb(242, 243, 245));
+            visuals.panel_fill = Color32::from_rgb(17, 18, 20); // Discord Deep Dark
+            visuals.window_fill = Color32::from_rgb(22, 24, 28);
+            visuals.faint_bg_color = Color32::from_rgb(30, 31, 34);
+            visuals.extreme_bg_color = Color32::from_rgb(12, 13, 15);
+
+            visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(30, 31, 34);
+            visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(45, 48, 54));
+            visuals.widgets.noninteractive.corner_radius = CornerRadius::same(8);
+            visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(215, 220, 228));
+
+            visuals.widgets.inactive.bg_fill = Color32::from_rgb(43, 45, 49);
+            visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(56, 58, 64));
+            visuals.widgets.inactive.corner_radius = CornerRadius::same(8);
+            visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(242, 243, 245));
+
+            visuals.widgets.hovered.bg_fill = Color32::from_rgb(60, 63, 69);
+            visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(88, 101, 242));
+            visuals.widgets.hovered.corner_radius = CornerRadius::same(8);
+            visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+
+            visuals.widgets.active.bg_fill = Color32::from_rgb(88, 101, 242);
+            visuals.widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_rgb(71, 82, 196));
+            visuals.widgets.active.corner_radius = CornerRadius::same(8);
+            visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+
+            visuals.slider_trailing_fill = true;
+            ctx.set_visuals(visuals);
+        }
+        AppTheme::OledMidnight => {
+            let mut visuals = egui::Visuals::dark();
+            visuals.dark_mode = true;
+            visuals.override_text_color = Some(Color32::WHITE);
+            visuals.panel_fill = Color32::BLACK;
+            visuals.window_fill = Color32::from_rgb(8, 8, 10);
+            visuals.faint_bg_color = Color32::from_rgb(16, 16, 20);
+            visuals.extreme_bg_color = Color32::BLACK;
+            visuals.slider_trailing_fill = true;
+
+            visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(14, 14, 18);
+            visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(32, 32, 40));
+            visuals.widgets.noninteractive.corner_radius = CornerRadius::same(8);
+            visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(220, 225, 235));
+
+            visuals.widgets.inactive.bg_fill = Color32::from_rgb(22, 22, 28);
+            visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(44, 44, 54));
+            visuals.widgets.inactive.corner_radius = CornerRadius::same(8);
+            visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+
+            visuals.widgets.hovered.bg_fill = Color32::from_rgb(38, 38, 50);
+            visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(88, 101, 242));
+            visuals.widgets.hovered.corner_radius = CornerRadius::same(8);
+            visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+
+            visuals.widgets.active.bg_fill = Color32::from_rgb(88, 101, 242);
+            visuals.widgets.active.bg_stroke = Stroke::new(1.0, Color32::WHITE);
+            visuals.widgets.active.corner_radius = CornerRadius::same(8);
+            visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+
+            ctx.set_visuals(visuals);
+        }
+        AppTheme::LightClean => {
+            let mut visuals = egui::Visuals::light();
+            visuals.dark_mode = false;
+            visuals.override_text_color = Some(Color32::from_rgb(20, 24, 34));
+            visuals.panel_fill = Color32::from_rgb(240, 242, 247);
+            visuals.window_fill = Color32::WHITE;
+            visuals.faint_bg_color = Color32::from_rgb(235, 238, 245);
+            visuals.extreme_bg_color = Color32::from_rgb(215, 222, 235);
+            visuals.slider_trailing_fill = true;
+
+            visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(235, 238, 245);
+            visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(205, 212, 224));
+            visuals.widgets.noninteractive.corner_radius = CornerRadius::same(8);
+            visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(30, 32, 40));
+
+            // Inactive widgets (slider rails, default buttons, inputs): clearly visible light slate blue
+            visuals.widgets.inactive.bg_fill = Color32::from_rgb(218, 225, 238);
+            visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(180, 192, 212));
+            visuals.widgets.inactive.corner_radius = CornerRadius::same(8);
+            visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(20, 24, 34));
+
+            visuals.widgets.hovered.bg_fill = Color32::from_rgb(205, 215, 235);
+            visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(88, 101, 242));
+            visuals.widgets.hovered.corner_radius = CornerRadius::same(8);
+            visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::from_rgb(88, 101, 242));
+
+            visuals.widgets.active.bg_fill = Color32::from_rgb(88, 101, 242);
+            visuals.widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_rgb(71, 82, 196));
+            visuals.widgets.active.corner_radius = CornerRadius::same(8);
+            visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+
+            ctx.set_visuals(visuals);
+        }
+    }
+}
+
+pub fn setup_custom_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "material_icons".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../assets/MaterialIcons-Regular.ttf"))),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .push("material_icons".to_owned());
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .push("material_icons".to_owned());
+    ctx.set_fonts(fonts);
+}
+
 pub fn apply_custom_theme(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
+    setup_custom_fonts(ctx);
+    apply_theme_mode(ctx, AppTheme::DarkDiscord);
+}
 
-    visuals.dark_mode = true;
-    visuals.override_text_color = Some(Color32::from_rgb(242, 243, 245));
-    visuals.panel_fill = Color32::from_rgb(17, 18, 20); // Discord Deep Dark
-    visuals.window_fill = Color32::from_rgb(22, 24, 28);
-    visuals.faint_bg_color = Color32::from_rgb(30, 31, 34);
-    visuals.extreme_bg_color = Color32::from_rgb(12, 13, 15);
+// =========================================================================
+// НАДЕЖНЫЕ ВЕКТОРНЫЕ ИКОНКИ ДЛЯ DOCK И ИНТЕРФЕЙСА (НЕ ЗАВИСЯТ ОТ ШРИФТОВ EMOJI)
+// =========================================================================
+fn draw_vector_mic(painter: &egui::Painter, center: Pos2, icon_col: Color32, is_muted: bool) {
+    let cap_rect = Rect::from_center_size(Pos2::new(center.x, center.y - 2.5), Vec2::new(7.0, 12.0));
+    painter.rect_filled(cap_rect, CornerRadius::same(3), icon_col);
 
-    // Неактивные элементы
-    visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(30, 31, 34);
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(45, 48, 54));
-    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(8);
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(215, 220, 228));
+    let bracket_y = center.y + 3.5;
+    painter.line_segment([Pos2::new(center.x - 6.5, center.y - 1.0), Pos2::new(center.x - 6.5, bracket_y)], Stroke::new(1.8, icon_col));
+    painter.line_segment([Pos2::new(center.x - 6.5, bracket_y), Pos2::new(center.x + 6.5, bracket_y)], Stroke::new(1.8, icon_col));
+    painter.line_segment([Pos2::new(center.x + 6.5, bracket_y), Pos2::new(center.x + 6.5, center.y - 1.0)], Stroke::new(1.8, icon_col));
 
-    // Обычные кнопки
-    visuals.widgets.inactive.bg_fill = Color32::from_rgb(43, 45, 49);
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(56, 58, 64));
-    visuals.widgets.inactive.corner_radius = CornerRadius::same(8);
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(242, 243, 245));
+    painter.line_segment([Pos2::new(center.x, bracket_y), Pos2::new(center.x, bracket_y + 5.0)], Stroke::new(1.8, icon_col));
+    painter.line_segment([Pos2::new(center.x - 4.5, bracket_y + 5.0), Pos2::new(center.x + 4.5, bracket_y + 5.0)], Stroke::new(1.8, icon_col));
 
-    // Кнопка при наведении
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(60, 63, 69);
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(88, 101, 242));
-    visuals.widgets.hovered.corner_radius = CornerRadius::same(8);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+    if is_muted {
+        painter.line_segment([Pos2::new(center.x - 8.0, center.y - 8.0), Pos2::new(center.x + 8.0, center.y + 8.0)], Stroke::new(2.4, Color32::WHITE));
+    }
+}
 
-    // Активная/нажатая кнопка
-    visuals.widgets.active.bg_fill = Color32::from_rgb(88, 101, 242);
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_rgb(71, 82, 196));
-    visuals.widgets.active.corner_radius = CornerRadius::same(8);
-    visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+fn draw_vector_headphones(painter: &egui::Painter, center: Pos2, icon_col: Color32, is_deafened: bool) {
+    let p0 = Pos2::new(center.x - 7.5, center.y + 1.0);
+    let p1 = Pos2::new(center.x - 7.5, center.y - 6.0);
+    let p2 = Pos2::new(center.x + 7.5, center.y - 6.0);
+    let p3 = Pos2::new(center.x + 7.5, center.y + 1.0);
+    painter.line_segment([p0, p1], Stroke::new(1.8, icon_col));
+    painter.line_segment([p1, p2], Stroke::new(1.8, icon_col));
+    painter.line_segment([p2, p3], Stroke::new(1.8, icon_col));
 
-    ctx.set_visuals(visuals);
+    painter.rect_filled(Rect::from_center_size(Pos2::new(center.x - 7.5, center.y + 2.0), Vec2::new(4.5, 9.0)), CornerRadius::same(2), icon_col);
+    painter.rect_filled(Rect::from_center_size(Pos2::new(center.x + 7.5, center.y + 2.0), Vec2::new(4.5, 9.0)), CornerRadius::same(2), icon_col);
+
+    if is_deafened {
+        painter.line_segment([Pos2::new(center.x - 8.0, center.y - 8.0), Pos2::new(center.x + 8.0, center.y + 8.0)], Stroke::new(2.4, Color32::WHITE));
+    }
+}
+
+fn draw_vector_camera(painter: &egui::Painter, center: Pos2, icon_col: Color32, is_off: bool) {
+    let body = Rect::from_center_size(Pos2::new(center.x - 2.5, center.y), Vec2::new(13.0, 10.0));
+    painter.rect_filled(body, CornerRadius::same(2), icon_col);
+
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            Pos2::new(center.x + 4.5, center.y - 2.5),
+            Pos2::new(center.x + 9.5, center.y - 5.5),
+            Pos2::new(center.x + 9.5, center.y + 5.5),
+            Pos2::new(center.x + 4.5, center.y + 2.5),
+        ],
+        icon_col,
+        Stroke::NONE,
+    ));
+
+    if is_off {
+        painter.line_segment([Pos2::new(center.x - 8.0, center.y - 8.0), Pos2::new(center.x + 8.0, center.y + 8.0)], Stroke::new(2.4, Color32::WHITE));
+    }
+}
+
+fn draw_vector_screen(painter: &egui::Painter, center: Pos2, icon_col: Color32) {
+    let screen = Rect::from_center_size(Pos2::new(center.x, center.y - 2.0), Vec2::new(17.0, 12.0));
+    painter.rect_stroke(screen, CornerRadius::same(2), Stroke::new(1.8, icon_col), egui::StrokeKind::Inside);
+    painter.line_segment([Pos2::new(center.x, center.y + 4.0), Pos2::new(center.x, center.y + 7.5)], Stroke::new(1.8, icon_col));
+    painter.line_segment([Pos2::new(center.x - 5.0, center.y + 7.5), Pos2::new(center.x + 5.0, center.y + 7.5)], Stroke::new(1.8, icon_col));
+}
+
+fn draw_vector_hangup(painter: &egui::Painter, center: Pos2) {
+    // Трубка телефона, обращенная вниз (call_end)
+    let p_left = Pos2::new(center.x - 7.5, center.y + 1.0);
+    let p_mid = Pos2::new(center.x, center.y - 3.5);
+    let p_right = Pos2::new(center.x + 7.5, center.y + 1.0);
+    painter.line_segment([p_left, p_mid], Stroke::new(2.4, Color32::WHITE));
+    painter.line_segment([p_mid, p_right], Stroke::new(2.4, Color32::WHITE));
+    painter.rect_filled(Rect::from_center_size(Pos2::new(p_left.x - 1.0, p_left.y + 2.0), Vec2::new(4.0, 3.5)), CornerRadius::same(1), Color32::WHITE);
+    painter.rect_filled(Rect::from_center_size(Pos2::new(p_right.x + 1.0, p_right.y + 2.0), Vec2::new(4.0, 3.5)), CornerRadius::same(1), Color32::WHITE);
+}
+
+/// Векторная сова для темы "OLED Midnight" (выразительные глаза и ушки)
+fn draw_vector_owl(painter: &egui::Painter, center: Pos2, color: Color32) {
+    let ear_l = Pos2::new(center.x - 5.5, center.y - 6.5);
+    let ear_r = Pos2::new(center.x + 5.5, center.y - 6.5);
+
+    // Силуэт головы совы
+    let head_rect = Rect::from_center_size(Pos2::new(center.x, center.y), Vec2::new(13.0, 11.0));
+    painter.rect_filled(head_rect, CornerRadius::same(4), color);
+
+    // Ушки-перышки
+    painter.add(egui::Shape::convex_polygon(
+        vec![Pos2::new(center.x - 6.0, center.y - 2.0), ear_l, Pos2::new(center.x - 2.0, center.y - 5.0)],
+        color,
+        Stroke::NONE,
+    ));
+    painter.add(egui::Shape::convex_polygon(
+        vec![Pos2::new(center.x + 2.0, center.y - 5.0), ear_r, Pos2::new(center.x + 6.0, center.y - 2.0)],
+        color,
+        Stroke::NONE,
+    ));
+
+    // Янтарно-желтые круглые глаза
+    let eye_bg = Color32::from_rgb(255, 220, 80);
+    let pupil = Color32::from_rgb(18, 18, 22);
+    painter.circle_filled(Pos2::new(center.x - 3.0, center.y - 0.5), 2.5, eye_bg);
+    painter.circle_filled(Pos2::new(center.x + 3.0, center.y - 0.5), 2.5, eye_bg);
+    painter.circle_filled(Pos2::new(center.x - 3.0, center.y - 0.5), 1.2, pupil);
+    painter.circle_filled(Pos2::new(center.x + 3.0, center.y - 0.5), 1.2, pupil);
+
+    // Клювик оранжевого цвета
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            Pos2::new(center.x - 1.2, center.y + 1.2),
+            Pos2::new(center.x + 1.2, center.y + 1.2),
+            Pos2::new(center.x, center.y + 3.4),
+        ],
+        Color32::from_rgb(245, 150, 30),
+        Stroke::NONE,
+    ));
+}
+
+/// Российский флаг (Белый, Синий, Красный)
+fn draw_vector_ru_flag(painter: &egui::Painter, rect: Rect) {
+    let r = CornerRadius::same(2);
+    let h_third = rect.height() / 3.0;
+    let top_r = Rect::from_min_max(rect.min, Pos2::new(rect.max.x, rect.min.y + h_third));
+    let mid_r = Rect::from_min_max(Pos2::new(rect.min.x, rect.min.y + h_third), Pos2::new(rect.max.x, rect.min.y + 2.0 * h_third));
+    let bot_r = Rect::from_min_max(Pos2::new(rect.min.x, rect.min.y + 2.0 * h_third), rect.max);
+    painter.rect_filled(top_r, CornerRadius { nw: 2, ne: 2, sw: 0, se: 0 }, Color32::from_rgb(255, 255, 255));
+    painter.rect_filled(mid_r, CornerRadius::ZERO, Color32::from_rgb(0, 57, 166));
+    painter.rect_filled(bot_r, CornerRadius { nw: 0, ne: 0, sw: 2, se: 2 }, Color32::from_rgb(213, 43, 30));
+    painter.rect_stroke(rect, r, Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 45)), egui::StrokeKind::Inside);
+}
+
+/// Американский флаг (Красно-белые полосы и синий кантон со звездой)
+fn draw_vector_us_flag(painter: &egui::Painter, rect: Rect) {
+    let r = CornerRadius::same(2);
+    painter.rect_filled(rect, r, Color32::from_rgb(178, 34, 52));
+    let stripe_h = rect.height() / 7.0;
+    for &i in &[1.0, 3.0, 5.0] {
+        let s_rect = Rect::from_min_max(
+            Pos2::new(rect.min.x, rect.min.y + i * stripe_h),
+            Pos2::new(rect.max.x, rect.min.y + (i + 1.0) * stripe_h),
+        );
+        painter.rect_filled(s_rect, CornerRadius::ZERO, Color32::WHITE);
+    }
+    let canton = Rect::from_min_max(
+        rect.min,
+        Pos2::new(rect.min.x + rect.width() * 0.45, rect.min.y + stripe_h * 4.0),
+    );
+    painter.rect_filled(canton, CornerRadius { nw: 2, ne: 0, sw: 0, se: 0 }, Color32::from_rgb(60, 59, 110));
+    painter.circle_filled(canton.center(), 1.2, Color32::WHITE);
+    painter.rect_stroke(rect, r, Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 45)), egui::StrokeKind::Inside);
+}
+
+/// Тройной сегментный тумблер тем оформления (Солнышко, Ночь, Сова)
+fn render_theme_triple_toggle(
+    ui: &mut egui::Ui,
+    current_theme: &mut AppTheme,
+    applied_theme: &mut Option<AppTheme>,
+    th: &ThemeColors,
+) {
+    let pill_w = 98.0;
+    let pill_h = 28.0;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(pill_w, pill_h), egui::Sense::hover());
+    let painter = ui.painter();
+
+    painter.rect_filled(rect, CornerRadius::same(14), th.bg_card);
+    painter.rect_stroke(rect, CornerRadius::same(14), Stroke::new(1.0, th.border), egui::StrokeKind::Inside);
+
+    let seg_w = (rect.width() - 4.0) / 3.0;
+    let themes = [
+        (AppTheme::LightClean, "tip_theme_light"),
+        (AppTheme::DarkDiscord, "tip_theme_discord"),
+        (AppTheme::OledMidnight, "tip_theme_oled"),
+    ];
+
+    for (idx, (theme, tip_key)) in themes.iter().enumerate() {
+        let seg_rect = Rect::from_min_size(
+            Pos2::new(rect.left() + 2.0 + idx as f32 * seg_w, rect.top() + 2.0),
+            Vec2::new(seg_w, rect.height() - 4.0),
+        );
+        let is_selected = *current_theme == *theme;
+        let resp = ui.interact(seg_rect, egui::Id::new(format!("theme_seg_{}", idx)), egui::Sense::click());
+
+        if is_selected {
+            let active_bg = match theme {
+                AppTheme::LightClean => Color32::from_rgb(255, 255, 255),
+                AppTheme::DarkDiscord => Color32::from_rgb(88, 101, 242),
+                AppTheme::OledMidnight => Color32::from_rgb(28, 30, 40),
+            };
+            let active_border = match theme {
+                AppTheme::LightClean => Color32::from_rgb(195, 205, 225),
+                AppTheme::DarkDiscord => Color32::from_rgb(114, 137, 218),
+                AppTheme::OledMidnight => Color32::from_rgb(120, 95, 220),
+            };
+            painter.rect_filled(seg_rect, CornerRadius::same(12), active_bg);
+            painter.rect_stroke(seg_rect, CornerRadius::same(12), Stroke::new(1.0, active_border), egui::StrokeKind::Inside);
+        } else if resp.hovered() {
+            painter.rect_filled(seg_rect, CornerRadius::same(12), Color32::from_rgba_unmultiplied(128, 128, 128, 30));
+        }
+
+        let center = seg_rect.center();
+        match theme {
+            AppTheme::LightClean => {
+                let sun_col = if is_selected {
+                    Color32::from_rgb(235, 140, 10)
+                } else {
+                    th.text_sub
+                };
+                painter.text(center, egui::Align2::CENTER_CENTER, ICON_SUN, egui::FontId::proportional(15.0), sun_col);
+            }
+            AppTheme::DarkDiscord => {
+                let moon_col = if is_selected {
+                    Color32::WHITE
+                } else {
+                    th.text_sub
+                };
+                painter.text(center, egui::Align2::CENTER_CENTER, ICON_MOON, egui::FontId::proportional(15.0), moon_col);
+            }
+            AppTheme::OledMidnight => {
+                let owl_col = if is_selected {
+                    Color32::from_rgb(170, 150, 255)
+                } else {
+                    th.text_sub
+                };
+                draw_vector_owl(painter, center, owl_col);
+            }
+        }
+
+        if resp.clicked() && !is_selected {
+            *current_theme = *theme;
+            apply_theme_mode(ui.ctx(), *theme);
+            *applied_theme = Some(*theme);
+        }
+        resp.on_hover_text(format!("{} / {}", crate::i18n::t(tip_key, AppLanguage::Ru), crate::i18n::t(tip_key, AppLanguage::En)));
+    }
+}
+
+/// Сегментный тумблер выбора языка интерфейса (Русский / English)
+fn render_language_toggle(
+    ui: &mut egui::Ui,
+    current_lang: &mut AppLanguage,
+    th: &ThemeColors,
+) {
+    let pill_w = 94.0;
+    let pill_h = 28.0;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(pill_w, pill_h), egui::Sense::hover());
+    let painter = ui.painter();
+
+    painter.rect_filled(rect, CornerRadius::same(14), th.bg_card);
+    painter.rect_stroke(rect, CornerRadius::same(14), Stroke::new(1.0, th.border), egui::StrokeKind::Inside);
+
+    let seg_w = (rect.width() - 4.0) / 2.0;
+    let langs = [
+        (AppLanguage::Ru, "RU", "tip_lang_ru"),
+        (AppLanguage::En, "EN", "tip_lang_en"),
+    ];
+
+    for (idx, (lang, label, tip_key)) in langs.iter().enumerate() {
+        let seg_rect = Rect::from_min_size(
+            Pos2::new(rect.left() + 2.0 + idx as f32 * seg_w, rect.top() + 2.0),
+            Vec2::new(seg_w, rect.height() - 4.0),
+        );
+        let is_selected = *current_lang == *lang;
+        let resp = ui.interact(seg_rect, egui::Id::new(format!("lang_seg_{}", idx)), egui::Sense::click());
+
+        if is_selected {
+            let active_bg = if th.border.r() > 100 && th.bg_app.r() > 200 {
+                Color32::from_rgb(255, 255, 255)
+            } else {
+                Color32::from_rgb(45, 52, 68)
+            };
+            painter.rect_filled(seg_rect, CornerRadius::same(12), active_bg);
+            painter.rect_stroke(seg_rect, CornerRadius::same(12), Stroke::new(1.0, th.border), egui::StrokeKind::Inside);
+        } else if resp.hovered() {
+            painter.rect_filled(seg_rect, CornerRadius::same(12), Color32::from_rgba_unmultiplied(128, 128, 128, 25));
+        }
+
+        let flag_rect = Rect::from_center_size(
+            Pos2::new(seg_rect.left() + 11.0, seg_rect.center().y),
+            Vec2::new(14.0, 10.0),
+        );
+        match lang {
+            AppLanguage::Ru => draw_vector_ru_flag(painter, flag_rect),
+            AppLanguage::En => draw_vector_us_flag(painter, flag_rect),
+        }
+
+        let text_col = if is_selected {
+            th.text_main
+        } else {
+            th.text_sub
+        };
+        painter.text(
+            Pos2::new(seg_rect.left() + 22.0, seg_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            *label,
+            egui::FontId::proportional(11.0),
+            text_col,
+        );
+
+        if resp.clicked() && !is_selected {
+            *current_lang = *lang;
+        }
+        resp.on_hover_text(crate::i18n::t(tip_key, *current_lang));
+    }
+}
+
+fn draw_vector_expand(painter: &egui::Painter, center: Pos2, icon_col: Color32) {
+    let d = 5.0;
+    // Верхний левый угол
+    painter.line_segment([Pos2::new(center.x - d, center.y - d + 3.0), Pos2::new(center.x - d, center.y - d)], Stroke::new(1.6, icon_col));
+    painter.line_segment([Pos2::new(center.x - d, center.y - d), Pos2::new(center.x - d + 3.0, center.y - d)], Stroke::new(1.6, icon_col));
+    // Верхний правый угол
+    painter.line_segment([Pos2::new(center.x + d, center.y - d + 3.0), Pos2::new(center.x + d, center.y - d)], Stroke::new(1.6, icon_col));
+    painter.line_segment([Pos2::new(center.x + d, center.y - d), Pos2::new(center.x + d - 3.0, center.y - d)], Stroke::new(1.6, icon_col));
+    // Нижний левый угол
+    painter.line_segment([Pos2::new(center.x - d, center.y + d - 3.0), Pos2::new(center.x - d, center.y + d)], Stroke::new(1.6, icon_col));
+    painter.line_segment([Pos2::new(center.x - d, center.y + d), Pos2::new(center.x - d + 3.0, center.y + d)], Stroke::new(1.6, icon_col));
+    // Нижний правый угол
+    painter.line_segment([Pos2::new(center.x + d, center.y + d - 3.0), Pos2::new(center.x + d, center.y + d)], Stroke::new(1.6, icon_col));
+    painter.line_segment([Pos2::new(center.x + d, center.y + d), Pos2::new(center.x + d - 3.0, center.y + d)], Stroke::new(1.6, icon_col));
+}
+
+fn draw_vector_avatar(painter: &egui::Painter, center: Pos2, radius: f32, bg_col: Color32, border_col: Color32, figure_col: Color32) {
+    painter.circle_filled(center, radius, bg_col);
+    painter.circle_stroke(center, radius, Stroke::new(1.5, border_col));
+
+    let head_r = radius * 0.36;
+    let head_c = Pos2::new(center.x, center.y - radius * 0.22);
+    painter.circle_filled(head_c, head_r, figure_col);
+
+    let shoulder_w = radius * 1.1;
+    let shoulder_h = radius * 0.6;
+    let shoulder_rect = Rect::from_center_size(
+        Pos2::new(center.x, center.y + radius * 0.52),
+        Vec2::new(shoulder_w, shoulder_h),
+    );
+    painter.with_clip_rect(Rect::from_center_size(center, Vec2::splat(radius * 1.95)))
+        .rect_filled(shoulder_rect, CornerRadius::same(head_r as u8), figure_col);
 }
 
 impl NanocordApp {
+    #[inline]
+    pub fn t(&self, key: &'static str) -> &'static str {
+        crate::i18n::t(key, self.app_language)
+    }
+
+    #[inline]
+    pub fn tr(&self, ru: &'static str, en: &'static str) -> &'static str {
+        match self.app_language {
+            AppLanguage::Ru => ru,
+            AppLanguage::En => en,
+        }
+    }
+
     /// Начальный экран (Lobby): запуск P2P-сервера со случайным кодом, подключение по IPv6/IPv4, буфер обмена
     fn render_lobby(&mut self, ui: &mut egui::Ui) {
+        let th = self.app_theme.colors();
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -386,18 +975,16 @@ impl NanocordApp {
                         ui.add_space(14.0);
                         ui.vertical_centered(|ui| {
                             ui.label(
-                                egui::RichText::new("P2P ВИДЕОКОМНАТА")
+                                egui::RichText::new(self.t("lobby_title"))
                                     .size(22.0)
                                     .strong()
-                                    .color(Color32::WHITE),
+                                    .color(th.text_main),
                             );
                             ui.add_space(3.0);
                             ui.label(
-                                egui::RichText::new(
-                                    "Прямой видеозвонок и стриминг экрана без серверов • Поддержка IPv6 [::] и IPv4",
-                                )
-                                .size(12.5)
-                                .color(Color32::from_rgb(160, 170, 188)),
+                                egui::RichText::new(self.t("lobby_subtitle"))
+                                    .size(12.5)
+                                    .color(th.text_sub),
                             );
                         });
                         ui.add_space(16.0);
@@ -426,47 +1013,45 @@ impl NanocordApp {
                             // КАРТОЧКА 1: СОЗДАТЬ СЕРВЕР (ХОСТ)
                             // ==========================================
                             egui::Frame::new()
-                                .fill(Color32::from_rgb(26, 28, 32))
-                                .stroke(Stroke::new(1.0, Color32::from_rgb(45, 48, 56)))
+                                .fill(th.bg_card)
+                                .stroke(Stroke::new(1.0, th.border))
                                 .corner_radius(CornerRadius::same(12))
                                 .inner_margin(16.0)
                                 .show(&mut cols[0], |ui| {
                                     let col_w = ui.available_width();
 
                                     ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new("👑").size(18.0));
+                                        ui.label(egui::RichText::new(self.t("host_badge")).strong().size(12.0).color(Color32::from_rgb(88, 101, 242)));
                                         ui.label(
-                                            egui::RichText::new("СОЗДАТЬ КОМНАТУ")
+                                            egui::RichText::new(self.t("host_card_title"))
                                                 .size(15.0)
                                                 .strong()
-                                                .color(Color32::WHITE),
+                                                .color(th.text_main),
                                         );
                                     });
                                     ui.add_space(2.0);
                                     ui.label(
-                                        egui::RichText::new(
-                                            "Запустите сервер на порту с 3-значным кодом и отправьте адрес собеседнику.",
-                                        )
-                                        .size(11.0)
-                                        .color(Color32::from_rgb(148, 155, 164)),
+                                        egui::RichText::new(self.t("host_card_desc"))
+                                            .size(11.0)
+                                            .color(th.text_sub),
                                     );
                                     ui.add_space(12.0);
 
                                     // Поле: Порт
                                     ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new("Порт:").size(12.5).color(Color32::WHITE));
+                                        ui.label(egui::RichText::new(self.t("port_label")).size(12.5).color(th.text_main));
                                         ui.add(egui::TextEdit::singleline(&mut self.server_port_str).desired_width(70.0));
-                                        ui.label(egui::RichText::new("(IPv6 + IPv4)").weak().size(11.0));
+                                        ui.label(egui::RichText::new("(IPv6 + IPv4)").weak().size(11.0).color(th.text_sub));
                                     });
                                     ui.add_space(6.0);
 
                                     // Поле: Случайный код [A-z0-9]
                                     ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new("Код доступа:").size(12.5).color(Color32::WHITE));
+                                        ui.label(egui::RichText::new(self.t("access_code_label")).size(12.5).color(th.text_main));
                                         ui.add(egui::TextEdit::singleline(&mut self.server_code_str).desired_width(60.0));
                                         if ui
-                                            .button("🎲 Новый")
-                                            .on_hover_text("Сгенерировать случайный 3-значный код [A-Za-z0-9]")
+                                            .button(self.t("random_code_btn"))
+                                            .on_hover_text(self.t("random_code_tip"))
                                             .clicked()
                                         {
                                             self.server_code_str = crate::network::generate_random_room_code();
@@ -488,15 +1073,15 @@ impl NanocordApp {
                                     );
 
                                     egui::Frame::new()
-                                        .fill(Color32::from_rgb(18, 20, 24))
-                                        .stroke(Stroke::new(1.0, Color32::from_rgb(38, 41, 48)))
+                                        .fill(th.bg_card_secondary)
+                                        .stroke(Stroke::new(1.0, th.border_faint))
                                         .corner_radius(CornerRadius::same(8))
                                         .inner_margin(10.0)
                                         .show(ui, |ui| {
                                             ui.label(
-                                                egui::RichText::new("Адрес для собеседника:")
+                                                egui::RichText::new(self.t("address_for_peer"))
                                                     .size(10.5)
-                                                    .color(Color32::from_rgb(160, 170, 185)),
+                                                    .color(th.text_sub),
                                             );
                                             ui.label(
                                                 egui::RichText::new(&invite_link_v6)
@@ -507,7 +1092,7 @@ impl NanocordApp {
                                             ui.label(
                                                 egui::RichText::new(format!("IPv4 LAN: {}", invite_link_v4))
                                                     .size(10.0)
-                                                    .weak(),
+                                                    .color(th.text_sub),
                                             );
                                         });
 
@@ -518,12 +1103,12 @@ impl NanocordApp {
                                         .add_sized(
                                             [col_w, 36.0],
                                             egui::Button::new(
-                                                egui::RichText::new("📋 Скопировать адрес + код")
+                                                egui::RichText::new(self.t("copy_address_btn"))
                                                     .strong()
                                                     .size(12.0)
                                                     .color(Color32::WHITE),
                                             )
-                                            .fill(Color32::from_rgb(60, 66, 82))
+                                            .fill(Color32::from_rgb(88, 101, 242))
                                             .corner_radius(CornerRadius::same(8)),
                                         )
                                         .clicked()
@@ -531,7 +1116,7 @@ impl NanocordApp {
                                         ui.ctx().copy_text(invite_link_v6.clone());
                                         crate::network::set_clipboard_text(&invite_link_v6);
                                         self.copy_toast = Some((
-                                            format!("Скопировано: {}", invite_link_v6),
+                                            format!("{}: {}", self.t("copied_toast"), invite_link_v6),
                                             Instant::now(),
                                         ));
                                     }
@@ -555,7 +1140,7 @@ impl NanocordApp {
                                             .add_sized(
                                                 [col_w, 38.0],
                                                 egui::Button::new(
-                                                    egui::RichText::new("▶ Запустить сервер (IPv6 + IPv4)")
+                                                    egui::RichText::new(self.t("start_server_btn"))
                                                         .strong()
                                                         .size(12.5)
                                                         .color(Color32::WHITE),
@@ -579,7 +1164,7 @@ impl NanocordApp {
                                             .add_sized(
                                                 [col_w, 38.0],
                                                 egui::Button::new(
-                                                    egui::RichText::new("⏹ Остановить сервер")
+                                                    egui::RichText::new(self.t("stop_server_btn"))
                                                         .strong()
                                                         .size(12.5)
                                                         .color(Color32::WHITE),
@@ -604,7 +1189,7 @@ impl NanocordApp {
 
                                         if is_srv_connected {
                                             ui.label(
-                                                egui::RichText::new(format!("🟢 Собеседник: {}", peer))
+                                                egui::RichText::new(format!("{}: {}", self.t("server_online_peer"), peer))
                                                     .color(Color32::from_rgb(35, 165, 90))
                                                     .strong()
                                                     .size(11.5),
@@ -614,7 +1199,7 @@ impl NanocordApp {
                                                 .add_sized(
                                                     [col_w, 30.0],
                                                     egui::Button::new(
-                                                        egui::RichText::new("Перейти к звонку →")
+                                                        egui::RichText::new(self.t("go_to_call_btn"))
                                                             .strong()
                                                             .size(11.5)
                                                             .color(Color32::WHITE),
@@ -628,13 +1213,13 @@ impl NanocordApp {
                                             }
                                         } else {
                                             ui.label(
-                                                egui::RichText::new(format!("🟡 {}", st))
+                                                egui::RichText::new(format!("{}: {}", self.t("waiting_badge"), st))
                                                     .color(Color32::from_rgb(234, 179, 8))
                                                     .size(11.0),
                                             );
                                         }
                                     } else {
-                                        ui.label(egui::RichText::new("⚪ Сервер не запущен").weak().size(11.0));
+                                        ui.label(egui::RichText::new(self.t("server_not_running")).weak().size(11.0).color(th.text_sub));
                                     }
                                 });
 
@@ -642,43 +1227,42 @@ impl NanocordApp {
                             // КАРТОЧКА 2: ПОДКЛЮЧИТЬСЯ К КОМНАТЕ (КЛИЕНТ)
                             // ==========================================
                             egui::Frame::new()
-                                .fill(Color32::from_rgb(26, 28, 32))
-                                .stroke(Stroke::new(1.0, Color32::from_rgb(45, 48, 56)))
+                                .fill(th.bg_card)
+                                .stroke(Stroke::new(1.0, th.border))
                                 .corner_radius(CornerRadius::same(12))
                                 .inner_margin(16.0)
                                 .show(&mut cols[1], |ui| {
                                     let col_w = ui.available_width();
 
                                     ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new("🔗").size(18.0));
+                                        ui.label(egui::RichText::new(self.t("client_badge")).strong().size(12.0).color(Color32::from_rgb(35, 165, 90)));
                                         ui.label(
-                                            egui::RichText::new("ПОДКЛЮЧИТЬСЯ")
+                                            egui::RichText::new(self.t("client_card_title"))
                                                 .size(15.0)
                                                 .strong()
-                                                .color(Color32::WHITE),
+                                                .color(th.text_main),
                                         );
                                     });
                                     ui.add_space(2.0);
                                     ui.label(
-                                        egui::RichText::new(
-                                            "Подключитесь к хосту по IPv6 / IPv4 адресу и 3-значному коду.",
-                                        )
-                                        .size(11.0)
-                                        .color(Color32::from_rgb(148, 155, 164)),
+                                        egui::RichText::new(self.t("client_card_desc"))
+                                            .size(11.0)
+                                            .color(th.text_sub),
                                     );
                                     ui.add_space(12.0);
 
                                     // Поле ввода: Адрес сервера + код
                                     ui.label(
-                                        egui::RichText::new("Адрес сервера и код:")
+                                        egui::RichText::new(self.t("client_target_label"))
                                             .size(12.0)
-                                            .color(Color32::WHITE),
+                                            .color(th.text_main),
                                     );
                                     ui.add_space(4.0);
+                                    let client_hint = self.t("client_target_hint");
                                     ui.add_sized(
                                         [col_w, 24.0],
                                         egui::TextEdit::singleline(&mut self.client_target_str)
-                                            .hint_text("[::1]:48120#код или 192.168.1.5:48120#код"),
+                                            .hint_text(client_hint),
                                     );
 
                                     ui.add_space(12.0);
@@ -688,7 +1272,7 @@ impl NanocordApp {
                                         .add_sized(
                                             [col_w, 36.0],
                                             egui::Button::new(
-                                                egui::RichText::new("📋 Вставить из буфера и подключиться")
+                                                egui::RichText::new(self.t("paste_and_connect_btn"))
                                                     .strong()
                                                     .size(11.5)
                                                     .color(Color32::WHITE),
@@ -705,19 +1289,19 @@ impl NanocordApp {
                                                 self.client_target_str =
                                                     format!("{}:{}#{}", host, port, code);
                                                 self.copy_toast = Some((
-                                                    format!("Вставлено: {}:{}#{}", host, port, code),
+                                                    format!("{}: {}:{}#{}", self.t("pasted_toast"), host, port, code),
                                                     Instant::now(),
                                                 ));
                                                 self.connect_client(host, port, code);
                                             } else {
                                                 self.copy_toast = Some((
-                                                    "Не удалось распознать адрес комнаты в буфере".to_string(),
+                                                    self.t("clipboard_parse_error").to_string(),
                                                     Instant::now(),
                                                 ));
                                             }
                                         } else {
                                             self.copy_toast =
-                                                Some(("Буфер обмена пуст".to_string(), Instant::now()));
+                                                Some((self.t("clipboard_empty").to_string(), Instant::now()));
                                         }
                                     }
 
@@ -740,7 +1324,7 @@ impl NanocordApp {
                                             .add_sized(
                                                 [col_w, 38.0],
                                                 egui::Button::new(
-                                                    egui::RichText::new("Подключиться к серверу")
+                                                    egui::RichText::new(self.t("connect_btn"))
                                                         .strong()
                                                         .size(12.5)
                                                         .color(Color32::WHITE),
@@ -756,7 +1340,7 @@ impl NanocordApp {
                                                 self.connect_client(host, port, code);
                                             } else {
                                                 self.client_status_msg =
-                                                    "Укажите адрес в формате [::1]:48120#код".to_string();
+                                                    self.t("invalid_address_error").to_string();
                                             }
                                         }
                                     } else {
@@ -764,7 +1348,7 @@ impl NanocordApp {
                                             .add_sized(
                                                 [col_w, 38.0],
                                                 egui::Button::new(
-                                                    egui::RichText::new("Отключиться")
+                                                    egui::RichText::new(self.t("disconnect_btn"))
                                                         .strong()
                                                         .size(12.5)
                                                         .color(Color32::WHITE),
@@ -777,7 +1361,7 @@ impl NanocordApp {
                                             if let Some(cli) = self.p2p_client.take() {
                                                 cli.stop();
                                             }
-                                            self.client_status_msg = "Отключено".to_string();
+                                            self.client_status_msg = self.t("disconnected_status").to_string();
                                         }
                                     }
 
@@ -788,7 +1372,7 @@ impl NanocordApp {
                                         let st = cli.status.read().unwrap().clone();
                                         if is_cli_connected {
                                             ui.label(
-                                                egui::RichText::new(format!("🟢 {}", st))
+                                                egui::RichText::new(format!("{} {}", self.t("client_online_badge"), st))
                                                     .color(Color32::from_rgb(35, 165, 90))
                                                     .strong()
                                                     .size(11.5),
@@ -798,7 +1382,7 @@ impl NanocordApp {
                                                 .add_sized(
                                                     [col_w, 30.0],
                                                     egui::Button::new(
-                                                        egui::RichText::new("Перейти к звонку →")
+                                                        egui::RichText::new(self.t("go_to_call_btn"))
                                                             .strong()
                                                             .size(11.5)
                                                             .color(Color32::WHITE),
@@ -812,19 +1396,24 @@ impl NanocordApp {
                                             }
                                         } else {
                                             ui.label(
-                                                egui::RichText::new(format!("⏳ {}", st))
+                                                egui::RichText::new(format!("{} {}", self.t("client_connecting_badge"), st))
                                                     .color(Color32::from_rgb(234, 179, 8))
                                                     .size(11.0),
                                             );
                                         }
                                     } else if !self.client_status_msg.is_empty() {
-                                        let col = if self.client_status_msg.starts_with("Ошибка") {
+                                        let col = if self.client_status_msg.starts_with("Ошибка") || self.client_status_msg.starts_with("Error") {
                                             Color32::from_rgb(218, 55, 60)
                                         } else {
-                                            Color32::from_rgb(148, 155, 164)
+                                            th.text_sub
+                                        };
+                                        let display_msg = if self.client_status_msg == "Не подключен" {
+                                            self.t("client_not_connected")
+                                        } else {
+                                            &self.client_status_msg
                                         };
                                         ui.label(
-                                            egui::RichText::new(&self.client_status_msg)
+                                            egui::RichText::new(display_msg)
                                                 .color(col)
                                                 .size(11.0),
                                         );
@@ -844,10 +1433,10 @@ impl NanocordApp {
         }
         self.p2p_client = Some(crate::network::P2PNetworkClient::connect(host, port, code));
     }
-    /// Отрисовка высококонтрастной бирки навигации (белый читабельный текст по умолчанию, белый фон + темный текст при выборе/наведении)
-    fn render_nav_tab_pill(ui: &mut egui::Ui, current: &mut Tab, tab: Tab, label: &str) {
+    /// Отрисовка высококонтрастной бирки навигации с динамической адаптацией к выбранной теме
+    fn render_nav_tab_pill(ui: &mut egui::Ui, current: &mut Tab, tab: Tab, label: &str, th: &ThemeColors) {
         let is_selected = *current == tab;
-        let galley = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(12.0), Color32::WHITE);
+        let galley = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(12.0), th.text_main);
         let pill_w = galley.size().x + 14.0; // аккуратная компактная ширина строго по размеру текста
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(pill_w, 25.0), egui::Sense::click());
         if resp.clicked() {
@@ -856,14 +1445,15 @@ impl NanocordApp {
         let is_hovered = resp.hovered();
 
         let (bg_color, text_color, stroke) = if is_selected {
-            // Выбран: белый фон, тёмный читабельный текст
-            (Color32::WHITE, Color32::from_rgb(18, 20, 26), Stroke::new(1.0, Color32::WHITE))
+            // Выбранная бирка
+            (th.pill_active_bg, th.pill_active_fg, Stroke::new(1.0, th.pill_active_bg))
         } else if is_hovered {
-            // При наведении: белый/светлый фон, тёмный текст
-            (Color32::from_rgb(230, 235, 245), Color32::from_rgb(18, 20, 26), Stroke::new(1.0, Color32::from_rgb(230, 235, 245)))
+            // При наведении
+            let hov_bg = th.pill_active_bg.linear_multiply(0.35);
+            (hov_bg, th.pill_active_fg, Stroke::new(1.0, th.border))
         } else {
-            // По умолчанию: тёмная плашка, чистый белый читабельный текст (инвертировано)
-            (Color32::from_rgb(45, 48, 56), Color32::WHITE, Stroke::new(1.0, Color32::from_rgb(60, 64, 76)))
+            // Неактивная бирка
+            (th.pill_inactive_bg, th.pill_inactive_fg, Stroke::new(1.0, th.border))
         };
 
         ui.painter().rect_filled(rect, CornerRadius::same(6), bg_color);
@@ -932,10 +1522,48 @@ impl NanocordApp {
 
 impl eframe::App for NanocordApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Гарантированная синхронизация темы оформления
+        if self.applied_theme != Some(self.app_theme) {
+            apply_theme_mode(ctx, self.app_theme);
+            self.applied_theme = Some(self.app_theme);
+        }
+
         // Проверяем статус P2P подключения
         let is_srv_connected = self.p2p_server.as_ref().map(|s| s.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
         let is_cli_connected = self.p2p_client.as_ref().map(|c| c.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
         let is_peer_connected = is_srv_connected || is_cli_connected;
+
+        // 0. Динамическое переключение микрофона при выборе в выпадающем списке
+        if let Some(dev) = self.input_devices.get(self.selected_input_device_idx) {
+            if dev.id != self.applied_input_device_id {
+                self.mic_is_running.store(false, Ordering::Relaxed);
+                let new_run = Arc::new(AtomicBool::new(true));
+                self.mic_is_running = new_run.clone();
+                let target_dev = if dev.id == "default" { None } else { Some(dev.id.clone()) };
+                self.mic_audio_rx = Some(crate::audio::start_wasapi_audio_worker(false, target_dev, new_run));
+                self.applied_input_device_id = dev.id.clone();
+            }
+        }
+
+        // Динамическое переключение устройства воспроизведения при выборе в выпадающем списке
+        if let Some(dev) = self.output_devices.get(self.selected_output_device_idx) {
+            if dev.id != self.applied_output_device_id {
+                self.audio_player.is_running.store(false, Ordering::Relaxed);
+                let target_dev = if dev.id == "default" { None } else { Some(dev.id.clone()) };
+                self.audio_player = Arc::new(crate::audio::WasapiAudioPlayer::with_device(target_dev));
+                self.applied_output_device_id = dev.id.clone();
+            }
+        }
+
+        // Горячие клавиши (M - микрофон, D - звук, если пользователь не вводит текст в поле ввода)
+        if !ctx.wants_keyboard_input() {
+            if ctx.input(|i| i.key_pressed(egui::Key::M)) {
+                self.is_mic_muted = !self.is_mic_muted;
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::D)) {
+                self.is_deafened = !self.is_deafened;
+            }
+        }
 
         // 1. Приём настоящих кадров захвата экрана
         if let Some(ref rx) = self.preview_rx {
@@ -1013,20 +1641,38 @@ impl eframe::App for NanocordApp {
             while let Ok(pkt) = rx.try_recv() {
                 self.mic_waveform.push_real_sample(pkt.min_sample, pkt.max_sample, pkt.rms, pkt.peak_db);
 
-                // Отправка аудио микрофона в P2P
-                if is_peer_connected && !self.is_mic_muted {
-                    let net_audio = crate::network::NetworkAudioPacket::new(
-                        pkt.peak_db,
-                        pkt.min_sample,
-                        pkt.max_sample,
-                        pkt.rms,
-                        pkt.bins,
-                    );
-                    if let Some(ref srv) = self.p2p_server {
-                        let _ = srv.outgoing_audio_tx.try_send(net_audio.clone());
+                // Реальное аппаратное масштабирование громкости микрофона
+                let mic_vol = if self.is_mic_muted { 0.0 } else { self.mic_waveform.volume };
+                let mut processed_pcm = pkt.pcm_chunk.clone();
+                if (mic_vol - 1.0).abs() > 0.001 || self.is_mic_muted {
+                    for s in &mut processed_pcm {
+                        *s = (*s as f32 * mic_vol).clamp(-32768.0, 32767.0) as i16;
                     }
-                    if let Some(ref cli) = self.p2p_client {
-                        let _ = cli.outgoing_audio_tx.try_send(net_audio);
+                }
+
+                // Самопрослушивание своего микрофона (Sidetone test)
+                if self.listen_to_mic_sidetone && !self.is_mic_muted {
+                    self.audio_player.play_samples(processed_pcm.clone());
+                }
+
+                // Кодирование и отправка звука микрофона в P2P через Opus (VBR)
+                if is_peer_connected && !self.is_mic_muted {
+                    let opus_packets = self.opus_encoder.encode_chunk(&processed_pcm);
+                    for opus_data in opus_packets {
+                        let net_audio = crate::network::NetworkAudioPacket::with_opus(
+                            (pkt.peak_db + 20.0 * mic_vol.max(0.01).log10()).clamp(-60.0, 0.0),
+                            pkt.min_sample * mic_vol,
+                            pkt.max_sample * mic_vol,
+                            pkt.rms * mic_vol,
+                            pkt.bins,
+                            opus_data,
+                        );
+                        if let Some(ref srv) = self.p2p_server {
+                            let _ = srv.outgoing_audio_tx.try_send(net_audio.clone());
+                        }
+                        if let Some(ref cli) = self.p2p_client {
+                            let _ = cli.outgoing_audio_tx.try_send(net_audio);
+                        }
                     }
                 }
             }
@@ -1036,6 +1682,33 @@ impl eframe::App for NanocordApp {
         if let Some(ref rx) = self.game_audio_rx {
             while let Ok(pkt) = rx.try_recv() {
                 self.game_waveform.push_real_sample(pkt.min_sample, pkt.max_sample, pkt.rms, pkt.peak_db);
+
+                let loop_vol = if self.is_deafened { 0.0 } else { self.game_waveform.volume };
+                let mut processed_pcm = pkt.pcm_chunk.clone();
+                if (loop_vol - 1.0).abs() > 0.001 || self.is_deafened {
+                    for s in &mut processed_pcm {
+                        *s = (*s as f32 * loop_vol).clamp(-32768.0, 32767.0) as i16;
+                    }
+                }
+                if is_peer_connected && !self.is_deafened {
+                    let opus_packets = self.opus_encoder.encode_chunk(&processed_pcm);
+                    for opus_data in opus_packets {
+                        let net_audio = crate::network::NetworkAudioPacket::with_opus(
+                            (pkt.peak_db + 20.0 * loop_vol.max(0.01).log10()).clamp(-60.0, 0.0),
+                            pkt.min_sample * loop_vol,
+                            pkt.max_sample * loop_vol,
+                            pkt.rms * loop_vol,
+                            pkt.bins,
+                            opus_data,
+                        );
+                        if let Some(ref srv) = self.p2p_server {
+                            let _ = srv.outgoing_audio_tx.try_send(net_audio.clone());
+                        }
+                        if let Some(ref cli) = self.p2p_client {
+                            let _ = cli.outgoing_audio_tx.try_send(net_audio);
+                        }
+                    }
+                }
             }
         }
 
@@ -1052,7 +1725,16 @@ impl eframe::App for NanocordApp {
             }
             while let Ok(audio) = srv.audio_rx.try_recv() {
                 if !self.is_deafened {
-                    self.game_waveform.push_real_sample(audio.min_sample, audio.max_sample, audio.rms, audio.peak_db);
+                    let mut samples = self.opus_decoder.decode_packet(&audio.opus_data);
+                    if !samples.is_empty() {
+                        let out_vol = self.game_waveform.volume;
+                        if (out_vol - 1.0).abs() > 0.001 {
+                            for s in &mut samples {
+                                *s = (*s as f32 * out_vol).clamp(-32768.0, 32767.0) as i16;
+                            }
+                        }
+                        self.audio_player.play_samples(samples);
+                    }
                 }
             }
         }
@@ -1065,12 +1747,22 @@ impl eframe::App for NanocordApp {
             }
             while let Ok(audio) = cli.audio_rx.try_recv() {
                 if !self.is_deafened {
-                    self.game_waveform.push_real_sample(audio.min_sample, audio.max_sample, audio.rms, audio.peak_db);
+                    let mut samples = self.opus_decoder.decode_packet(&audio.opus_data);
+                    if !samples.is_empty() {
+                        let out_vol = self.game_waveform.volume;
+                        if (out_vol - 1.0).abs() > 0.001 {
+                            for s in &mut samples {
+                                *s = (*s as f32 * out_vol).clamp(-32768.0, 32767.0) as i16;
+                            }
+                        }
+                        self.audio_player.play_samples(samples);
+                    }
                 }
             }
         }
 
         if let Some(frame) = latest_remote_dt {
+            self.last_remote_desktop_time = Some(Instant::now());
             let color_image = egui::ColorImage::from_rgba_unmultiplied(
                 [frame.width as usize, frame.height as usize],
                 &frame.rgba,
@@ -1088,6 +1780,7 @@ impl eframe::App for NanocordApp {
         }
 
         if let Some(frame) = latest_remote_cam {
+            self.last_remote_camera_time = Some(Instant::now());
             let color_image = egui::ColorImage::from_rgba_unmultiplied(
                 [frame.width as usize, frame.height as usize],
                 &frame.rgba,
@@ -1104,14 +1797,26 @@ impl eframe::App for NanocordApp {
             }
         }
 
-        // Авто-переход во вкладку "Звонок и Стрим", если собеседник подключился
-        if self.active_tab == Tab::Lobby {
-            let srv_conn = self.p2p_server.as_ref().map(|s| s.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
-            let cli_conn = self.p2p_client.as_ref().map(|c| c.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
-            if srv_conn || cli_conn {
-                self.active_tab = Tab::CallAndStream;
-                self.active_stage = StageSource::RemoteDesktop;
-            }
+        // Защита от замерзания кадров: если стрим прекратился или собеседник отключился, очищаем текстуру
+        let stream_timeout = Duration::from_millis(2200);
+        if !is_peer_connected || self.last_remote_desktop_time.map_or(true, |t| t.elapsed() > stream_timeout) {
+            self.remote_desktop_texture = None;
+        }
+        if !is_peer_connected || self.last_remote_camera_time.map_or(true, |t| t.elapsed() > stream_timeout) {
+            self.remote_camera_texture = None;
+        }
+
+        // Авто-переход между "Комната" и "Звонок и Стрим" в зависимости от активности P2P комнаты
+        let is_srv_conn = self.p2p_server.as_ref().map(|s| s.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+        let is_cli_conn = self.p2p_client.as_ref().map(|c| c.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+        let is_srv_running = self.p2p_server.as_ref().map(|s| s.is_running.load(Ordering::Relaxed)).unwrap_or(false);
+        let is_in_room = is_srv_running || is_srv_conn || is_cli_conn;
+
+        if is_in_room && self.active_tab == Tab::Lobby {
+            self.active_tab = Tab::CallAndStream;
+            self.active_stage = StageSource::RemoteDesktop;
+        } else if !is_in_room && self.active_tab == Tab::CallAndStream {
+            self.active_tab = Tab::Lobby;
         }
 
         // 5. Приём результатов бенчмарка
@@ -1140,45 +1845,67 @@ impl eframe::App for NanocordApp {
         // ЕСЛИ ВКЛЮЧЕН ПОЛНОЭКРАННЫЙ РЕЖИМ (FULLSCREEN)
         if self.is_fullscreen {
             egui::CentralPanel::default()
-                .frame(egui::Frame::new().fill(Color32::from_rgb(12, 14, 18)).inner_margin(0.0))
+                .frame(egui::Frame::new().fill(Color32::from_rgb(10, 12, 16)).inner_margin(0.0))
                 .show(ctx, |ui| {
                     self.render_fullscreen_stage(ui);
                 });
             return;
         }
 
+        let th = self.app_theme.colors();
+
         // ОБЫЧНЫЙ РЕЖИМ: ВЕРХНЯЯ НАВИГАЦИОННАЯ ПАНЕЛЬ
         egui::TopBottomPanel::top("top_nav")
-            .frame(egui::Frame::new().fill(Color32::from_rgb(30, 31, 34)).stroke(Stroke::new(1.0, Color32::from_rgb(45, 48, 54))).inner_margin(egui::Margin::symmetric(14, 8)))
+            .frame(egui::Frame::new().fill(th.bg_top_nav).stroke(Stroke::new(1.0, th.border)).inner_margin(egui::Margin::symmetric(14, 8)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("NANOCORD").strong().size(18.0).color(Color32::from_rgb(88, 101, 242)));
-                    ui.label(egui::RichText::new("v0.1.0 • P2P Ultra-Low Latency").weak().size(12.0));
+                    ui.label(egui::RichText::new("v0.1.0 • P2P Ultra-Low Latency").weak().size(12.0).color(th.text_sub));
 
                     ui.add_space(20.0);
 
-                    // Высококонтрастные бирки вкладок (белый текст по умолчанию, инвертированный белый фон при выборе/наведении)
-                    Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::Lobby, "Комната");
-                    Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::CallAndStream, "Звонок и Стрим");
-                    Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::BenchmarkMatrix, "Матрица профилей");
-                    Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::AudioAndSpectrum, "Аудио и Спектрограмма");
-                    Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::EncoderSettings, "Настройки NVENC");
+                    // Кнопка "Комната" заменяется на "Звонок и Стрим", когда запущен сервер или установлено подключение
+                    let tab_lobby_title = if is_in_room {
+                        self.t("nav_call_and_stream")
+                    } else {
+                        self.t("nav_lobby")
+                    };
+                    let tab_bench_title = self.t("nav_benchmark_matrix");
+                    let tab_audio_title = self.t("nav_audio_spectrum");
+                    let tab_nvenc_title = self.t("nav_encoder_settings");
+
+                    if is_in_room {
+                        Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::CallAndStream, tab_lobby_title, &th);
+                    } else {
+                        Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::Lobby, tab_lobby_title, &th);
+                    }
+                    Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::BenchmarkMatrix, tab_bench_title, &th);
+                    Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::AudioAndSpectrum, tab_audio_title, &th);
+                    Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::EncoderSettings, tab_nvenc_title, &th);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // 1. Тройной тумблер тем оформления (Солнышко, Ночь, Сова)
+                        render_theme_triple_toggle(ui, &mut self.app_theme, &mut self.applied_theme, &th);
+
+                        ui.add_space(8.0);
+
+                        // 2. Тумблер выбора языка (Русский и Американский флаги)
+                        render_language_toggle(ui, &mut self.app_language, &th);
+
+                        ui.add_space(8.0);
+
                         let is_srv_conn = self.p2p_server.as_ref().map(|s| s.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
                         let is_cli_conn = self.p2p_client.as_ref().map(|c| c.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
                         let is_srv_running = self.p2p_server.as_ref().map(|s| s.is_running.load(Ordering::Relaxed)).unwrap_or(false);
 
                         if is_srv_conn || is_cli_conn {
-                            ui.label(egui::RichText::new("🟢 В СЕТИ (P2P IPv6)").color(Color32::from_rgb(35, 165, 90)).strong());
+                            ui.label(egui::RichText::new(self.t("top_online_p2p")).color(Color32::from_rgb(35, 165, 90)).strong());
                         } else if is_srv_running {
-                            ui.label(egui::RichText::new("🟡 СЕРВЕР СЛУШАЕТ").color(Color32::from_rgb(234, 179, 8)).strong());
+                            ui.label(egui::RichText::new(self.t("top_server_listening")).color(Color32::from_rgb(234, 179, 8)).strong());
                         } else if self.is_streaming.load(Ordering::Relaxed) {
-                            ui.label(egui::RichText::new("В ЭФИРЕ (60 FPS)").color(Color32::from_rgb(220, 38, 38)).strong());
+                            ui.label(egui::RichText::new(self.t("top_live_60fps")).color(Color32::from_rgb(220, 38, 38)).strong());
                         } else if self.is_benchmarking {
-                            ui.label(egui::RichText::new("ТЕСТ КРЕМНИЯ...").color(Color32::from_rgb(217, 119, 6)).strong());
-                        } else {
-                            ui.label(egui::RichText::new("ГОТОВ К ЗВОНКУ").color(Color32::from_rgb(22, 163, 74)).strong());
+                            ui.label(egui::RichText::new(self.t("top_benchmarking")).color(Color32::from_rgb(217, 119, 6)).strong());
                         }
                     });
                 });
@@ -1186,7 +1913,7 @@ impl eframe::App for NanocordApp {
 
         // ЦЕНТРАЛЬНАЯ РАБОЧАЯ ОБЛАСТЬ
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(Color32::from_rgb(17, 18, 20)).inner_margin(8.0))
+            .frame(egui::Frame::new().fill(th.bg_app).inner_margin(8.0))
             .show(ctx, |ui| {
                 match self.active_tab {
                     Tab::Lobby => self.render_lobby(ui),
@@ -1200,66 +1927,278 @@ impl eframe::App for NanocordApp {
 }
 
 impl NanocordApp {
-    /// Отрисовка видео-экрана во весь размер окна (Fullscreen) с идеальным соотношением сторон
+    /// Отрисовка нижней плавающей панели управления звонком (Dock с иконками Material Icons и кнопкой Завершить)
+    fn render_call_dock(&mut self, ui: &mut egui::Ui, center_pos: Pos2) {
+        let th = self.app_theme.colors();
+        let dock_pill_w = 368.0_f32;
+        let dock_pill_rect = Rect::from_center_size(center_pos, Vec2::new(dock_pill_w, 52.0));
+
+        let painter = ui.painter();
+        let (dock_bg, dock_border) = if self.is_fullscreen {
+            (Color32::from_rgba_unmultiplied(18, 22, 30, 230), Color32::from_rgba_unmultiplied(255, 255, 255, 28))
+        } else {
+            (th.bg_dock, th.border)
+        };
+        painter.rect_filled(dock_pill_rect, CornerRadius::same(26), dock_bg);
+        painter.rect_stroke(dock_pill_rect, CornerRadius::same(26), Stroke::new(1.0, dock_border), egui::StrokeKind::Inside);
+
+        let (dock_btn_bg, dock_btn_border, dock_icon_color) = if self.is_fullscreen {
+            (Color32::from_rgb(32, 36, 46), Color32::from_rgb(52, 58, 72), Color32::WHITE)
+        } else if self.app_theme == AppTheme::LightClean {
+            (Color32::from_rgb(228, 233, 243), Color32::from_rgb(205, 212, 226), Color32::from_rgb(32, 38, 52))
+        } else if self.app_theme == AppTheme::OledMidnight {
+            (Color32::from_rgb(26, 26, 32), Color32::from_rgb(50, 54, 64), Color32::WHITE)
+        } else {
+            (Color32::from_rgb(45, 48, 56), Color32::from_rgb(60, 64, 76), Color32::WHITE)
+        };
+
+        let is_stream = self.is_streaming.load(Ordering::Relaxed);
+        let mut dock_ui = ui.new_child(egui::UiBuilder::new().max_rect(dock_pill_rect.shrink2(Vec2::new(12.0, 4.0))));
+        dock_ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(8.0, 0.0);
+
+            // 1. Иконка Микрофона с круглым звуковым ореолом (без артефактов и обрезки)
+            let (mic_rect, mic_resp) = ui.allocate_exact_size(Vec2::new(42.0, 42.0), egui::Sense::click());
+            let mic_center = mic_rect.center();
+            let mic_radius = 21.0;
+            let mic_painter = ui.painter();
+
+            if self.is_mic_muted {
+                mic_painter.circle_filled(mic_center, mic_radius, Color32::from_rgb(218, 55, 60));
+                mic_painter.circle_stroke(mic_center, mic_radius, Stroke::new(1.0, Color32::from_rgb(240, 80, 85)));
+                mic_painter.text(mic_center, egui::Align2::CENTER_CENTER, ICON_MIC_OFF, egui::FontId::proportional(20.0), Color32::WHITE);
+            } else {
+                mic_painter.circle_filled(mic_center, mic_radius, dock_btn_bg);
+                mic_painter.circle_stroke(mic_center, mic_radius, Stroke::new(1.0, dock_btn_border));
+
+                let vol_norm = (self.mic_waveform.smoothed_rms * 3.5).clamp(0.0, 1.0);
+                if vol_norm > 0.03 {
+                    let halo_r = mic_radius + 2.0 * vol_norm;
+                    let alpha = (110.0 + 145.0 * vol_norm) as u8;
+                    mic_painter.circle_stroke(
+                        mic_center,
+                        halo_r,
+                        Stroke::new(1.5 + 1.5 * vol_norm, Color32::from_rgba_unmultiplied(35, 165, 90, alpha)),
+                    );
+                }
+
+                if mic_resp.hovered() {
+                    mic_painter.circle_stroke(mic_center, mic_radius, Stroke::new(1.5, Color32::from_rgb(88, 101, 242)));
+                }
+
+                let mic_col = if vol_norm > 0.05 { Color32::from_rgb(35, 165, 90) } else { dock_icon_color };
+                mic_painter.text(mic_center, egui::Align2::CENTER_CENTER, ICON_MIC, egui::FontId::proportional(20.0), mic_col);
+            }
+
+            if mic_resp.clicked() {
+                self.is_mic_muted = !self.is_mic_muted;
+            }
+            mic_resp.on_hover_text(if self.is_mic_muted { self.t("dock_unmute_mic") } else { self.t("dock_mute_mic") });
+
+            // 2. Иконка Звука системы (Deafen)
+            let (deaf_rect, deaf_resp) = ui.allocate_exact_size(Vec2::new(42.0, 42.0), egui::Sense::click());
+            let deaf_center = deaf_rect.center();
+            let deaf_radius = 21.0;
+            let deaf_painter = ui.painter();
+
+            if self.is_deafened {
+                deaf_painter.circle_filled(deaf_center, deaf_radius, Color32::from_rgb(218, 55, 60));
+                deaf_painter.circle_stroke(deaf_center, deaf_radius, Stroke::new(1.0, Color32::from_rgb(240, 80, 85)));
+                deaf_painter.text(deaf_center, egui::Align2::CENTER_CENTER, ICON_HEADSET_OFF, egui::FontId::proportional(20.0), Color32::WHITE);
+            } else {
+                deaf_painter.circle_filled(deaf_center, deaf_radius, dock_btn_bg);
+                deaf_painter.circle_stroke(deaf_center, deaf_radius, Stroke::new(1.0, if deaf_resp.hovered() { Color32::from_rgb(88, 101, 242) } else { dock_btn_border }));
+                deaf_painter.text(deaf_center, egui::Align2::CENTER_CENTER, ICON_HEADSET, egui::FontId::proportional(20.0), dock_icon_color);
+            }
+
+            if deaf_resp.clicked() {
+                self.is_deafened = !self.is_deafened;
+            }
+            deaf_resp.on_hover_text(if self.is_deafened { self.t("dock_unmute_audio") } else { self.t("dock_deafen_audio") });
+
+            // 3. Иконка Веб-камеры
+            let (cam_rect, cam_resp) = ui.allocate_exact_size(Vec2::new(42.0, 42.0), egui::Sense::click());
+            let cam_center = cam_rect.center();
+            let cam_radius = 21.0;
+            let cam_painter = ui.painter();
+
+            if !self.is_camera_on {
+                cam_painter.circle_filled(cam_center, cam_radius, Color32::from_rgb(218, 55, 60));
+                cam_painter.circle_stroke(cam_center, cam_radius, Stroke::new(1.0, Color32::from_rgb(240, 80, 85)));
+                cam_painter.text(cam_center, egui::Align2::CENTER_CENTER, ICON_VIDEOCAM_OFF, egui::FontId::proportional(20.0), Color32::WHITE);
+            } else {
+                cam_painter.circle_filled(cam_center, cam_radius, dock_btn_bg);
+                cam_painter.circle_stroke(cam_center, cam_radius, Stroke::new(1.0, if cam_resp.hovered() { Color32::from_rgb(88, 101, 242) } else { dock_btn_border }));
+                cam_painter.text(cam_center, egui::Align2::CENTER_CENTER, ICON_VIDEOCAM, egui::FontId::proportional(20.0), dock_icon_color);
+            }
+
+            if cam_resp.clicked() {
+                self.is_camera_on = !self.is_camera_on;
+            }
+            cam_resp.on_hover_text(if self.is_camera_on { self.t("dock_turn_off_cam") } else { self.t("dock_turn_on_cam") });
+
+            // 4. Иконка Стрима экрана (по умолчанию серая, подсвечивается только при активности)
+            let (scr_rect, scr_resp) = ui.allocate_exact_size(Vec2::new(42.0, 42.0), egui::Sense::click());
+            let scr_center = scr_rect.center();
+            let scr_radius = 21.0;
+            let scr_painter = ui.painter();
+
+            if is_stream {
+                scr_painter.circle_filled(scr_center, scr_radius, Color32::from_rgb(88, 101, 242));
+                scr_painter.circle_stroke(scr_center, scr_radius, Stroke::new(1.0, Color32::from_rgb(114, 137, 218)));
+                scr_painter.text(scr_center, egui::Align2::CENTER_CENTER, ICON_STOP_SCREEN_SHARE, egui::FontId::proportional(20.0), Color32::WHITE);
+            } else {
+                scr_painter.circle_filled(scr_center, scr_radius, dock_btn_bg);
+                scr_painter.circle_stroke(scr_center, scr_radius, Stroke::new(1.0, if scr_resp.hovered() { Color32::from_rgb(88, 101, 242) } else { dock_btn_border }));
+                scr_painter.text(scr_center, egui::Align2::CENTER_CENTER, ICON_SCREEN_SHARE, egui::FontId::proportional(20.0), dock_icon_color);
+            }
+
+            if scr_resp.clicked() {
+                self.is_streaming.store(!is_stream, Ordering::Relaxed);
+            }
+            scr_resp.on_hover_text(if is_stream { self.t("dock_stop_screen") } else { self.t("dock_start_screen") });
+
+            // 5. Кнопка "Завершить звонок" (красный pill с иконкой трубки и текстом)
+            let hang_text = self.t("dock_end_call_btn");
+            let (hang_rect, hang_resp) = ui.allocate_exact_size(Vec2::new(144.0, 42.0), egui::Sense::click());
+            let hang_painter = ui.painter();
+
+            let hang_bg = if hang_resp.hovered() {
+                Color32::from_rgb(240, 70, 75)
+            } else {
+                Color32::from_rgb(218, 55, 60)
+            };
+            hang_painter.rect_filled(hang_rect, CornerRadius::same(21), hang_bg);
+            hang_painter.rect_stroke(
+                hang_rect,
+                CornerRadius::same(21),
+                Stroke::new(1.0, Color32::from_rgb(255, 110, 115)),
+                egui::StrokeKind::Inside,
+            );
+
+            // Иконка трубки (Material Icon call_end) + текст "Завершить звонок"
+            let icon_pos = Pos2::new(hang_rect.left() + 20.0, hang_rect.center().y);
+            hang_painter.text(
+                icon_pos,
+                egui::Align2::CENTER_CENTER,
+                ICON_CALL_END,
+                egui::FontId::proportional(19.0),
+                Color32::WHITE,
+            );
+
+            let label_pos = Pos2::new(hang_rect.left() + 36.0, hang_rect.center().y);
+            hang_painter.text(
+                label_pos,
+                egui::Align2::LEFT_CENTER,
+                hang_text,
+                egui::FontId::proportional(12.0),
+                Color32::WHITE,
+            );
+
+            if hang_resp.clicked() {
+                self.is_streaming.store(false, Ordering::Relaxed);
+                if let Some(cli) = self.p2p_client.take() {
+                    cli.stop();
+                }
+                if let Some(srv) = self.p2p_server.take() {
+                    srv.stop();
+                }
+                if self.is_fullscreen {
+                    self.is_fullscreen = false;
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                }
+                self.active_tab = Tab::Lobby;
+            }
+            hang_resp.on_hover_text(self.t("dock_end_call_tip"));
+        });
+    }
+
+    /// Отрисовка видео-экрана во весь размер окна (Fullscreen) в кинематографичном темном стиле
     fn render_fullscreen_stage(&mut self, ui: &mut egui::Ui) {
         let full_rect = ui.available_rect_before_wrap();
 
-        // Фон видео-экрана и настоящий видеопоток
+        // 1. Чистый кинематографичный черный фон для всего экрана
+        ui.painter().rect_filled(full_rect, CornerRadius::ZERO, Color32::from_rgb(10, 12, 16));
+
+        // 2. Расчет 16:9 области сцены
+        let stage_rect = if self.fit_aspect_ratio {
+            aspect_fit(full_rect, 16.0, 9.0)
+        } else {
+            full_rect
+        };
+
+        // 3. Отрисовка видеопотока или заглушки на сцене
         {
             let painter = ui.painter();
-            painter.rect_filled(full_rect, CornerRadius::ZERO, Color32::from_rgb(12, 14, 18));
-            self.render_stream_surface(painter, full_rect, self.active_stage);
+            self.render_stream_surface(painter, stage_rect, self.active_stage);
         }
 
-        // Плавающая верхняя плашка управления поверх видео
-        let overlay_rect = Rect::from_min_size(
-            Pos2::new(full_rect.left() + 20.0, full_rect.top() + 16.0),
-            Vec2::new(full_rect.width() - 40.0, 44.0),
+        // 4. Плавающая верхняя статусная плашка HUD (компактный glass pill)
+        let top_hud_w = (stage_rect.width() - 40.0).clamp(320.0, 780.0);
+        let top_hud_rect = Rect::from_center_size(
+            Pos2::new(stage_rect.center().x, full_rect.top() + 30.0),
+            Vec2::new(top_hud_w, 38.0),
         );
 
-        ui.painter().rect_filled(overlay_rect, CornerRadius::same(8), Color32::from_rgba_unmultiplied(20, 24, 32, 210));
-        ui.painter().rect_stroke(overlay_rect, CornerRadius::same(8), Stroke::new(1.0, Color32::from_rgb(60, 68, 86)), egui::StrokeKind::Inside);
+        ui.painter().rect_filled(top_hud_rect, CornerRadius::same(19), Color32::from_rgba_unmultiplied(18, 22, 30, 225));
+        ui.painter().rect_stroke(top_hud_rect, CornerRadius::same(19), Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 30)), egui::StrokeKind::Inside);
 
-        let mut overlay_ui = ui.new_child(egui::UiBuilder::new().max_rect(overlay_rect));
-        overlay_ui.horizontal(|ui| {
-            ui.add_space(12.0);
+        let is_stream = self.is_streaming.load(Ordering::Relaxed);
+        let mut hud_ui = ui.new_child(egui::UiBuilder::new().max_rect(top_hud_rect.shrink2(Vec2::new(14.0, 0.0))));
+        hud_ui.horizontal_centered(|ui| {
+            // Точка статуса (красная если стрим, зеленая если готов)
+            let (dot_rect, _) = ui.allocate_exact_size(Vec2::new(10.0, 10.0), egui::Sense::hover());
+            let dot_col = if is_stream { Color32::from_rgb(220, 38, 38) } else { Color32::from_rgb(35, 165, 90) };
+            ui.painter().circle_filled(dot_rect.center(), 4.5, dot_col);
+
+            ui.add_space(4.0);
             let stage_name = match self.active_stage {
-                StageSource::RemoteDesktop => "Рабочий стол собеседника",
-                StageSource::RemoteCamera => "Камера собеседника",
-                StageSource::LocalDesktop => "Ваш рабочий стол",
-                StageSource::LocalCamera => "Ваша веб-камера",
+                StageSource::RemoteDesktop => self.t("feed_peer_screen"),
+                StageSource::RemoteCamera => self.t("feed_peer_camera"),
+                StageSource::LocalDesktop => self.t("feed_local_screen"),
+                StageSource::LocalCamera => self.t("feed_local_camera"),
             };
-            ui.label(egui::RichText::new(stage_name).color(Color32::WHITE).strong().size(14.0));
+            ui.label(egui::RichText::new(stage_name).color(Color32::WHITE).strong().size(13.0));
 
             let (w, h, res_name) = self.available_resolutions[self.selected_res_idx];
             let (_, p_name) = self.get_effective_preset();
-            ui.label(egui::RichText::new(format!("{} • {} FPS • HEVC {} • {:.1} ms", res_name, self.target_fps, p_name, self.estimate_latency_ms()))
-                .color(Color32::from_rgb(130, 180, 255))
-                .size(12.0));
+            ui.label(egui::RichText::new(format!("• {} • {} FPS • HEVC {} • {:.1} ms", res_name, self.target_fps, p_name, self.estimate_latency_ms()))
+                .color(Color32::from_rgb(140, 185, 255))
+                .size(11.5));
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(8.0);
-                if ui.button("Выйти из полноэкранного режима (Esc)").clicked() {
+                // Кнопка выхода из fullscreen
+                let exit_label = format!("{} {}", ICON_FULLSCREEN_EXIT, self.t("stage_exit_fullscreen"));
+                let exit_btn = egui::Button::new(
+                    egui::RichText::new(exit_label).size(11.0).strong().color(Color32::WHITE)
+                )
+                .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 22))
+                .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 40)))
+                .corner_radius(CornerRadius::same(6));
+
+                if ui.add(exit_btn).clicked() {
                     self.is_fullscreen = false;
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                 }
 
-                let aspect_btn = if self.fit_aspect_ratio { "Масштаб: 16:9" } else { "Масштаб: Заполнить" };
-                if ui.button(aspect_btn).clicked() {
+                // Переключатель пропорций
+                let aspect_label = if self.fit_aspect_ratio { "16:9" } else { self.t("stage_fill") };
+                let aspect_btn = egui::Button::new(
+                    egui::RichText::new(aspect_label).size(11.0).strong().color(Color32::from_rgb(200, 215, 245))
+                )
+                .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 14))
+                .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 30)))
+                .corner_radius(CornerRadius::same(6));
+
+                if ui.add(aspect_btn).clicked() {
                     self.fit_aspect_ratio = !self.fit_aspect_ratio;
-                }
-
-                let mic_text = if self.is_mic_muted { "Включить микрофон" } else { "Выключить микрофон" };
-                if ui.button(mic_text).clicked() {
-                    self.is_mic_muted = !self.is_mic_muted;
-                }
-
-                let deaf_text = if self.is_deafened { "Включить звук" } else { "Выключить звук" };
-                if ui.button(deaf_text).clicked() {
-                    self.is_deafened = !self.is_deafened;
                 }
             });
         });
+
+        // 5. Плавающий нижний Dock (5 круглых векторных кнопок)
+        let dock_center = Pos2::new(stage_rect.center().x, full_rect.bottom() - 40.0);
+        self.render_call_dock(ui, dock_center);
     }
 
     /// Главный экран: Большой экран сцены слева + управление и карточки участников справа (на всю высоту окна)
@@ -1305,12 +2244,16 @@ impl NanocordApp {
         );
 
         let painter = ui.painter().clone();
+        let th = self.app_theme.colors();
+        let is_srv_conn = self.p2p_server.as_ref().map(|s| s.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+        let is_cli_conn = self.p2p_client.as_ref().map(|c| c.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+        let is_peer_connected = is_srv_conn || is_cli_conn;
 
         // ==========================================
         // 1. ОСНОВНАЯ СЦЕНА (STAGE VIEW)
         // ==========================================
-        painter.rect_filled(stage_container_rect, CornerRadius::same(10), Color32::from_rgb(18, 20, 24));
-        painter.rect_stroke(stage_container_rect, CornerRadius::same(10), Stroke::new(1.0, Color32::from_rgb(38, 41, 48)), egui::StrokeKind::Inside);
+        painter.rect_filled(stage_container_rect, CornerRadius::same(10), th.bg_stage);
+        painter.rect_stroke(stage_container_rect, CornerRadius::same(10), Stroke::new(1.0, th.border), egui::StrokeKind::Inside);
 
         // Расчет 16:9 прямоугольника видео внутри сцены
         let video_rect = if self.fit_aspect_ratio {
@@ -1329,87 +2272,58 @@ impl NanocordApp {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
         }
 
-        // --- ОВЕРЛЕЙ-БЕЙДЖИ ПРЯМО ПОВЕРХ ВИДЕОПОТОКА (КАК В TWITCH / DISCORD) ---
-        // Верхний левый угол: Статус стрима и битрейт/задержка
-        let (w, h, res_name) = self.available_resolutions[self.selected_res_idx];
-        let (_, p_name) = self.get_effective_preset();
-        let status_str = if self.is_streaming.load(Ordering::Relaxed) {
-            format!("🔴 LIVE • {} • {} FPS • HEVC {} • {:.1} ms", res_name, self.target_fps, p_name, self.estimate_latency_ms())
-        } else {
-            format!("🟢 ГОТОВ К ЭФИРУ • {} • {} FPS • HEVC {} • {:.1} ms", res_name, self.target_fps, p_name, self.estimate_latency_ms())
-        };
-        let status_w = (status_str.len() as f32 * 7.5 + 24.0).clamp(240.0, 360.0);
-        let badge_top_left = Rect::from_min_size(
-            Pos2::new(video_rect.left() + 14.0, video_rect.top() + 14.0),
-            Vec2::new(status_w, 28.0),
-        );
-        painter.rect_filled(badge_top_left, CornerRadius::same(6), Color32::from_rgba_unmultiplied(12, 14, 18, 225));
-        painter.rect_stroke(badge_top_left, CornerRadius::same(6), Stroke::new(1.0, Color32::from_rgb(52, 58, 70)), egui::StrokeKind::Inside);
-        painter.text(badge_top_left.center(), egui::Align2::CENTER_CENTER, status_str, egui::FontId::proportional(11.0), Color32::WHITE);
-
-        // Верхний правый угол: Кнопки управления сценой (PiP, Масштаб, Fullscreen)
-        let ctrl_w = 330.0;
+        // Верхний правый угол: Кнопки управления сценой (Масштаб, Fullscreen)
+        let ctrl_w = 195.0;
         let overlay_ctrl_rect = Rect::from_min_size(
-            Pos2::new(video_rect.right() - ctrl_w - 14.0, video_rect.top() + 14.0),
+            Pos2::new(video_rect.right() - ctrl_w - 12.0, video_rect.top() + 12.0),
             Vec2::new(ctrl_w, 30.0),
         );
         let mut ctrl_ui = ui.new_child(egui::UiBuilder::new().max_rect(overlay_ctrl_rect));
         ctrl_ui.horizontal_centered(|ui| {
-            let pip_btn = if self.is_camera_pip { "PiP Камера: ВКЛ" } else { "PiP Камера: ВЫКЛ" };
-            let pip_color = if self.is_camera_pip { Color32::from_rgb(35, 165, 90) } else { Color32::from_rgb(180, 185, 195) };
-            if ui.add(egui::Button::new(egui::RichText::new(pip_btn).strong().size(11.0).color(pip_color))
-                .fill(Color32::from_rgba_unmultiplied(20, 24, 32, 210))).clicked()
-            {
-                self.is_camera_pip = !self.is_camera_pip;
-            }
-
-            let aspect_btn = if self.fit_aspect_ratio { "16:9" } else { "Заполнить" };
-            if ui.add(egui::Button::new(egui::RichText::new(aspect_btn).size(11.0))
-                .fill(Color32::from_rgba_unmultiplied(20, 24, 32, 210))).clicked()
+            let aspect_btn = if self.fit_aspect_ratio { "16:9" } else { self.t("stage_fill") };
+            let (btn_fill, btn_col) = if self.app_theme == AppTheme::LightClean {
+                (Color32::from_rgba_unmultiplied(255, 255, 255, 230), Color32::from_rgb(24, 28, 38))
+            } else {
+                (Color32::from_rgba_unmultiplied(20, 24, 32, 210), Color32::WHITE)
+            };
+            if ui.add(egui::Button::new(egui::RichText::new(aspect_btn).size(11.0).color(btn_col))
+                .fill(btn_fill)).clicked()
             {
                 self.fit_aspect_ratio = !self.fit_aspect_ratio;
             }
 
-            if ui.add(egui::Button::new(egui::RichText::new("Во весь экран (F11)").strong().size(11.0).color(Color32::WHITE))
-                .fill(Color32::from_rgba_unmultiplied(40, 48, 64, 230))).clicked()
+            let fs_fill = if self.app_theme == AppTheme::LightClean {
+                Color32::from_rgb(88, 101, 242)
+            } else {
+                Color32::from_rgba_unmultiplied(40, 48, 64, 230)
+            };
+            let fs_label = format!("{} {}", ICON_FULLSCREEN, self.t("stage_fullscreen"));
+            if ui.add(egui::Button::new(egui::RichText::new(fs_label).strong().size(11.0).color(Color32::WHITE))
+                .fill(fs_fill)).clicked()
             {
                 self.is_fullscreen = true;
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
             }
         });
 
-        // Нижний левый угол: Название активного источника
-        let stage_title = match self.active_stage {
-            StageSource::RemoteDesktop => "Рабочий стол собеседника (Ожидание потока)",
-            StageSource::RemoteCamera => "Камера собеседника (Выключена)",
-            StageSource::LocalDesktop => "Ваш рабочий стол (DirectX 11 Live Capture)",
-            StageSource::LocalCamera => "Ваша веб-камера (BisonCam,NB Pro Live)",
-        };
-        let src_badge_rect = Rect::from_min_size(
-            Pos2::new(video_rect.left() + 14.0, video_rect.bottom() - 36.0),
-            Vec2::new(320.0, 26.0),
-        );
-        painter.rect_filled(src_badge_rect, CornerRadius::same(5), Color32::from_rgba_unmultiplied(12, 14, 18, 220));
-        painter.text(src_badge_rect.center(), egui::Align2::CENTER_CENTER, stage_title, egui::FontId::proportional(11.0), Color32::from_rgb(220, 225, 235));
-
         // ==========================================
         // 2. САЙДБАР УЧАСТНИКОВ И ПОТОКОВ
         // ==========================================
         if !self.is_sidebar_collapsed {
-            painter.rect_filled(sidebar_rect, CornerRadius::same(10), Color32::from_rgb(26, 28, 32));
-            painter.rect_stroke(sidebar_rect, CornerRadius::same(10), Stroke::new(1.0, Color32::from_rgb(45, 48, 56)), egui::StrokeKind::Inside);
+            painter.rect_filled(sidebar_rect, CornerRadius::same(10), th.bg_card);
+            painter.rect_stroke(sidebar_rect, CornerRadius::same(10), Stroke::new(1.0, th.border), egui::StrokeKind::Inside);
 
             let mut sb_ui = ui.new_child(egui::UiBuilder::new().max_rect(sidebar_rect.shrink(10.0)));
             sb_ui.vertical(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("УЧАСТНИКИ И ПОТОКИ (4)").strong().size(11.5).color(Color32::from_rgb(148, 155, 164)));
+                    ui.label(egui::RichText::new(self.t("sidebar_title")).strong().size(11.5).color(th.text_sub));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let room_label = if !self.server_code_str.is_empty() {
-                            format!("Код: {}", self.server_code_str)
+                            format!("{}: {}", self.t("code_prefix"), self.server_code_str)
                         } else {
-                            "Комната P2P".to_string()
+                            self.t("room_p2p_default").to_string()
                         };
-                        ui.label(egui::RichText::new(room_label).size(10.5).weak());
+                        ui.label(egui::RichText::new(room_label).size(10.5).color(th.text_sub));
                     });
                 });
                 ui.add_space(8.0);
@@ -1418,13 +2332,28 @@ impl NanocordApp {
                 egui::ScrollArea::vertical()
                     .max_height(scroll_h)
                     .show(ui, |ui| {
-                        self.render_feed_card(ui, "Экран собеседника", "1080p • Ожидание", StageSource::RemoteDesktop);
+                        let dt_status = if self.remote_desktop_texture.is_some() {
+                            self.t("status_live_1080p")
+                        } else if is_peer_connected {
+                            self.t("status_stream_stopped")
+                        } else {
+                            self.t("status_waiting_call")
+                        };
+                        self.render_feed_card(ui, self.t("feed_peer_screen"), dt_status, StageSource::RemoteDesktop);
                         ui.add_space(8.0);
-                        self.render_feed_card(ui, "Камера собеседника", "720p • Выключена", StageSource::RemoteCamera);
+
+                        let cam_status = if self.remote_camera_texture.is_some() {
+                            self.t("status_live_720p")
+                        } else if is_peer_connected {
+                            self.t("status_camera_off")
+                        } else {
+                            self.t("status_waiting_call")
+                        };
+                        self.render_feed_card(ui, self.t("feed_peer_camera"), cam_status, StageSource::RemoteCamera);
                         ui.add_space(8.0);
-                        self.render_feed_card(ui, "Ваш рабочий стол", "Live DXGI / GDI", StageSource::LocalDesktop);
+                        self.render_feed_card(ui, self.t("feed_local_screen"), "Live DXGI / GDI", StageSource::LocalDesktop);
                         ui.add_space(8.0);
-                        self.render_feed_card(ui, "Ваша веб-камера", "BisonCam • 720p 30 FPS", StageSource::LocalCamera);
+                        self.render_feed_card(ui, self.t("feed_local_camera"), "BisonCam • 720p 30 FPS", StageSource::LocalCamera);
                     });
             });
         }
@@ -1433,142 +2362,55 @@ impl NanocordApp {
         // 3. ПЛАВАЮЩИЙ НИЖНИЙ DOCK УПРАВЛЕНИЯ ЗВОНКОМ (MATERIAL DESIGN ICON STYLE)
         // ==========================================
         let dock_center = dock_rect.center();
-        let dock_pill_w = (320.0_f32).min(total_w - 20.0);
-        let dock_pill_rect = Rect::from_center_size(dock_center, Vec2::new(dock_pill_w, 52.0));
-
-        painter.rect_filled(dock_pill_rect, CornerRadius::same(26), Color32::from_rgb(30, 31, 36));
-        painter.rect_stroke(dock_pill_rect, CornerRadius::same(26), Stroke::new(1.0, Color32::from_rgb(50, 54, 64)), egui::StrokeKind::Inside);
-
-        let mut dock_ui = ui.new_child(egui::UiBuilder::new().max_rect(dock_pill_rect.shrink2(Vec2::new(12.0, 4.0))));
-        dock_ui.horizontal_centered(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(8.0, 0.0);
-
-            // 1. Иконка Микрофона (MD круг 42px с динамическим жидким пузырьком громкости)
-            let (mic_rect, mic_resp) = ui.allocate_exact_size(Vec2::new(42.0, 42.0), egui::Sense::click());
-            let mic_center = mic_rect.center();
-            let mic_radius = 21.0;
-            let mic_painter = ui.painter();
-
-            if self.is_mic_muted {
-                // Выключен: красный круг
-                mic_painter.circle_filled(mic_center, mic_radius, Color32::from_rgb(218, 55, 60));
-                mic_painter.circle_stroke(mic_center, mic_radius, Stroke::new(1.0, Color32::from_rgb(240, 80, 85)));
-                mic_painter.text(mic_center, egui::Align2::CENTER_CENTER, "🔇", egui::FontId::proportional(16.0), Color32::WHITE);
-            } else {
-                // По умолчанию: серый круг в цвет остальных кнопок дока
-                mic_painter.circle_filled(mic_center, mic_radius, Color32::from_rgb(45, 48, 56));
-                mic_painter.circle_stroke(mic_center, mic_radius, Stroke::new(1.0, Color32::from_rgb(60, 64, 76)));
-
-                // Жидкий зелёный пузырек, поднимающийся снизу вверх от уровня громкости
-                let vol_norm = (self.mic_waveform.smoothed_rms * 3.0).clamp(0.0, 1.0);
-                if vol_norm > 0.02 {
-                    let fill_h = mic_rect.height() * vol_norm;
-                    let fill_clip = Rect::from_min_max(
-                        Pos2::new(mic_rect.left(), mic_rect.bottom() - fill_h),
-                        mic_rect.max,
-                    );
-                    mic_painter.with_clip_rect(fill_clip).circle_filled(mic_center, mic_radius, Color32::from_rgb(35, 165, 90));
-
-                    // Светящийся гребень пузырька на границе уровня
-                    let crest_y = mic_rect.bottom() - fill_h;
-                    mic_painter.line_segment(
-                        [Pos2::new(mic_rect.left() + 4.0, crest_y), Pos2::new(mic_rect.right() - 4.0, crest_y)],
-                        Stroke::new(1.5, Color32::from_rgb(95, 235, 150)),
-                    );
-                }
-
-                if mic_resp.hovered() {
-                    mic_painter.circle_stroke(mic_center, mic_radius, Stroke::new(1.5, Color32::from_rgb(88, 101, 242)));
-                }
-
-                mic_painter.text(mic_center, egui::Align2::CENTER_CENTER, "🎤", egui::FontId::proportional(16.0), Color32::WHITE);
-            }
-
-            if mic_resp.clicked() {
-                self.is_mic_muted = !self.is_mic_muted;
-            }
-            mic_resp.on_hover_text(if self.is_mic_muted { "Включить микрофон (M)" } else { "Выключить микрофон (M)" });
-
-            // 2. Иконка Звука системы (Deafen)
-            let deaf_icon = if self.is_deafened { "🔈" } else { "🎧" };
-            let deaf_bg = if self.is_deafened { Color32::from_rgb(218, 55, 60) } else { Color32::from_rgb(45, 48, 56) };
-            if ui.add(egui::Button::new(egui::RichText::new(deaf_icon).size(16.0).color(Color32::WHITE))
-                .fill(deaf_bg)
-                .min_size(Vec2::new(42.0, 42.0))
-                .corner_radius(CornerRadius::same(21)))
-                .on_hover_text(if self.is_deafened { "Включить звук системы" } else { "Заглушить звук системы" })
-                .clicked()
-            {
-                self.is_deafened = !self.is_deafened;
-            }
-
-            // 3. Иконка Веб-камеры
-            let cam_icon = if self.is_camera_on { "📹" } else { "📷" };
-            let cam_bg = if self.is_camera_on { Color32::from_rgb(45, 48, 56) } else { Color32::from_rgb(218, 55, 60) };
-            if ui.add(egui::Button::new(egui::RichText::new(cam_icon).size(16.0).color(Color32::WHITE))
-                .fill(cam_bg)
-                .min_size(Vec2::new(42.0, 42.0))
-                .corner_radius(CornerRadius::same(21)))
-                .on_hover_text(if self.is_camera_on { "Выключить веб-камеру" } else { "Включить веб-камеру" })
-                .clicked()
-            {
-                self.is_camera_on = !self.is_camera_on;
-            }
-
-            // 4. Иконка Стрима экрана
-            let is_stream = self.is_streaming.load(Ordering::Relaxed);
-            let stream_bg = if is_stream { Color32::from_rgb(218, 55, 60) } else { Color32::from_rgb(88, 101, 242) };
-            if ui.add(egui::Button::new(egui::RichText::new("🖥").size(16.0).color(Color32::WHITE))
-                .fill(stream_bg)
-                .min_size(Vec2::new(42.0, 42.0))
-                .corner_radius(CornerRadius::same(21)))
-                .on_hover_text(if is_stream { "Остановить стрим экрана" } else { "Запустить стрим экрана" })
-                .clicked()
-            {
-                self.is_streaming.store(!is_stream, Ordering::Relaxed);
-            }
-
-            // 5. Иконка PiP (Камера в стриме)
-            let pip_bg = if self.is_camera_pip { Color32::from_rgb(35, 165, 90) } else { Color32::from_rgb(45, 48, 56) };
-            if ui.add(egui::Button::new(egui::RichText::new("🗖").size(16.0).color(Color32::WHITE))
-                .fill(pip_bg)
-                .min_size(Vec2::new(42.0, 42.0))
-                .corner_radius(CornerRadius::same(21)))
-                .on_hover_text(if self.is_camera_pip { "Выключить PiP камеру" } else { "Включить PiP камеру в стриме" })
-                .clicked()
-            {
-                self.is_camera_pip = !self.is_camera_pip;
-            }
-
-            // 6. Иконка Отключения (красная телефонная трубка) -> Выход в начальный экран
-            if ui.add(egui::Button::new(egui::RichText::new("📞").size(16.0).color(Color32::WHITE))
-                .fill(Color32::from_rgb(218, 55, 60))
-                .min_size(Vec2::new(42.0, 42.0))
-                .corner_radius(CornerRadius::same(21)))
-                .on_hover_text("Выйти из комнаты (Начальный экран)")
-                .clicked()
-            {
-                self.is_streaming.store(false, Ordering::Relaxed);
-                if let Some(cli) = self.p2p_client.take() {
-                    cli.stop();
-                }
-                if let Some(srv) = self.p2p_server.take() {
-                    srv.stop();
-                }
-                self.active_tab = Tab::Lobby;
-            }
-        });
+        self.render_call_dock(ui, dock_center);
     }
 
     fn render_stream_surface(&self, painter: &egui::Painter, rect: Rect, source: StageSource) {
+        let th = self.app_theme.colors();
         let is_thumb = rect.height() < 220.0;
+        let is_srv_conn = self.p2p_server.as_ref().map(|s| s.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+        let is_cli_conn = self.p2p_client.as_ref().map(|c| c.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+        let is_peer_connected = is_srv_conn || is_cli_conn;
+
+        let surface_placeholder_bg = if self.is_fullscreen {
+            Color32::from_rgb(14, 17, 24)
+        } else {
+            th.bg_stage
+        };
+        let surface_avatar_bg = if self.is_fullscreen {
+            Color32::from_rgb(26, 31, 42)
+        } else {
+            th.bg_card_secondary
+        };
+        let surface_avatar_stroke = if self.is_fullscreen {
+            Color32::from_rgb(45, 53, 70)
+        } else {
+            th.border
+        };
+        let t_main_color = if self.is_fullscreen {
+            Color32::from_rgb(230, 235, 245)
+        } else {
+            th.text_main
+        };
+        let t_sub_color = if self.is_fullscreen {
+            Color32::from_rgb(140, 155, 175)
+        } else {
+            th.text_sub
+        };
+        let mon_stroke_col = if self.is_fullscreen {
+            Color32::from_rgb(80, 100, 135)
+        } else if self.app_theme == AppTheme::LightClean {
+            Color32::from_rgb(140, 150, 170)
+        } else {
+            Color32::from_rgb(70, 85, 115)
+        };
 
         match source {
             StageSource::LocalDesktop => {
                 if let Some(tex) = self.desktop_texture.as_ref() {
                     let draw_rect = if self.fit_aspect_ratio {
-                        let [tw, th] = tex.size();
-                        aspect_fit(rect, tw as f32, th as f32)
+                        let [tw, th_sz] = tex.size();
+                        aspect_fit(rect, tw as f32, th_sz as f32)
                     } else {
                         rect
                     };
@@ -1581,42 +2423,15 @@ impl NanocordApp {
                         Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
                         Color32::WHITE,
                     );
-
-                    // ЗАПЕКАНИЕ ВЕБ-КАМЕРЫ В РАБОЧИЙ СТОЛ (Picture-in-Picture)
-                    if self.is_camera_pip && !is_thumb {
-                        if let Some(cam_tex) = self.camera_texture.as_ref() {
-                            let pip_w = (draw_rect.width() * 0.22).clamp(120.0, 260.0);
-                            let pip_h = pip_w * (9.0 / 16.0);
-                            let pip_rect = Rect::from_min_size(
-                                Pos2::new(draw_rect.right() - pip_w - 12.0, draw_rect.bottom() - pip_h - 12.0),
-                                Vec2::new(pip_w, pip_h),
-                            );
-                            painter.rect_filled(pip_rect, CornerRadius::same(6), Color32::from_rgb(10, 12, 16));
-                            painter.rect_stroke(pip_rect, CornerRadius::same(6), Stroke::new(1.5, Color32::from_rgb(88, 101, 242)), egui::StrokeKind::Inside);
-                            painter.image(
-                                cam_tex.id(),
-                                pip_rect,
-                                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                                Color32::WHITE,
-                            );
-
-                            let badge_rect = Rect::from_min_size(
-                                Pos2::new(pip_rect.left() + 6.0, pip_rect.top() + 6.0),
-                                Vec2::new(42.0, 16.0),
-                            );
-                            painter.rect_filled(badge_rect, CornerRadius::same(3), Color32::from_rgba_unmultiplied(0, 0, 0, 180));
-                            painter.text(badge_rect.center(), egui::Align2::CENTER_CENTER, "PiP CAM", egui::FontId::proportional(8.5), Color32::WHITE);
-                        }
-                    }
                 } else {
-                    painter.rect_filled(rect, CornerRadius::same(6), Color32::from_rgb(18, 22, 30));
+                    painter.rect_filled(rect, CornerRadius::same(6), surface_placeholder_bg);
                     if !is_thumb {
                         painter.text(
                             rect.center(),
                             egui::Align2::CENTER_CENTER,
-                            "Захват экрана (Подключение DXGI / GDI)...",
+                            self.t("surface_capture_connecting"),
                             egui::FontId::proportional(14.0),
-                            Color32::from_rgb(180, 190, 205),
+                            t_main_color,
                         );
                     }
                 }
@@ -1624,8 +2439,8 @@ impl NanocordApp {
             StageSource::LocalCamera => {
                 if let Some(tex) = self.camera_texture.as_ref() {
                     let draw_rect = if self.fit_aspect_ratio {
-                        let [tw, th] = tex.size();
-                        aspect_fit(rect, tw as f32, th as f32)
+                        let [tw, th_sz] = tex.size();
+                        aspect_fit(rect, tw as f32, th_sz as f32)
                     } else {
                         rect
                     };
@@ -1639,26 +2454,27 @@ impl NanocordApp {
                         Color32::WHITE,
                     );
                 } else {
-                    painter.rect_filled(rect, CornerRadius::same(6), Color32::from_rgb(20, 22, 28));
+                    painter.rect_filled(rect, CornerRadius::same(6), surface_placeholder_bg);
                     let center = rect.center();
                     let avatar_c = Pos2::new(center.x, center.y - 12.0);
-                    painter.circle_filled(avatar_c, 20.0, Color32::from_rgb(38, 42, 54));
-                    painter.circle_stroke(avatar_c, 20.0, Stroke::new(1.5, Color32::from_rgb(90, 105, 138)));
-                    painter.text(avatar_c, egui::Align2::CENTER_CENTER, "📹", egui::FontId::proportional(13.0), Color32::WHITE);
+                    painter.circle_filled(avatar_c, 20.0, surface_avatar_bg);
+                    painter.circle_stroke(avatar_c, 20.0, Stroke::new(1.5, surface_avatar_stroke));
+                    let cam_icon_col = if self.app_theme == AppTheme::LightClean { Color32::from_rgb(80, 92, 114) } else { Color32::WHITE };
+                    draw_vector_camera(painter, avatar_c, cam_icon_col, !self.is_camera_on);
                     painter.text(
                         Pos2::new(center.x, center.y + 16.0),
                         egui::Align2::CENTER_CENTER,
-                        if self.is_camera_on { "BisonCam: Загрузка..." } else { "Камера выключена" },
+                        if self.is_camera_on { self.t("surface_camera_loading") } else { self.t("surface_camera_off") },
                         egui::FontId::proportional(11.0),
-                        Color32::from_rgb(150, 160, 180),
+                        t_sub_color,
                     );
                 }
             }
             StageSource::RemoteDesktop => {
                 if let Some(tex) = self.remote_desktop_texture.as_ref() {
                     let draw_rect = if self.fit_aspect_ratio {
-                        let [tw, th] = tex.size();
-                        aspect_fit(rect, tw as f32, th as f32)
+                        let [tw, th_sz] = tex.size();
+                        aspect_fit(rect, tw as f32, th_sz as f32)
                     } else {
                         rect
                     };
@@ -1672,58 +2488,64 @@ impl NanocordApp {
                         Color32::WHITE,
                     );
                 } else {
-                    painter.rect_filled(rect, CornerRadius::same(6), Color32::from_rgb(18, 20, 26));
-                if is_thumb {
-                    let center = rect.center();
-                    let avatar_c = Pos2::new(center.x, center.y - 12.0);
-                    painter.circle_filled(avatar_c, 20.0, Color32::from_rgb(38, 42, 54));
-                    painter.circle_stroke(avatar_c, 20.0, Stroke::new(1.5, Color32::from_rgb(88, 101, 242)));
-                    painter.text(avatar_c, egui::Align2::CENTER_CENTER, "NC", egui::FontId::proportional(12.0), Color32::WHITE);
-                    painter.text(
-                        Pos2::new(center.x, center.y + 16.0),
-                        egui::Align2::CENTER_CENTER,
-                        "Ожидание стрима",
-                        egui::FontId::proportional(11.0),
-                        Color32::from_rgb(150, 160, 180),
-                    );
-                } else {
-                    let center = rect.center();
-                    // Стилизованный контур монитора
-                    let mon_w = 90.0;
-                    let mon_h = 56.0;
-                    let mon_rect = Rect::from_center_size(Pos2::new(center.x, center.y - 45.0), Vec2::new(mon_w, mon_h));
-                    painter.rect_stroke(mon_rect, CornerRadius::same(5), Stroke::new(2.0, Color32::from_rgb(70, 85, 115)), egui::StrokeKind::Inside);
-                    painter.line_segment(
-                        [Pos2::new(center.x, mon_rect.bottom()), Pos2::new(center.x, mon_rect.bottom() + 10.0)],
-                        Stroke::new(2.0, Color32::from_rgb(70, 85, 115)),
-                    );
-                    painter.line_segment(
-                        [Pos2::new(center.x - 20.0, mon_rect.bottom() + 10.0), Pos2::new(center.x + 20.0, mon_rect.bottom() + 10.0)],
-                        Stroke::new(2.0, Color32::from_rgb(70, 85, 115)),
-                    );
+                    painter.rect_filled(rect, CornerRadius::same(6), surface_placeholder_bg);
+                    if is_thumb {
+                        let center = rect.center();
+                        let avatar_c = Pos2::new(center.x, center.y - 12.0);
+                        painter.circle_filled(avatar_c, 20.0, surface_avatar_bg);
+                        painter.circle_stroke(avatar_c, 20.0, Stroke::new(1.5, Color32::from_rgb(88, 101, 242)));
+                        draw_vector_screen(painter, avatar_c, Color32::from_rgb(88, 101, 242));
+                        painter.text(
+                            Pos2::new(center.x, center.y + 16.0),
+                            egui::Align2::CENTER_CENTER,
+                            if is_peer_connected { self.t("surface_stream_stopped_thumb") } else { self.t("surface_waiting_stream_thumb") },
+                            egui::FontId::proportional(11.0),
+                            t_sub_color,
+                        );
+                    } else {
+                        let center = rect.center();
+                        // Стилизованный контур монитора
+                        let mon_w = 90.0;
+                        let mon_h = 56.0;
+                        let mon_rect = Rect::from_center_size(Pos2::new(center.x, center.y - 45.0), Vec2::new(mon_w, mon_h));
+                        painter.rect_stroke(mon_rect, CornerRadius::same(5), Stroke::new(2.0, mon_stroke_col), egui::StrokeKind::Inside);
+                        painter.line_segment(
+                            [Pos2::new(center.x, mon_rect.bottom()), Pos2::new(center.x, mon_rect.bottom() + 10.0)],
+                            Stroke::new(2.0, mon_stroke_col),
+                        );
+                        painter.line_segment(
+                            [Pos2::new(center.x - 20.0, mon_rect.bottom() + 10.0), Pos2::new(center.x + 20.0, mon_rect.bottom() + 10.0)],
+                            Stroke::new(2.0, mon_stroke_col),
+                        );
 
-                    painter.text(
-                        Pos2::new(center.x, center.y + 20.0),
-                        egui::Align2::CENTER_CENTER,
-                        "Собеседник ещё не запустил трансляцию экрана",
-                        egui::FontId::proportional(15.0),
-                        Color32::from_rgb(225, 230, 242),
-                    );
-                    painter.text(
-                        Pos2::new(center.x, center.y + 44.0),
-                        egui::Align2::CENTER_CENTER,
-                        "Ожидание входящего P2P видеопотока (Комната: NC-7829-X)",
-                        egui::FontId::proportional(12.0),
-                        Color32::from_rgb(130, 142, 165),
-                    );
-                }
+                        let (t_main, t_sub) = if is_peer_connected {
+                            (self.t("surface_stream_stopped_title"), self.t("surface_stream_stopped_desc"))
+                        } else {
+                            (self.t("surface_waiting_stream_title"), self.t("surface_waiting_stream_desc"))
+                        };
+
+                        painter.text(
+                            Pos2::new(center.x, center.y + 20.0),
+                            egui::Align2::CENTER_CENTER,
+                            t_main,
+                            egui::FontId::proportional(15.0),
+                            t_main_color,
+                        );
+                        painter.text(
+                            Pos2::new(center.x, center.y + 44.0),
+                            egui::Align2::CENTER_CENTER,
+                            t_sub,
+                            egui::FontId::proportional(12.0),
+                            t_sub_color,
+                        );
+                    }
                 }
             }
             StageSource::RemoteCamera => {
                 if let Some(tex) = self.remote_camera_texture.as_ref() {
                     let draw_rect = if self.fit_aspect_ratio {
-                        let [tw, th] = tex.size();
-                        aspect_fit(rect, tw as f32, th as f32)
+                        let [tw, th_sz] = tex.size();
+                        aspect_fit(rect, tw as f32, th_sz as f32)
                     } else {
                         rect
                     };
@@ -1737,46 +2559,50 @@ impl NanocordApp {
                         Color32::WHITE,
                     );
                 } else {
-                    painter.rect_filled(rect, CornerRadius::same(6), Color32::from_rgb(20, 22, 28));
-                if is_thumb {
-                    let center = rect.center();
-                    let avatar_c = Pos2::new(center.x, center.y - 12.0);
-                    painter.circle_filled(avatar_c, 20.0, Color32::from_rgb(38, 42, 54));
-                    painter.circle_stroke(avatar_c, 20.0, Stroke::new(1.5, Color32::from_rgb(90, 105, 138)));
-                    painter.text(avatar_c, egui::Align2::CENTER_CENTER, "👤", egui::FontId::proportional(13.0), Color32::WHITE);
-                    painter.text(
-                        Pos2::new(center.x, center.y + 16.0),
-                        egui::Align2::CENTER_CENTER,
-                        "Камера выключена",
-                        egui::FontId::proportional(11.0),
-                        Color32::from_rgb(150, 160, 180),
-                    );
-                } else {
-                    let center = rect.center();
-                    let avatar_center = Pos2::new(center.x, center.y - 45.0);
-                    painter.circle_filled(avatar_center, 34.0, Color32::from_rgb(32, 38, 54));
-                    painter.circle_stroke(avatar_center, 34.0, Stroke::new(1.5, Color32::from_rgb(65, 78, 105)));
+                    painter.rect_filled(rect, CornerRadius::same(6), surface_placeholder_bg);
+                    let figure_col = if self.app_theme == AppTheme::LightClean {
+                        Color32::from_rgb(115, 128, 150)
+                    } else {
+                        Color32::from_rgb(175, 185, 205)
+                    };
 
-                    // Силуэт головы и плеч
-                    painter.circle_filled(Pos2::new(avatar_center.x, avatar_center.y - 8.0), 12.0, Color32::from_rgb(90, 105, 138));
-                    let shoulder_rect = Rect::from_center_size(Pos2::new(avatar_center.x, avatar_center.y + 16.0), Vec2::new(32.0, 16.0));
-                    painter.rect_filled(shoulder_rect, CornerRadius::same(8), Color32::from_rgb(90, 105, 138));
+                    if is_thumb {
+                        let center = rect.center();
+                        let avatar_c = Pos2::new(center.x, center.y - 12.0);
+                        draw_vector_avatar(painter, avatar_c, 20.0, surface_avatar_bg, surface_avatar_stroke, figure_col);
+                        painter.text(
+                            Pos2::new(center.x, center.y + 16.0),
+                            egui::Align2::CENTER_CENTER,
+                            self.t("surface_camera_off"),
+                            egui::FontId::proportional(11.0),
+                            t_sub_color,
+                        );
+                    } else {
+                        let center = rect.center();
+                        let avatar_center = Pos2::new(center.x, center.y - 45.0);
+                        draw_vector_avatar(painter, avatar_center, 34.0, surface_avatar_bg, surface_avatar_stroke, figure_col);
 
-                    painter.text(
-                        Pos2::new(center.x, center.y + 20.0),
-                        egui::Align2::CENTER_CENTER,
-                        "Камера собеседника выключена",
-                        egui::FontId::proportional(15.0),
-                        Color32::from_rgb(225, 230, 242),
-                    );
-                    painter.text(
-                        Pos2::new(center.x, center.y + 44.0),
-                        egui::Align2::CENTER_CENTER,
-                        "Ожидание видеосигнала участника звонка",
-                        egui::FontId::proportional(12.0),
-                        Color32::from_rgb(130, 142, 165),
-                    );
-                }
+                        let (t_main, t_sub) = if is_peer_connected {
+                            (self.t("surface_peer_cam_off_title"), self.t("surface_peer_cam_off_desc"))
+                        } else {
+                            (self.t("surface_peer_cam_off_title"), self.t("surface_peer_cam_waiting_desc"))
+                        };
+
+                        painter.text(
+                            Pos2::new(center.x, center.y + 20.0),
+                            egui::Align2::CENTER_CENTER,
+                            t_main,
+                            egui::FontId::proportional(15.0),
+                            t_main_color,
+                        );
+                        painter.text(
+                            Pos2::new(center.x, center.y + 44.0),
+                            egui::Align2::CENTER_CENTER,
+                            t_sub,
+                            egui::FontId::proportional(12.0),
+                            t_sub_color,
+                        );
+                    }
                 }
             }
         }
@@ -1784,6 +2610,7 @@ impl NanocordApp {
 
     /// Полноразмерный прямоугольный видео-тайл участника с кнопками при наведении (hover controls)
     fn render_feed_card(&mut self, ui: &mut egui::Ui, title: &str, subtitle: &str, source: StageSource) {
+        let th = self.app_theme.colors();
         let is_active_on_stage = self.active_stage == source;
         let card_w = (ui.available_width() - 4.0).max(100.0);
         let card_h = (card_w * (9.0 / 16.0)).clamp(96.0, 155.0);
@@ -1803,7 +2630,7 @@ impl NanocordApp {
         } else if is_hovered {
             Stroke::new(1.5, Color32::from_rgb(114, 137, 218))
         } else {
-            Stroke::new(1.0, Color32::from_rgb(45, 48, 56))
+            Stroke::new(1.0, th.border)
         };
         painter.rect_stroke(rect, CornerRadius::same(8), border_stroke, egui::StrokeKind::Inside);
 
@@ -1818,7 +2645,7 @@ impl NanocordApp {
             CornerRadius::same(4),
             if fs_icon_hovered { Color32::from_rgba_unmultiplied(88, 101, 242, 230) } else { Color32::from_rgba_unmultiplied(18, 20, 26, 200) },
         );
-        painter.text(fs_icon_rect.center(), egui::Align2::CENTER_CENTER, "⛶", egui::FontId::proportional(12.0), Color32::WHITE);
+        draw_vector_expand(&painter, fs_icon_rect.center(), Color32::WHITE);
 
         // Двойной клик -> Во весь экран! Одиночный клик -> Выбор источника на сцену
         if response.double_clicked() || (response.clicked() && fs_icon_hovered) {
@@ -1829,51 +2656,124 @@ impl NanocordApp {
             self.active_stage = source;
         }
 
-        // 2. Подписи у превью ПОД ЭКРАНОМ (чистый контрастный белый текст)
+        // 2. Подписи у превью ПОД ЭКРАНОМ
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(title).strong().size(12.5).color(Color32::WHITE));
+            ui.label(egui::RichText::new(title).strong().size(12.5).color(th.text_main));
             if is_active_on_stage {
-                ui.label(egui::RichText::new("● В фокусе").size(10.5).color(Color32::from_rgb(88, 101, 242)));
+                ui.label(egui::RichText::new(self.t("status_in_focus")).strong().size(10.5).color(Color32::from_rgb(88, 101, 242)));
             }
         });
-        ui.label(egui::RichText::new(subtitle).size(10.5).color(Color32::from_rgb(205, 210, 222)));
+        ui.label(egui::RichText::new(subtitle).size(10.5).color(th.text_sub));
         ui.add_space(8.0);
     }
 
     /// Вкладка: Независимые аудио каналы + 10-секундная звуковая волна на чёрном фоне
     fn render_audio_and_spectrum(&mut self, ui: &mut egui::Ui) {
+        let th = self.app_theme.colors();
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.heading(egui::RichText::new("Осциллограф и уровни звука (10 сек)").color(Color32::WHITE).strong());
-                ui.label(egui::RichText::new("Реальная звуковая волна микрофона и рабочего стола на черном фоне с шкалой времени.").color(Color32::from_rgb(210, 215, 225)));
+                ui.heading(egui::RichText::new(self.t("audio_heading")).color(th.text_main).strong());
+                ui.label(egui::RichText::new(self.t("audio_subheading")).color(th.text_sub));
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let is_srv_conn = self.p2p_server.as_ref().map(|s| s.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
                 let is_cli_conn = self.p2p_client.as_ref().map(|c| c.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
                 if is_srv_conn || is_cli_conn {
-                    ui.label(egui::RichText::new("🟢 P2P Аудиопоток активен").color(Color32::from_rgb(35, 165, 90)).strong());
+                    ui.label(egui::RichText::new(self.t("audio_p2p_active")).color(Color32::from_rgb(35, 165, 90)).strong());
                 }
             });
         });
 
         ui.add_space(12.0);
 
+        // ПАНЕЛЬ НАСТРОЕК АУДИОУСТРОЙСТВ (WASAPI DROP-DOWN PICKERS & SIDETONE)
+        egui::Frame::new()
+            .fill(th.bg_card)
+            .stroke(Stroke::new(1.0, th.border))
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(12.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(self.t("audio_devices_title")).strong().size(13.0).color(th.text_main));
+                    if ui.button(self.t("btn_refresh")).clicked() {
+                        self.input_devices = crate::audio::enumerate_audio_devices(true);
+                        self.output_devices = crate::audio::enumerate_audio_devices(false);
+                    }
+                    let sidetone_label = self.t("audio_sidetone_check");
+                    let sidetone_tip = self.t("audio_sidetone_tip");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.checkbox(&mut self.listen_to_mic_sidetone, sidetone_label)
+                            .on_hover_text(sidetone_tip);
+                    });
+                });
+                ui.add_space(8.0);
+                let default_mic_text = self.t("audio_default_mic");
+                let default_spk_text = self.t("audio_default_speakers");
+                ui.columns(2, |cols| {
+                    // Колонка 1: Устройство ввода (Микрофон)
+                    cols[0].label(egui::RichText::new(self.t("audio_input_device")).size(12.0).color(th.text_main));
+                    let in_curr = if self.input_devices.is_empty() {
+                        default_mic_text.to_string()
+                    } else {
+                        let idx = self.selected_input_device_idx.min(self.input_devices.len() - 1);
+                        self.input_devices[idx].name.clone()
+                    };
+                    egui::ComboBox::from_id_salt("input_audio_device_combo")
+                        .selected_text(in_curr)
+                        .width(cols[0].available_width() - 10.0)
+                        .show_ui(&mut cols[0], |ui| {
+                            if self.input_devices.is_empty() {
+                                ui.selectable_value(&mut self.selected_input_device_idx, 0, default_mic_text);
+                            } else {
+                                for (i, dev) in self.input_devices.iter().enumerate() {
+                                    ui.selectable_value(&mut self.selected_input_device_idx, i, &dev.name);
+                                }
+                            }
+                        });
+
+                    // Колонка 2: Устройство вывода (Динамики/Наушники)
+                    cols[1].label(egui::RichText::new(self.t("audio_output_device")).size(12.0).color(th.text_main));
+                    let out_curr = if self.output_devices.is_empty() {
+                        default_spk_text.to_string()
+                    } else {
+                        let idx = self.selected_output_device_idx.min(self.output_devices.len() - 1);
+                        self.output_devices[idx].name.clone()
+                    };
+                    egui::ComboBox::from_id_salt("output_audio_device_combo")
+                        .selected_text(out_curr)
+                        .width(cols[1].available_width() - 10.0)
+                        .show_ui(&mut cols[1], |ui| {
+                            if self.output_devices.is_empty() {
+                                ui.selectable_value(&mut self.selected_output_device_idx, 0, default_spk_text);
+                            } else {
+                                for (i, dev) in self.output_devices.iter().enumerate() {
+                                    ui.selectable_value(&mut self.selected_output_device_idx, i, &dev.name);
+                                }
+                            }
+                        });
+                });
+            });
+
+        ui.add_space(12.0);
+
         egui::ScrollArea::vertical().show(ui, |ui| {
             // ИСТОЧНИК 1: ЗВУКОВАЯ ВОЛНА МИКРОФОНА
+            let mic_title = self.t("audio_mic_panel_title");
             self.render_waveform_panel(
                 ui,
-                "Микрофон (Host Microphone) — Осциллограмма 10s",
+                mic_title,
                 true,
             );
 
             ui.add_space(16.0);
 
             // ИСТОЧНИК 2: ЗВУКОВАЯ ВОЛНА СИСТЕМЫ / РАБОЧЕГО СТОЛА / МУЗЫКИ
+            let dt_title = self.t("audio_desktop_panel_title");
             self.render_waveform_panel(
                 ui,
-                "Звук системы (Desktop Audio Loopback) — Осциллограмма 10s",
+                dt_title,
                 false,
             );
         });
@@ -1886,9 +2786,10 @@ impl NanocordApp {
         title: &str,
         is_mic: bool,
     ) {
+        let th = self.app_theme.colors();
         egui::Frame::new()
-            .fill(Color32::from_rgb(22, 24, 28))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(45, 48, 56)))
+            .fill(th.bg_card)
+            .stroke(Stroke::new(1.0, th.border))
             .corner_radius(CornerRadius::same(10))
             .inner_margin(14.0)
             .show(ui, |ui| {
@@ -1900,14 +2801,14 @@ impl NanocordApp {
 
                 // Шапка панели
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(title).strong().size(14.0).color(Color32::WHITE));
+                    ui.label(egui::RichText::new(title).strong().size(14.0).color(th.text_main));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let status_str = if is_muted {
-                            "ВЫКЛЮЧЕНО (-inf dB)".to_string()
+                            self.t("audio_status_muted").to_string()
                         } else {
-                            format!("Пик: {:.1} dB", peak_db)
+                            format!("{}: {:.1} dB", self.t("audio_peak"), peak_db)
                         };
-                        let col = if is_muted { Color32::from_rgb(180, 185, 195) } else { Color32::from_rgb(35, 165, 90) };
+                        let col = if is_muted { th.text_sub } else { Color32::from_rgb(35, 165, 90) };
                         ui.label(egui::RichText::new(status_str).size(12.5).color(col).strong());
                     });
                 });
@@ -1942,12 +2843,12 @@ impl NanocordApp {
 
                 // Вертикальные временные шкалы: -10s, -8s, -6s, -4s, -2s, 0s
                 let time_markers = [
-                    (0.0, "-10 сек"),
-                    (0.2, "-8 сек"),
-                    (0.4, "-6 сек"),
-                    (0.6, "-4 сек"),
-                    (0.8, "-2 сек"),
-                    (1.0, "СЕЙЧАС (0s)"),
+                    (0.0, self.t("audio_time_minus_10s")),
+                    (0.2, self.t("audio_time_minus_8s")),
+                    (0.4, self.t("audio_time_minus_6s")),
+                    (0.6, self.t("audio_time_minus_4s")),
+                    (0.8, self.t("audio_time_minus_2s")),
+                    (1.0, self.t("audio_time_now")),
                 ];
                 for &(frac, label) in &time_markers {
                     let tx = rect.left() + frac * rect.width();
@@ -1955,9 +2856,16 @@ impl NanocordApp {
                         [Pos2::new(tx, rect.top()), Pos2::new(tx, rect.bottom())],
                         Stroke::new(0.5, Color32::from_rgb(32, 36, 44)),
                     );
+                    let (pos, align) = if frac >= 0.95 {
+                        (Pos2::new(rect.right() - 6.0, rect.top() + 10.0), egui::Align2::RIGHT_CENTER)
+                    } else if frac <= 0.05 {
+                        (Pos2::new(rect.left() + 6.0, rect.top() + 10.0), egui::Align2::LEFT_CENTER)
+                    } else {
+                        (Pos2::new(tx + 4.0, rect.top() + 10.0), egui::Align2::LEFT_CENTER)
+                    };
                     painter.text(
-                        Pos2::new(tx + 4.0, rect.top() + 10.0),
-                        egui::Align2::LEFT_CENTER,
+                        pos,
+                        align,
                         label,
                         egui::FontId::proportional(9.0),
                         Color32::from_rgb(140, 145, 160),
@@ -1985,22 +2893,24 @@ impl NanocordApp {
 
                 for (i, pt) in wave_history.iter().enumerate() {
                     let x = rect.left() + (i as f32 / n_pts as f32) * rect.width();
-                    let min_y = center_y + pt.min_val * half_h;
-                    let max_y = center_y + pt.max_val * half_h;
 
-                    let y1 = min_y.min(max_y).clamp(rect.top() + 4.0, rect.bottom() - 4.0);
-                    let y2 = min_y.max(max_y).clamp(rect.top() + 4.0, rect.bottom() - 4.0);
+                    // Идеально симметричная огибающая волны относительно центральной оси
+                    let amp = pt.max_val.abs().max(pt.min_val.abs()).max(pt.rms * 1.5).clamp(0.0, 1.0);
+                    let h = amp * (half_h - 4.0);
 
-                    if (y2 - y1) > 1.5 {
+                    let y1 = (center_y - h).clamp(rect.top() + 4.0, rect.bottom() - 4.0);
+                    let y2 = (center_y + h).clamp(rect.top() + 4.0, rect.bottom() - 4.0);
+
+                    if h >= 1.5 {
                         painter.line_segment(
                             [Pos2::new(x, y1), Pos2::new(x, y2)],
                             Stroke::new(1.8, wave_color),
                         );
-                        // Гребни волны
+                        // Симметричные неоновые гребни волны сверху и снизу
                         painter.circle_filled(Pos2::new(x, y1), 1.0, crest_color);
                         painter.circle_filled(Pos2::new(x, y2), 1.0, crest_color);
                     } else {
-                        // Фоновая тишина
+                        // Чистая фоновая линия тишины строго по центру
                         painter.circle_filled(Pos2::new(x, center_y), 0.7, Color32::from_rgb(50, 56, 68));
                     }
                 }
@@ -2009,20 +2919,20 @@ impl NanocordApp {
 
                 // Ползунок громкости, растянутый в половину экрана
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Громкость:").color(Color32::WHITE));
+                    ui.label(egui::RichText::new(self.t("audio_volume_label")).color(th.text_main));
                     ui.spacing_mut().slider_width = (ui.available_width() * 0.50).clamp(240.0, 700.0);
                     if is_mic {
-                        let btn_text = if self.is_mic_muted { "Включить микрофон" } else { "Выключить микрофон" };
+                        let btn_text = if self.is_mic_muted { self.t("audio_unmute_mic") } else { self.t("audio_mute_mic") };
                         if ui.button(btn_text).clicked() {
                             self.is_mic_muted = !self.is_mic_muted;
                         }
-                        ui.add(egui::Slider::new(&mut self.mic_waveform.volume, 0.0..=1.5).suffix("x"));
+                        ui.add(egui::Slider::new(&mut self.mic_waveform.volume, 0.0..=2.0).suffix("x"));
                     } else {
-                        let btn_text = if self.is_deafened { "Включить звук" } else { "Выключить звук" };
+                        let btn_text = if self.is_deafened { self.t("audio_unmute_sound") } else { self.t("audio_mute_sound") };
                         if ui.button(btn_text).clicked() {
                             self.is_deafened = !self.is_deafened;
                         }
-                        ui.add(egui::Slider::new(&mut self.game_waveform.volume, 0.0..=1.5).suffix("x"));
+                        ui.add(egui::Slider::new(&mut self.game_waveform.volume, 0.0..=2.0).suffix("x"));
                     }
                 });
             });
@@ -2030,18 +2940,19 @@ impl NanocordApp {
 
     /// Вкладка: Компактная матрица бенчмарка Resolution × FPS Target
     fn render_benchmark_matrix(&mut self, ui: &mut egui::Ui) {
+        let th = self.app_theme.colors();
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.heading("Аппаратная матрица кремния NVENC (RTX 3060)");
-                ui.label(format!("Тестируются разрешения только до физического экрана: {}x{} @ {} Гц.", self.native_width, self.native_height, self.native_hz));
+                ui.heading(egui::RichText::new(self.t("bench_heading")).color(th.text_main).strong());
+                ui.label(egui::RichText::new(format!("{}: {}x{} @ {} {}", self.t("bench_desc_prefix"), self.native_width, self.native_height, self.native_hz, self.t("bench_hz_suffix"))).color(th.text_sub));
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if self.is_benchmarking {
                     ui.spinner();
-                    ui.label("Идет замер кремния...");
+                    ui.label(egui::RichText::new(self.t("bench_probing")).color(th.text_main));
                 } else {
-                    if ui.button("Запустить повторный замер").clicked() {
+                    if ui.button(egui::RichText::new(self.t("bench_rerun_btn")).color(th.text_main)).clicked() {
                         self.start_benchmark();
                     }
                 }
@@ -2055,8 +2966,8 @@ impl NanocordApp {
             let fps_columns = crate::benchmark::compute_fps_targets(self.native_hz);
 
             egui::Frame::new()
-                .fill(Color32::from_rgb(26, 28, 34))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(45, 48, 56)))
+                .fill(th.bg_card)
+                .stroke(Stroke::new(1.0, th.border))
                 .corner_radius(CornerRadius::same(10))
                 .inner_margin(14.0)
                 .show(ui, |ui| {
@@ -2065,7 +2976,7 @@ impl NanocordApp {
                         .min_col_width(120.0)
                         .spacing([12.0, 10.0])
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new("Разрешение").strong().size(13.0));
+                            ui.label(egui::RichText::new(self.t("bench_table_resolution")).strong().size(13.0).color(th.text_main));
                             for &fps in &fps_columns {
                                 let budget = 1000.0 / fps as f32;
                                 let header = if fps == self.native_hz && fps > 60 {
@@ -2073,28 +2984,46 @@ impl NanocordApp {
                                 } else {
                                     format!("{} FPS ({:.1}ms)", fps, budget)
                                 };
-                                ui.label(egui::RichText::new(header).strong().size(13.0));
+                                ui.label(egui::RichText::new(header).strong().size(13.0).color(th.text_main));
                             }
                             ui.end_row();
 
                             for (r_idx, row) in matrix.iter().enumerate() {
-                                ui.label(egui::RichText::new(&row.res_label).strong().size(13.0));
+                                ui.label(egui::RichText::new(&row.res_label).strong().size(13.0).color(th.text_main));
 
                                 for cell in &row.cells {
                                     let (bg_color, border_color, text_color, label_text) = if cell.is_viable {
-                                        (
-                                            Color32::from_rgb(24, 46, 32),
-                                            Color32::from_rgb(35, 165, 90),
-                                            Color32::from_rgb(180, 240, 195),
-                                            format!("{} ({:.1} ms)", cell.best_preset_name, cell.latency_ms),
-                                        )
+                                        if self.app_theme == AppTheme::LightClean {
+                                            (
+                                                Color32::from_rgb(228, 248, 236),
+                                                Color32::from_rgb(52, 199, 89),
+                                                Color32::from_rgb(18, 120, 56),
+                                                format!("{} ({:.1} ms)", cell.best_preset_name, cell.latency_ms),
+                                            )
+                                        } else {
+                                            (
+                                                Color32::from_rgb(24, 46, 32),
+                                                Color32::from_rgb(35, 165, 90),
+                                                Color32::WHITE,
+                                                format!("{} ({:.1} ms)", cell.best_preset_name, cell.latency_ms),
+                                            )
+                                        }
                                     } else {
-                                        (
-                                            Color32::from_rgb(48, 24, 28),
-                                            Color32::from_rgb(218, 55, 60),
-                                            Color32::from_rgb(250, 170, 175),
-                                            format!("Лимит ({:.1} ms)", cell.latency_ms),
-                                        )
+                                        if self.app_theme == AppTheme::LightClean {
+                                            (
+                                                Color32::from_rgb(254, 236, 238),
+                                                Color32::from_rgb(240, 80, 85),
+                                                Color32::from_rgb(185, 25, 30),
+                                                format!("{} ({:.1} ms)", self.t("bench_limit"), cell.latency_ms),
+                                            )
+                                        } else {
+                                            (
+                                                Color32::from_rgb(48, 24, 28),
+                                                Color32::from_rgb(218, 55, 60),
+                                                Color32::WHITE,
+                                                format!("{} ({:.1} ms)", self.t("bench_limit"), cell.latency_ms),
+                                            )
+                                        }
                                     };
 
                                     let btn = egui::Button::new(
@@ -2104,13 +3033,27 @@ impl NanocordApp {
                                     .stroke(Stroke::new(1.0, border_color))
                                     .corner_radius(CornerRadius::same(6));
 
-                                    if ui.add(btn).on_hover_text(format!("Нажмите, чтобы применить {}x{} @ {} FPS с пресетом {}", cell.res_width, cell.res_height, cell.fps, cell.best_preset_name)).clicked() {
+                                    if ui.add(btn).on_hover_text(format!("{} {}x{} @ {} FPS {} {}", self.t("bench_click_apply"), cell.res_width, cell.res_height, cell.fps, self.t("bench_with_preset"), cell.best_preset_name)).clicked() {
                                         picked_cell = Some((r_idx, cell.fps, cell.best_preset_id));
                                     }
                                 }
                                 ui.end_row();
                             }
                         });
+                });
+
+            ui.add_space(14.0);
+
+            // Информационная карточка аппаратной архитектуры NVENC для заполнения пространства
+            egui::Frame::new()
+                .fill(th.bg_card)
+                .stroke(Stroke::new(1.0, th.border))
+                .corner_radius(CornerRadius::same(10))
+                .inner_margin(16.0)
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(self.t("bench_analysis_title")).strong().size(13.5).color(th.text_main));
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(self.t("bench_analysis_body")).size(11.5).color(th.text_sub));
                 });
 
             if let Some((r_idx, fps, preset_id)) = picked_cell {
@@ -2132,43 +3075,83 @@ impl NanocordApp {
 
     /// Вкладка: Тонкие настройки энкодера NVENC
     fn render_encoder_settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Параметры кодека NVIDIA NVENC (H.265 / HEVC)");
-        ui.label("Низкоуровневая настройка кремниевого энкодера RTX 3060.");
+        let th = self.app_theme.colors();
+        ui.heading(egui::RichText::new(self.t("nvenc_heading")).color(th.text_main).strong());
+        ui.label(egui::RichText::new(self.t("nvenc_subheading")).color(th.text_sub));
         ui.add_space(12.0);
 
         egui::Frame::new()
-            .fill(Color32::from_rgb(26, 28, 34))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(45, 48, 56)))
+            .fill(th.bg_card)
+            .stroke(Stroke::new(1.0, th.border))
             .corner_radius(CornerRadius::same(10))
-            .inner_margin(14.0)
+            .inner_margin(16.0)
             .show(ui, |ui| {
-                ui.label("Режим подбора пресета:");
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.preset_mode, PresetMode::AutoSmart, "Auto (Smart)");
-                    ui.selectable_value(&mut self.preset_mode, PresetMode::ManualP1, "P1 (Fastest)");
-                    ui.selectable_value(&mut self.preset_mode, PresetMode::ManualP3, "P3");
-                    ui.selectable_value(&mut self.preset_mode, PresetMode::ManualP4, "P4");
-                    ui.selectable_value(&mut self.preset_mode, PresetMode::ManualP5, "P5");
-                    ui.selectable_value(&mut self.preset_mode, PresetMode::ManualP6, "P6");
-                    ui.selectable_value(&mut self.preset_mode, PresetMode::ManualP7, "P7 (Max Quality)");
+                ui.label(egui::RichText::new(self.t("nvenc_preset_mode")).strong().size(13.0).color(th.text_main));
+                ui.add_space(6.0);
+
+                let presets = [
+                    (PresetMode::AutoSmart, "Auto (Smart)"),
+                    (PresetMode::ManualP1, "P1 (Fastest)"),
+                    (PresetMode::ManualP3, "P3"),
+                    (PresetMode::ManualP4, "P4"),
+                    (PresetMode::ManualP5, "P5"),
+                    (PresetMode::ManualP6, "P6"),
+                    (PresetMode::ManualP7, "P7 (Max Quality)"),
+                ];
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                    for (mode, label) in presets {
+                        let is_active = self.preset_mode == mode;
+                        let fill = if is_active {
+                            Color32::from_rgb(88, 101, 242)
+                        } else {
+                            th.pill_inactive_bg
+                        };
+                        let text_col = if is_active {
+                            Color32::WHITE
+                        } else {
+                            th.text_main
+                        };
+                        let btn = egui::Button::new(egui::RichText::new(label).size(12.0).strong().color(text_col))
+                            .fill(fill)
+                            .stroke(Stroke::new(1.0, if is_active { Color32::from_rgb(71, 82, 196) } else { th.border }))
+                            .corner_radius(CornerRadius::same(6));
+                        if ui.add(btn).clicked() {
+                            self.preset_mode = mode;
+                        }
+                    }
                 });
-                ui.add_space(10.0);
 
-                ui.spacing_mut().slider_width = (ui.available_width() * 0.50).clamp(240.0, 700.0);
-                ui.label(egui::RichText::new(format!("Контроль качества CQ (Target Quality): {}", self.cq_quality)).color(Color32::WHITE));
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(14.0);
+
+                ui.label(egui::RichText::new(format!("{} {}", self.t("nvenc_cq_title"), self.cq_quality)).strong().size(13.0).color(th.text_main));
+                ui.label(egui::RichText::new(self.t("nvenc_cq_desc")).size(11.0).color(th.text_sub));
+                ui.add_space(4.0);
+                ui.spacing_mut().slider_width = (ui.available_width() * 0.65).clamp(240.0, 700.0);
                 ui.add(egui::Slider::new(&mut self.cq_quality, 16..=32));
-                ui.add_space(10.0);
 
-                ui.label(egui::RichText::new(format!("Максимальный лимит битрейта (Max Bitrate Cap): {} Mbps", self.max_bitrate_mbps)).color(Color32::WHITE));
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(14.0);
+
+                ui.label(egui::RichText::new(format!("{} {} Mbps", self.t("nvenc_bitrate_title"), self.max_bitrate_mbps)).strong().size(13.0).color(th.text_main));
+                ui.label(egui::RichText::new(self.t("nvenc_bitrate_desc")).size(11.0).color(th.text_sub));
+                ui.add_space(4.0);
                 ui.add(egui::Slider::new(&mut self.max_bitrate_mbps, 5..=60).suffix(" Mbps"));
+
+                ui.add_space(16.0);
+                ui.separator();
                 ui.add_space(12.0);
 
-                ui.separator();
-                ui.add_space(8.0);
-                ui.label("Аппаратная архитектура: Optimus Dual-GPU");
-                ui.label("• Захват рабочего стола: Intel(R) UHD Graphics via DXGI Desktop Duplication");
-                ui.label("• Кодирование кадров: NVIDIA GeForce RTX 3060 Laptop GPU via nvEncodeAPI64.dll");
-                ui.label("• Ограничение задержки: zeroReorderDelay = 1, frameIntervalP = 1 (Zero B-Frames)");
+                ui.label(egui::RichText::new(self.t("nvenc_arch_title")).strong().size(13.0).color(th.text_main));
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(self.t("nvenc_arch_b1")).size(11.5).color(th.text_sub));
+                ui.label(egui::RichText::new(self.t("nvenc_arch_b2")).size(11.5).color(th.text_sub));
+                ui.label(egui::RichText::new(self.t("nvenc_arch_b3")).size(11.5).color(th.text_sub));
+                ui.label(egui::RichText::new(self.t("nvenc_arch_b4")).size(11.5).color(th.text_sub));
             });
     }
 

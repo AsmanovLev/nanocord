@@ -410,7 +410,7 @@ pub fn start_desktop_preview_worker(
     std::thread::spawn(move || {
         let mut capture = DxgiCapture::new().ok();
         let mut retry_counter = 0usize;
-        let mut first_frame_sent = false;
+        let mut last_frame: Option<Vec<u8>> = None;
 
         loop {
             std::thread::sleep(std::time::Duration::from_millis(33)); // ~30 FPS
@@ -430,8 +430,8 @@ pub fn start_desktop_preview_worker(
                         new_rgba = Some(rgba);
                     }
                     Ok(None) => {
-                        // Экран статичен (DXGI timeout) — если первый кадр ещё не был отправлен, берем GDI
-                        if !first_frame_sent {
+                        // Экран статичен (DXGI timeout) — если нет сохраненного кадра, берем GDI
+                        if last_frame.is_none() {
                             new_rgba = capture_desktop_gdi(target_w, target_h);
                         }
                     }
@@ -445,11 +445,18 @@ pub fn start_desktop_preview_worker(
             }
 
             if let Some(rgba) = new_rgba {
-                first_frame_sent = true;
+                last_frame = Some(rgba.clone());
                 let _ = tx.try_send(PreviewFrame {
                     width: target_w,
                     height: target_h,
                     rgba,
+                });
+            } else if let Some(ref rgba) = last_frame {
+                // При статичном экране повторно отдаем последний кадр, чтобы P2P-стрим не зависал в ожидании
+                let _ = tx.try_send(PreviewFrame {
+                    width: target_w,
+                    height: target_h,
+                    rgba: rgba.clone(),
                 });
             }
         }

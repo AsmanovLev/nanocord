@@ -113,7 +113,7 @@ fn main() -> eframe::Result<()> {
                 if cell.is_viable {
                     print!(" | {:<12}", format!("{} ({:.1}ms)", cell.best_preset_name, cell.latency_ms));
                 } else {
-                    print!(" | {:<12}", format!("❌ ({:.1}ms)", cell.latency_ms));
+                    print!(" | {:<12}", format!("[Лимит] ({:.1}ms)", cell.latency_ms));
                 }
             }
             println!();

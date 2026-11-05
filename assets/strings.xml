@@ -1,0 +1,580 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Top Bar Navigation & Info -->
+    <string name="app_title">
+        <ru>NANOCORD</ru>
+        <en>NANOCORD</en>
+    </string>
+    <string name="app_subtitle">
+        <ru>v0.1.0 • P2P Ultra-Low Latency</ru>
+        <en>v0.1.0 • P2P Ultra-Low Latency</en>
+    </string>
+    <string name="nav_lobby">
+        <ru>Комната</ru>
+        <en>Lobby</en>
+    </string>
+    <string name="nav_call_and_stream">
+        <ru>Звонок и Стрим</ru>
+        <en>Call &amp; Stream</en>
+    </string>
+    <string name="nav_benchmark_matrix">
+        <ru>Матрица профилей</ru>
+        <en>Profile Matrix</en>
+    </string>
+    <string name="nav_audio_spectrum">
+        <ru>Аудио и Спектрограмма</ru>
+        <en>Audio &amp; Spectrum</en>
+    </string>
+    <string name="nav_encoder_settings">
+        <ru>Настройки NVENC</ru>
+        <en>NVENC Settings</en>
+    </string>
+
+    <string name="top_online_p2p">
+        <ru>[В СЕТИ] P2P IPv6</ru>
+        <en>[ONLINE] P2P IPv6</en>
+    </string>
+    <string name="top_server_listening">
+        <ru>[СЕРВЕР СЛУШАЕТ]</ru>
+        <en>[SERVER LISTENING]</en>
+    </string>
+    <string name="top_live_60fps">
+        <ru>[В ЭФИРЕ] 60 FPS</ru>
+        <en>[LIVE] 60 FPS</en>
+    </string>
+    <string name="top_benchmarking">
+        <ru>[ТЕСТ КРЕМНИЯ...]</ru>
+        <en>[BENCHMARKING...]</en>
+    </string>
+
+    <!-- Theme and Language Tooltips -->
+    <string name="tip_theme_light">
+        <ru>Светлая тема (Солнце)</ru>
+        <en>Light Clean (Sun)</en>
+    </string>
+    <string name="tip_theme_discord">
+        <ru>Тёмная тема Discord (Ночь)</ru>
+        <en>Dark Discord (Night)</en>
+    </string>
+    <string name="tip_theme_oled">
+        <ru>Полночь / Сова (OLED)</ru>
+        <en>OLED Midnight (Owl)</en>
+    </string>
+    <string name="tip_lang_ru">
+        <ru>Русский язык</ru>
+        <en>Russian language</en>
+    </string>
+    <string name="tip_lang_en">
+        <ru>English language</ru>
+        <en>English language</en>
+    </string>
+
+    <!-- Lobby: General -->
+    <string name="lobby_title">
+        <ru>P2P ВИДЕОКОМНАТА</ru>
+        <en>P2P VIDEO ROOM</en>
+    </string>
+    <string name="lobby_subtitle">
+        <ru>Прямой видеозвонок и стриминг экрана без серверов • Поддержка IPv6 [::] и IPv4</ru>
+        <en>Direct serverless video call &amp; screen sharing • IPv6 [::] &amp; IPv4 supported</en>
+    </string>
+
+    <!-- Lobby: Host Server Card -->
+    <string name="host_badge">
+        <ru>[СЕРВЕР]</ru>
+        <en>[HOST]</en>
+    </string>
+    <string name="host_card_title">
+        <ru>СОЗДАТЬ КОМНАТУ</ru>
+        <en>CREATE ROOM</en>
+    </string>
+    <string name="host_card_desc">
+        <ru>Запустите сервер на порту с 3-значным кодом и отправьте адрес собеседнику.</ru>
+        <en>Start a server on a port with a 3-character code and share the address with peer.</en>
+    </string>
+    <string name="port_label">
+        <ru>Порт:</ru>
+        <en>Port:</en>
+    </string>
+    <string name="access_code_label">
+        <ru>Код доступа:</ru>
+        <en>Access Code:</en>
+    </string>
+    <string name="random_code_btn">
+        <ru>Случайный код</ru>
+        <en>Random Code</en>
+    </string>
+    <string name="random_code_tip">
+        <ru>Сгенерировать случайный 3-значный код [A-Za-z0-9]</ru>
+        <en>Generate random 3-char code [A-Za-z0-9]</en>
+    </string>
+    <string name="address_for_peer">
+        <ru>Адрес для собеседника:</ru>
+        <en>Address for Peer:</en>
+    </string>
+    <string name="copy_address_btn">
+        <ru>Скопировать адрес + код</ru>
+        <en>Copy Address + Code</en>
+    </string>
+    <string name="copied_toast">
+        <ru>Скопировано</ru>
+        <en>Copied</en>
+    </string>
+    <string name="start_server_btn">
+        <ru>Запустить сервер (IPv6 + IPv4)</ru>
+        <en>Start Server (IPv6 + IPv4)</en>
+    </string>
+    <string name="stop_server_btn">
+        <ru>Остановить сервер</ru>
+        <en>Stop Server</en>
+    </string>
+    <string name="server_online_peer">
+        <ru>[В сети] Собеседник</ru>
+        <en>[Online] Peer</en>
+    </string>
+    <string name="go_to_call_btn">
+        <ru>Перейти к звонку -></ru>
+        <en>Go to Call -></en>
+    </string>
+    <string name="waiting_badge">
+        <ru>[Ожидание]</ru>
+        <en>[Waiting]</en>
+    </string>
+    <string name="server_not_running">
+        <ru>Сервер не запущен</ru>
+        <en>Server is not running</en>
+    </string>
+
+    <!-- Lobby: Join Client Card -->
+    <string name="client_badge">
+        <ru>[КЛИЕНТ]</ru>
+        <en>[CLIENT]</en>
+    </string>
+    <string name="client_card_title">
+        <ru>ПОДКЛЮЧИТЬСЯ</ru>
+        <en>JOIN ROOM</en>
+    </string>
+    <string name="client_card_desc">
+        <ru>Подключитесь к хосту по IPv6 / IPv4 адресу и 3-значному коду.</ru>
+        <en>Connect to host via IPv6 / IPv4 address and 3-char code.</en>
+    </string>
+    <string name="client_target_label">
+        <ru>Адрес сервера и код:</ru>
+        <en>Server address and code:</en>
+    </string>
+    <string name="client_target_hint">
+        <ru>[::1]:48120#код или 192.168.1.5:48120#код</ru>
+        <en>[::1]:48120#code or 192.168.1.5:48120#code</en>
+    </string>
+    <string name="paste_and_connect_btn">
+        <ru>Вставить из буфера и подключиться</ru>
+        <en>Paste from clipboard &amp; join</en>
+    </string>
+    <string name="pasted_toast">
+        <ru>Вставлено</ru>
+        <en>Pasted</en>
+    </string>
+    <string name="clipboard_parse_error">
+        <ru>Не удалось распознать адрес комнаты в буфере</ru>
+        <en>Failed to parse room address in clipboard</en>
+    </string>
+    <string name="clipboard_empty">
+        <ru>Буфер обмена пуст</ru>
+        <en>Clipboard is empty</en>
+    </string>
+    <string name="connect_btn">
+        <ru>Подключиться к серверу</ru>
+        <en>Connect to server</en>
+    </string>
+    <string name="disconnect_btn">
+        <ru>Отключиться</ru>
+        <en>Disconnect</en>
+    </string>
+    <string name="disconnected_status">
+        <ru>Отключено</ru>
+        <en>Disconnected</en>
+    </string>
+    <string name="invalid_address_error">
+        <ru>Укажите адрес в формате [::1]:48120#код</ru>
+        <en>Specify address as [::1]:48120#code</en>
+    </string>
+    <string name="client_online_badge">
+        <ru>[В сети]</ru>
+        <en>[Online]</en>
+    </string>
+    <string name="client_connecting_badge">
+        <ru>[Подключение]</ru>
+        <en>[Connecting]</en>
+    </string>
+    <string name="client_not_connected">
+        <ru>Не подключен</ru>
+        <en>Not connected</en>
+    </string>
+
+    <!-- Stage View & Controls -->
+    <string name="stage_fill">
+        <ru>Заполнить</ru>
+        <en>Fill</en>
+    </string>
+    <string name="stage_fullscreen">
+        <ru>Во весь экран</ru>
+        <en>Fullscreen</en>
+    </string>
+    <string name="stage_fullscreen_f11">
+        <ru>Во весь экран (F11)</ru>
+        <en>Fullscreen (F11)</en>
+    </string>
+    <string name="stage_exit_fullscreen">
+        <ru>Выход (Esc)</ru>
+        <en>Exit (Esc)</en>
+    </string>
+
+    <!-- Participants & Feeds Sidebar -->
+    <string name="sidebar_title">
+        <ru>УЧАСТНИКИ И ПОТОКИ (4)</ru>
+        <en>PARTICIPANTS &amp; STREAMS (4)</en>
+    </string>
+    <string name="code_prefix">
+        <ru>Код</ru>
+        <en>Code</en>
+    </string>
+    <string name="room_p2p_default">
+        <ru>Комната P2P</ru>
+        <en>P2P Room</en>
+    </string>
+    <string name="feed_peer_screen">
+        <ru>Экран собеседника</ru>
+        <en>Peer's Screen</en>
+    </string>
+    <string name="feed_peer_camera">
+        <ru>Камера собеседника</ru>
+        <en>Peer's Camera</en>
+    </string>
+    <string name="feed_local_screen">
+        <ru>Ваш рабочий стол</ru>
+        <en>Your Screen</en>
+    </string>
+    <string name="feed_local_camera">
+        <ru>Ваша веб-камера</ru>
+        <en>Your Camera</en>
+    </string>
+
+    <string name="status_live_1080p">
+        <ru>1080p • В эфире (30 FPS)</ru>
+        <en>1080p • Live (30 FPS)</en>
+    </string>
+    <string name="status_live_720p">
+        <ru>720p • В эфире (30 FPS)</ru>
+        <en>720p • Live (30 FPS)</en>
+    </string>
+    <string name="status_stream_stopped">
+        <ru>Стрим остановлен</ru>
+        <en>Stream stopped</en>
+    </string>
+    <string name="status_waiting_call">
+        <ru>Ожидание звонка</ru>
+        <en>Waiting for call</en>
+    </string>
+    <string name="status_camera_off">
+        <ru>Камера выключена</ru>
+        <en>Camera is off</en>
+    </string>
+    <string name="status_in_focus">
+        <ru>[В фокусе]</ru>
+        <en>[In Focus]</en>
+    </string>
+
+    <!-- Stream Surface Placeholders -->
+    <string name="surface_capture_connecting">
+        <ru>Захват экрана (Подключение DXGI / GDI)...</ru>
+        <en>Screen capture (Connecting DXGI / GDI)...</en>
+    </string>
+    <string name="surface_camera_loading">
+        <ru>BisonCam: Загрузка...</ru>
+        <en>BisonCam: Loading...</en>
+    </string>
+    <string name="surface_camera_off">
+        <ru>Камера выключена</ru>
+        <en>Camera is off</en>
+    </string>
+    <string name="surface_stream_stopped_thumb">
+        <ru>Стрим остановлен</ru>
+        <en>Stream stopped</en>
+    </string>
+    <string name="surface_waiting_stream_thumb">
+        <ru>Ожидание стрима</ru>
+        <en>Waiting for stream</en>
+    </string>
+    <string name="surface_stream_stopped_title">
+        <ru>Трансляция экрана остановлена</ru>
+        <en>Screen stream stopped</en>
+    </string>
+    <string name="surface_stream_stopped_desc">
+        <ru>Собеседник отключил стрим экрана или видеопоток отсутствует</ru>
+        <en>Peer turned off screen stream or video feed is missing</en>
+    </string>
+    <string name="surface_waiting_stream_title">
+        <ru>Собеседник ещё не запустил трансляцию экрана</ru>
+        <en>Peer hasn't started screen sharing yet</en>
+    </string>
+    <string name="surface_waiting_stream_desc">
+        <ru>Ожидание входящего P2P видеопотока</ru>
+        <en>Waiting for incoming P2P video stream</en>
+    </string>
+    <string name="surface_peer_cam_off_title">
+        <ru>Камера собеседника выключена</ru>
+        <en>Peer's camera is off</en>
+    </string>
+    <string name="surface_peer_cam_off_desc">
+        <ru>Собеседник отключил веб-камеру</ru>
+        <en>Peer turned off webcam</en>
+    </string>
+    <string name="surface_peer_cam_waiting_desc">
+        <ru>Ожидание видеосигнала участника звонка</ru>
+        <en>Waiting for peer's video stream</en>
+    </string>
+
+    <!-- Bottom Dock Controls -->
+    <string name="dock_unmute_mic">
+        <ru>Включить микрофон (M)</ru>
+        <en>Unmute Microphone (M)</en>
+    </string>
+    <string name="dock_mute_mic">
+        <ru>Выключить микрофон (M)</ru>
+        <en>Mute Microphone (M)</en>
+    </string>
+    <string name="dock_unmute_audio">
+        <ru>Включить звук системы (D)</ru>
+        <en>Unmute Audio (D)</en>
+    </string>
+    <string name="dock_deafen_audio">
+        <ru>Заглушить звук системы (D)</ru>
+        <en>Deafen Audio (D)</en>
+    </string>
+    <string name="dock_turn_off_cam">
+        <ru>Выключить веб-камеру</ru>
+        <en>Turn Off Camera</en>
+    </string>
+    <string name="dock_turn_on_cam">
+        <ru>Включить веб-камеру</ru>
+        <en>Turn On Camera</en>
+    </string>
+    <string name="dock_stop_screen">
+        <ru>Остановить стрим экрана</ru>
+        <en>Stop Screen Share</en>
+    </string>
+    <string name="dock_start_screen">
+        <ru>Запустить стрим экрана</ru>
+        <en>Start Screen Share</en>
+    </string>
+    <string name="dock_end_call_btn">
+        <ru>Завершить звонок</ru>
+        <en>End Call</en>
+    </string>
+    <string name="dock_end_call_tip">
+        <ru>Завершить звонок и выйти в начальный экран</ru>
+        <en>End call and return to lobby</en>
+    </string>
+
+    <!-- Audio & Oscilloscope Tab -->
+    <string name="audio_heading">
+        <ru>Осциллограф и уровни звука (10 сек)</ru>
+        <en>Oscilloscope &amp; Audio Levels (10s)</en>
+    </string>
+    <string name="audio_subheading">
+        <ru>Реальная звуковая волна микрофона и рабочего стола на черном фоне с шкалой времени.</ru>
+        <en>Real waveform of microphone and desktop on black background with timeline.</en>
+    </string>
+    <string name="audio_p2p_active">
+        <ru>[В СЕТИ] P2P Аудиопоток активен</ru>
+        <en>[ONLINE] P2P Audio Stream Active</en>
+    </string>
+    <string name="audio_devices_title">
+        <ru>Аудиоустройства Windows (WASAPI):</ru>
+        <en>Windows Audio Devices (WASAPI):</en>
+    </string>
+    <string name="btn_refresh">
+        <ru>Обновить</ru>
+        <en>Refresh</en>
+    </string>
+    <string name="audio_sidetone_check">
+        <ru>Слушать свой микрофон (проверка звука)</ru>
+        <en>Listen to microphone (Sidetone test)</en>
+    </string>
+    <string name="audio_sidetone_tip">
+        <ru>Прямое воспроизведение вашего микрофона в динамики/наушники для проверки звука</ru>
+        <en>Direct loopback of your microphone to speakers/headphones for audio test</en>
+    </string>
+    <string name="audio_input_device">
+        <ru>Устройство захвата (Микрофон):</ru>
+        <en>Input Device (Microphone):</en>
+    </string>
+    <string name="audio_default_mic">
+        <ru>По умолчанию (Системный микрофон)</ru>
+        <en>Default (System Microphone)</en>
+    </string>
+    <string name="audio_output_device">
+        <ru>Устройство воспроизведения (Динамики / Наушники):</ru>
+        <en>Playback Device (Speakers / Headphones):</en>
+    </string>
+    <string name="audio_default_speakers">
+        <ru>По умолчанию (Системные динамики)</ru>
+        <en>Default (System Speakers)</en>
+    </string>
+    <string name="audio_mic_panel_title">
+        <ru>Микрофон (Host Microphone) — Осциллограмма 10s</ru>
+        <en>Microphone (Host Microphone) — Waveform 10s</en>
+    </string>
+    <string name="audio_desktop_panel_title">
+        <ru>Звук системы (Desktop Audio Loopback) — Осциллограмма 10s</ru>
+        <en>Desktop Audio (System Loopback) — Waveform 10s</en>
+    </string>
+    <string name="audio_status_muted">
+        <ru>ВЫКЛЮЧЕНО (-inf dB)</ru>
+        <en>MUTED (-inf dB)</en>
+    </string>
+    <string name="audio_peak">
+        <ru>Пик</ru>
+        <en>Peak</en>
+    </string>
+    <string name="audio_time_minus_10s">
+        <ru>-10 сек</ru>
+        <en>-10s</en>
+    </string>
+    <string name="audio_time_minus_8s">
+        <ru>-8 сек</ru>
+        <en>-8s</en>
+    </string>
+    <string name="audio_time_minus_6s">
+        <ru>-6 сек</ru>
+        <en>-6s</en>
+    </string>
+    <string name="audio_time_minus_4s">
+        <ru>-4 сек</ru>
+        <en>-4s</en>
+    </string>
+    <string name="audio_time_minus_2s">
+        <ru>-2 сек</ru>
+        <en>-2s</en>
+    </string>
+    <string name="audio_time_now">
+        <ru>СЕЙЧАС (0s)</ru>
+        <en>NOW (0s)</en>
+    </string>
+    <string name="audio_volume_label">
+        <ru>Громкость:</ru>
+        <en>Volume:</en>
+    </string>
+    <string name="audio_unmute_mic">
+        <ru>Включить микрофон</ru>
+        <en>Unmute Mic</en>
+    </string>
+    <string name="audio_mute_mic">
+        <ru>Выключить микрофон</ru>
+        <en>Mute Mic</en>
+    </string>
+    <string name="audio_unmute_sound">
+        <ru>Включить звук</ru>
+        <en>Unmute Sound</en>
+    </string>
+    <string name="audio_mute_sound">
+        <ru>Выключить звук</ru>
+        <en>Mute Sound</en>
+    </string>
+
+    <!-- Benchmark Matrix Tab -->
+    <string name="bench_heading">
+        <ru>Аппаратная матрица кремния NVENC (RTX 3060)</ru>
+        <en>Hardware NVENC Silicon Matrix (RTX 3060)</en>
+    </string>
+    <string name="bench_desc_prefix">
+        <ru>Тестируются разрешения только до физического экрана</ru>
+        <en>Testing resolutions up to native display only</en>
+    </string>
+    <string name="bench_hz_suffix">
+        <ru>Гц.</ru>
+        <en>Hz.</en>
+    </string>
+    <string name="bench_probing">
+        <ru>Идет замер кремния...</ru>
+        <en>Probing hardware...</en>
+    </string>
+    <string name="bench_rerun_btn">
+        <ru>Запустить повторный замер</ru>
+        <en>Rerun Benchmark</en>
+    </string>
+    <string name="bench_table_resolution">
+        <ru>Разрешение</ru>
+        <en>Resolution</en>
+    </string>
+    <string name="bench_limit">
+        <ru>Лимит</ru>
+        <en>Limit</en>
+    </string>
+    <string name="bench_click_apply">
+        <ru>Нажмите, чтобы применить</ru>
+        <en>Click to apply</en>
+    </string>
+    <string name="bench_with_preset">
+        <ru>с пресетом</ru>
+        <en>with preset</en>
+    </string>
+    <string name="bench_analysis_title">
+        <ru>Анализ кремниевого энкодера NVENC Gen 7 (RTX 3060)</ru>
+        <en>NVENC Gen 7 Silicon Encoder Analysis (RTX 3060)</en>
+    </string>
+    <string name="bench_analysis_body">
+        <ru>Матрица рассчитывает аппаратную задержку сжатия кадров в чипе GPU относительно кадрового бюджета (Frame Time Budget):\n• 60 FPS: бюджет 16.7 мс на кадр (пресеты P1–P7 выполняются с 40-70% запасом аппаратного кремния)\n• 120 FPS: бюджет 8.3 мс на кадр (для 1080p рекомендуется пресет P1 / P3 для отсутствия микрофризов)\n• 144 FPS: бюджет 6.9 мс на кадр (NVENC работает в режиме ультра-низкой задержки Low-Latency Zero-B-Frames)</ru>
+        <en>Matrix computes hardware GPU encoding latency relative to Frame Time Budget:\n• 60 FPS: 16.7 ms budget per frame (presets P1–P7 run with 40-70% silicon headroom)\n• 120 FPS: 8.3 ms budget per frame (for 1080p preset P1 / P3 recommended to prevent microstutter)\n• 144 FPS: 6.9 ms budget per frame (NVENC operates in Low-Latency Zero-B-Frames mode)</en>
+    </string>
+
+    <!-- Encoder Settings Tab -->
+    <string name="nvenc_heading">
+        <ru>Параметры кодека NVIDIA NVENC (H.265 / HEVC)</ru>
+        <en>NVIDIA NVENC Codec Parameters (H.265 / HEVC)</en>
+    </string>
+    <string name="nvenc_subheading">
+        <ru>Низкоуровневая настройка кремниевого энкодера RTX 3060.</ru>
+        <en>Low-level configuration of RTX 3060 silicon encoder.</en>
+    </string>
+    <string name="nvenc_preset_mode">
+        <ru>Режим подбора пресета кодирования:</ru>
+        <en>Encoding Preset Selection Mode:</en>
+    </string>
+    <string name="nvenc_cq_title">
+        <ru>Контроль качества CQ (Target Quality):</ru>
+        <en>Target Quality CQ (Constant Quality):</en>
+    </string>
+    <string name="nvenc_cq_desc">
+        <ru>Определяет баланс между четкостью мелкого текста и нагрузкой на шину PCIe (рекомендуется 20–24).</ru>
+        <en>Balances fine text crispness against PCIe bus load (20–24 recommended).</en>
+    </string>
+    <string name="nvenc_bitrate_title">
+        <ru>Максимальный лимит битрейта (Max Bitrate Cap):</ru>
+        <en>Max Bitrate Cap:</en>
+    </string>
+    <string name="nvenc_bitrate_desc">
+        <ru>Ограничивает пиковую полосу пропускания сетевого сокета для предотвращения буферизации.</ru>
+        <en>Limits peak socket bandwidth to avoid buffering and latency spikes.</en>
+    </string>
+    <string name="nvenc_arch_title">
+        <ru>Аппаратная архитектура захвата и сжатия:</ru>
+        <en>Hardware Capture &amp; Compression Architecture:</en>
+    </string>
+    <string name="nvenc_arch_b1">
+        <ru>• Конфигурация GPU: NVIDIA GeForce RTX 3060 Laptop GPU + Intel(R) UHD Graphics (Optimus)</ru>
+        <en>• GPU Setup: NVIDIA GeForce RTX 3060 Laptop GPU + Intel(R) UHD Graphics (Optimus)</en>
+    </string>
+    <string name="nvenc_arch_b2">
+        <ru>• Интерфейс захвата: DXGI Desktop Duplication API (D3D11 Texture2D Hardware Interop)</ru>
+        <en>• Capture Interface: DXGI Desktop Duplication API (D3D11 Texture2D Hardware Interop)</en>
+    </string>
+    <string name="nvenc_arch_b3">
+        <ru>• Кремниевый энкодер: nvEncodeAPI64.dll — аппаратное сжатие H.265 / HEVC Main Profile</ru>
+        <en>• Silicon Encoder: nvEncodeAPI64.dll — hardware H.265 / HEVC Main Profile</en>
+    </string>
+    <string name="nvenc_arch_b4">
+        <ru>• Режим задержки: zeroReorderDelay = 1, frameIntervalP = 1 (Zero B-Frames, Sub-Frame P2P Delivery)</ru>
+        <en>• Latency Mode: zeroReorderDelay = 1, frameIntervalP = 1 (Zero B-Frames, Sub-Frame P2P Delivery)</en>
+    </string>
+</resources>

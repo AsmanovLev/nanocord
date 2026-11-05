@@ -1,22 +1,117 @@
 #![allow(dead_code, unused_variables)]
 
+use std::collections::VecDeque;
 use std::f32::consts::PI;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use windows::core::{Interface, Result, GUID};
 use windows::Win32::Media::Audio::{
-    eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient,
+    eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IAudioRenderClient,
     IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
     AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
-    WAVEFORMATEX,
+    DEVICE_STATE,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL,
-    COINIT_MULTITHREADED,
+    COINIT_MULTITHREADED, STGM,
 };
+use windows::Win32::System::Variant::VARENUM;
+use opus_pure::{Application, OpusDecoder, OpusEncoder, RateControl};
 
 pub const AUDIO_SPECTROGRAM_BINS: usize = 20;
+
+/// Высокопроизводительный энкодер Opus с VBR (Variable Bitrate) для P2P-стриминга
+pub struct NanocordOpusEncoder {
+    encoder: OpusEncoder,
+    pcm_buffer: Vec<i16>,
+}
+
+impl NanocordOpusEncoder {
+    pub fn new() -> Self {
+        let mut encoder = OpusEncoder::new(48000, 1, Application::Audio).expect("OpusEncoder creation failed");
+        encoder.rate_control = RateControl::Vbr;
+        encoder.bitrate_bps = 64_000; // 64 kbps VBR — стандарт Discord для высококачественного звука
+        encoder.complexity = 8;
+        Self {
+            encoder,
+            pcm_buffer: Vec::with_capacity(1920),
+        }
+    }
+
+    /// Принимает произвольную порцию PCM сэмплов и кодирует в Opus пакеты по 960 сэмплов (20 мс @ 48 кГц) с VBR
+    pub fn encode_chunk(&mut self, samples: &[i16]) -> Vec<Vec<u8>> {
+        self.pcm_buffer.extend_from_slice(samples);
+        let mut packets = Vec::new();
+        let frame_size = 960; // 20 ms при 48 000 Гц
+        let mut out_buf = vec![0u8; 1500];
+
+        while self.pcm_buffer.len() >= frame_size {
+            let frame: Vec<i16> = self.pcm_buffer.drain(0..frame_size).collect();
+            if let Ok(len) = self.encoder.encode_s16(&frame, frame_size, &mut out_buf) {
+                if len > 0 {
+                    packets.push(out_buf[..len].to_vec());
+                }
+            }
+        }
+        packets
+    }
+}
+
+impl Default for NanocordOpusEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Высокопроизводительный декодер Opus для воспроизведения входящего P2P звука
+pub struct NanocordOpusDecoder {
+    decoder: OpusDecoder,
+}
+
+impl NanocordOpusDecoder {
+    pub fn new() -> Self {
+        let decoder = OpusDecoder::new(48000, 1).expect("OpusDecoder creation failed");
+        Self { decoder }
+    }
+
+    /// Декодирует VBR пакет Opus обратно в 960 сэмплов 16-бит PCM
+    pub fn decode_packet(&mut self, opus_packet: &[u8]) -> Vec<i16> {
+        if opus_packet.is_empty() {
+            return Vec::new();
+        }
+        let frame_size = 960;
+        let mut pcm_out = vec![0i16; frame_size];
+        match self.decoder.decode_s16(opus_packet, frame_size, &mut pcm_out) {
+            Ok(samples_decoded) => {
+                pcm_out.truncate(samples_decoded);
+                pcm_out
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+impl Default for NanocordOpusDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PROPERTYKEY {
+    pub fmtid: GUID,
+    pub pid: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioDevice {
+    pub id: String,
+    pub name: String,
+}
 
 #[derive(Clone, Debug)]
 pub struct AudioSpectrumPacket {
@@ -25,33 +120,285 @@ pub struct AudioSpectrumPacket {
     pub max_sample: f32,
     pub rms: f32,
     pub bins: [f32; AUDIO_SPECTROGRAM_BINS],
+    pub pcm_chunk: Vec<i16>,
+}
+
+/// Перечисление всех активных аудиоустройств Windows (Микрофоны или Динамики)
+pub fn enumerate_audio_devices(is_input: bool) -> Vec<AudioDevice> {
+    let mut list = Vec::new();
+    list.push(AudioDevice {
+        id: "default".to_string(),
+        name: if is_input {
+            "По умолчанию (Системный микрофон)".to_string()
+        } else {
+            "По умолчанию (Системные динамики)".to_string()
+        },
+    });
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+            let flow = if is_input { eCapture } else { eRender };
+            // DEVICE_STATE(1) = ACTIVE
+            if let Ok(collection) = enumerator.EnumAudioEndpoints(flow, DEVICE_STATE(1)) {
+                if let Ok(count) = collection.GetCount() {
+                    for i in 0..count {
+                        if let Ok(dev) = collection.Item(i) {
+                            let mut dev_id = String::new();
+                            if let Ok(p_id) = dev.GetId() {
+                                dev_id = p_id.to_string().unwrap_or_default();
+                                windows::Win32::System::Com::CoTaskMemFree(Some(p_id.as_ptr() as *const _));
+                            }
+
+                            let mut name = format!("Аудио устройство #{}", i + 1);
+                            if let Ok(store) = dev.OpenPropertyStore(STGM(0)) {
+                                // PKEY_Device_FriendlyName = {a45c254e-df1c-4efd-8020-67d146a850e0}, 14
+                                let pkey = windows::Win32::Foundation::PROPERTYKEY {
+                                    fmtid: GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0),
+                                    pid: 14,
+                                };
+                                if let Ok(val) = store.GetValue(&pkey) {
+                                    if val.Anonymous.Anonymous.vt == VARENUM(31) && !val.Anonymous.Anonymous.Anonymous.pwszVal.is_null() {
+                                        if let Ok(s) = val.Anonymous.Anonymous.Anonymous.pwszVal.to_string() {
+                                            name = s;
+                                        }
+                                    }
+                                }
+                            }
+                            if !dev_id.is_empty() {
+                                list.push(AudioDevice { id: dev_id, name });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    list
+}
+
+/// Плеер входящего звука через Windows WASAPI (воспроизведение в колонки / наушники)
+pub struct WasapiAudioPlayer {
+    pcm_tx: SyncSender<Vec<i16>>,
+    pub is_running: Arc<AtomicBool>,
+}
+
+impl WasapiAudioPlayer {
+    pub fn new() -> Self {
+        Self::with_device(None)
+    }
+
+    pub fn with_device(device_id: Option<String>) -> Self {
+        let (tx, rx) = sync_channel(64);
+        let is_running = Arc::new(AtomicBool::new(true));
+        let run_clone = is_running.clone();
+
+        thread::spawn(move || {
+            unsafe {
+                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            }
+            let _ = run_wasapi_playback_loop(device_id, run_clone, rx);
+        });
+
+        Self {
+            pcm_tx: tx,
+            is_running,
+        }
+    }
+
+    pub fn play_samples(&self, samples: Vec<i16>) {
+        if !samples.is_empty() {
+            let _ = self.pcm_tx.try_send(samples);
+        }
+    }
+}
+
+fn resample_linear(input: &[i16], in_rate: usize, out_rate: usize) -> Vec<f32> {
+    if input.is_empty() {
+        return Vec::new();
+    }
+    if in_rate == out_rate {
+        return input.iter().map(|&s| s as f32 / 32768.0).collect();
+    }
+    let ratio = in_rate as f64 / out_rate as f64;
+    let out_len = (input.len() as f64 / ratio).round() as usize;
+    let mut out = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let src_idx = i as f64 * ratio;
+        let idx0 = src_idx.floor() as usize;
+        let idx1 = (idx0 + 1).min(input.len() - 1);
+        let frac = (src_idx - idx0 as f64) as f32;
+        let s0 = input[idx0] as f32 / 32768.0;
+        let s1 = input[idx1] as f32 / 32768.0;
+        out.push(s0 + (s1 - s0) * frac);
+    }
+    out
+}
+
+fn resample_i16_to_48k(input: &[i16], in_rate: usize) -> Vec<i16> {
+    if in_rate == 48000 || input.is_empty() {
+        return input.to_vec();
+    }
+    let ratio = in_rate as f64 / 48000.0;
+    let out_len = (input.len() as f64 / ratio).round() as usize;
+    let mut out = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let src_idx = i as f64 * ratio;
+        let idx0 = src_idx.floor() as usize;
+        let idx1 = (idx0 + 1).min(input.len() - 1);
+        let frac = (src_idx - idx0 as f64) as f32;
+        let s0 = input[idx0] as f32;
+        let s1 = input[idx1] as f32;
+        out.push((s0 + (s1 - s0) * frac).clamp(-32768.0, 32767.0) as i16);
+    }
+    out
+}
+
+fn run_wasapi_playback_loop(
+    device_id: Option<String>,
+    is_running: Arc<AtomicBool>,
+    rx: Receiver<Vec<i16>>,
+) -> Result<()> {
+    unsafe {
+        let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+        let device: IMMDevice = if let Some(ref dev_id) = device_id {
+            if dev_id != "default" && !dev_id.is_empty() {
+                let id_wide: Vec<u16> = dev_id.encode_utf16().chain(std::iter::once(0)).collect();
+                match enumerator.GetDevice(windows::core::PCWSTR(id_wide.as_ptr())) {
+                    Ok(d) => d,
+                    Err(_) => enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?,
+                }
+            } else {
+                enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?
+            }
+        } else {
+            enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?
+        };
+        let audio_client: IAudioClient = device.Activate::<IAudioClient>(CLSCTX_ALL, None)?;
+        let mix_format_ptr = audio_client.GetMixFormat()?;
+        let pwfx = &*mix_format_ptr;
+
+        let sample_rate = pwfx.nSamplesPerSec as usize;
+        let channels = pwfx.nChannels as usize;
+        let bits_per_sample = pwfx.wBitsPerSample as usize;
+
+        audio_client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            0,
+            1_000_000, // 100ms
+            0,
+            mix_format_ptr,
+            None,
+        )?;
+
+        let buffer_frame_count = audio_client.GetBufferSize()?;
+        let render_client: IAudioRenderClient = audio_client.GetService::<IAudioRenderClient>()?;
+        audio_client.Start()?;
+
+        let mut sample_queue: VecDeque<f32> = VecDeque::with_capacity(24000);
+        let target_prebuffer = (sample_rate as f32 * 0.040) as usize; // 40ms подушка от джиттера
+        let max_buffer = (sample_rate as f32 * 0.150) as usize; // 150ms макс буфер (против накопления задержки)
+        let mut is_prebuffering = true;
+
+        while is_running.load(Ordering::Relaxed) {
+            while let Ok(chunk) = rx.try_recv() {
+                let resampled = resample_linear(&chunk, 48000, sample_rate);
+                for s in resampled {
+                    sample_queue.push_back(s);
+                }
+            }
+
+            if sample_queue.len() > max_buffer {
+                let excess = sample_queue.len() - target_prebuffer;
+                sample_queue.drain(0..excess);
+            }
+
+            if is_prebuffering && sample_queue.len() >= target_prebuffer {
+                is_prebuffering = false;
+            }
+
+            let padding = audio_client.GetCurrentPadding()?;
+            let frames_to_fill = (buffer_frame_count - padding) as usize;
+
+            if frames_to_fill > 0 {
+                if let Ok(p_data) = render_client.GetBuffer(frames_to_fill as u32) {
+                    if !p_data.is_null() {
+                        if bits_per_sample == 32 {
+                            let float_ptr = p_data as *mut f32;
+                            for f in 0..frames_to_fill {
+                                let sample = if !is_prebuffering {
+                                    if let Some(s) = sample_queue.pop_front() {
+                                        s
+                                    } else {
+                                        is_prebuffering = true;
+                                        0.0
+                                    }
+                                } else {
+                                    0.0
+                                };
+                                for c in 0..channels {
+                                    *float_ptr.add(f * channels + c) = sample;
+                                }
+                            }
+                        } else if bits_per_sample == 16 {
+                            let i16_ptr = p_data as *mut i16;
+                            for f in 0..frames_to_fill {
+                                let sample = if !is_prebuffering {
+                                    if let Some(s) = sample_queue.pop_front() {
+                                        (s.clamp(-1.0, 1.0) * 32767.0) as i16
+                                    } else {
+                                        is_prebuffering = true;
+                                        0
+                                    }
+                                } else {
+                                    0
+                                };
+                                for c in 0..channels {
+                                    *i16_ptr.add(f * channels + c) = sample;
+                                }
+                            }
+                        }
+                        let _ = render_client.ReleaseBuffer(frames_to_fill as u32, 0);
+                    }
+                }
+            }
+
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    Ok(())
 }
 
 /// Запускает фоновый захват реального звука через Windows WASAPI
 /// is_loopback = true  -> Звук системы/игры (WASAPI Loopback Capture с колонок/наушников)
-/// is_loopback = false -> Микрофон (Default Audio Capture Endpoint)
-pub fn start_wasapi_audio_worker(is_loopback: bool) -> Receiver<AudioSpectrumPacket> {
-    let (tx, rx) = sync_channel(8);
+/// is_loopback = false -> Микрофон (Default Audio Capture Endpoint либо указанный ID устройства)
+pub fn start_wasapi_audio_worker(
+    is_loopback: bool,
+    device_id: Option<String>,
+    is_running: Arc<AtomicBool>,
+) -> Receiver<AudioSpectrumPacket> {
+    let (tx, rx) = sync_channel(64);
+    let dev_id_clone = device_id;
+    let run_clone = is_running;
 
     thread::spawn(move || {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
 
-        loop {
-            let res = run_wasapi_capture_loop(is_loopback, &tx);
-            if res.is_err() {
-                // Если устройство временно недоступно (например, отключено в настройках звука),
-                // отправляем тишину и пробуем переподключиться через 1 сек
+        while run_clone.load(Ordering::Relaxed) {
+            let res = run_wasapi_capture_loop(is_loopback, dev_id_clone.clone(), run_clone.clone(), &tx);
+            if res.is_err() && run_clone.load(Ordering::Relaxed) {
                 let silence = AudioSpectrumPacket {
                     peak_db: -60.0,
                     min_sample: 0.0,
                     max_sample: 0.0,
                     rms: 0.0,
                     bins: [0.01; AUDIO_SPECTROGRAM_BINS],
+                    pcm_chunk: Vec::new(),
                 };
                 let _ = tx.try_send(silence);
-                thread::sleep(Duration::from_millis(1000));
+                thread::sleep(Duration::from_millis(100));
             }
         }
 
@@ -64,12 +411,29 @@ pub fn start_wasapi_audio_worker(is_loopback: bool) -> Receiver<AudioSpectrumPac
     rx
 }
 
-fn run_wasapi_capture_loop(is_loopback: bool, tx: &SyncSender<AudioSpectrumPacket>) -> Result<()> {
+fn run_wasapi_capture_loop(
+    is_loopback: bool,
+    device_id: Option<String>,
+    is_running: Arc<AtomicBool>,
+    tx: &SyncSender<AudioSpectrumPacket>,
+) -> Result<()> {
     unsafe {
         let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
 
         let data_flow = if is_loopback { eRender } else { eCapture };
-        let device: IMMDevice = enumerator.GetDefaultAudioEndpoint(data_flow, eConsole)?;
+        let device: IMMDevice = if let Some(ref dev_id) = device_id {
+            if dev_id != "default" && !dev_id.is_empty() {
+                let id_wide: Vec<u16> = dev_id.encode_utf16().chain(std::iter::once(0)).collect();
+                match enumerator.GetDevice(windows::core::PCWSTR(id_wide.as_ptr())) {
+                    Ok(d) => d,
+                    Err(_) => enumerator.GetDefaultAudioEndpoint(data_flow, eConsole)?,
+                }
+            } else {
+                enumerator.GetDefaultAudioEndpoint(data_flow, eConsole)?
+            }
+        } else {
+            enumerator.GetDefaultAudioEndpoint(data_flow, eConsole)?
+        };
 
         let audio_client: IAudioClient = device.Activate::<IAudioClient>(CLSCTX_ALL, None)?;
         let mix_format_ptr = audio_client.GetMixFormat()?;
@@ -109,9 +473,10 @@ fn run_wasapi_capture_loop(is_loopback: bool, tx: &SyncSender<AudioSpectrumPacke
             center_freqs[i] = f_min * (f_max / f_min).powf(i as f32 / (AUDIO_SPECTROGRAM_BINS - 1) as f32);
         }
 
-        loop {
-            thread::sleep(Duration::from_millis(35)); // ~28-30 FPS для спектрограммы
+        while is_running.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(20)); // Ровно 50 тиков в секунду (для 10с буфера из 500 семплов)
 
+            let mut pcm_captured: Vec<i16> = Vec::new();
             let mut next_packet_size = capture_client.GetNextPacketSize()?;
 
             while next_packet_size > 0 {
@@ -128,22 +493,23 @@ fn run_wasapi_capture_loop(is_loopback: bool, tx: &SyncSender<AudioSpectrumPacke
                 );
 
                 if hr.is_ok() && num_frames_read > 0 && !p_data.is_null() {
-                    // Флаг AUDCLNT_BUFFERFLAGS_SILENT = 0x2
                     let is_silent = (flags & 0x2) != 0;
 
                     if is_silent {
                         for _ in 0..num_frames_read {
                             sample_ring.push(0.0);
+                            pcm_captured.push(0);
                         }
                     } else if bits_per_sample == 32 {
                         let float_ptr = p_data as *const f32;
                         for f in 0..num_frames_read as usize {
-                            // Микшируем стерео/многоканал в моно
                             let mut sum = 0.0f32;
                             for c in 0..channels {
                                 sum += *float_ptr.add(f * channels + c);
                             }
-                            sample_ring.push(sum / channels as f32);
+                            let mono = sum / channels as f32;
+                            sample_ring.push(mono);
+                            pcm_captured.push((mono.clamp(-1.0, 1.0) * 32767.0) as i16);
                         }
                     } else if bits_per_sample == 16 {
                         let i16_ptr = p_data as *const i16;
@@ -152,7 +518,9 @@ fn run_wasapi_capture_loop(is_loopback: bool, tx: &SyncSender<AudioSpectrumPacke
                             for c in 0..channels {
                                 sum += *i16_ptr.add(f * channels + c) as f32 / 32768.0;
                             }
-                            sample_ring.push(sum / channels as f32);
+                            let mono = sum / channels as f32;
+                            sample_ring.push(mono);
+                            pcm_captured.push((mono.clamp(-1.0, 1.0) * 32767.0) as i16);
                         }
                     }
 
@@ -162,67 +530,76 @@ fn run_wasapi_capture_loop(is_loopback: bool, tx: &SyncSender<AudioSpectrumPacke
                 next_packet_size = capture_client.GetNextPacketSize()?;
             }
 
-            // Оставляем в кольцевом буфере последние 1024 семпла
-            if sample_ring.len() > 1024 {
+            let pcm_48k = if (sample_rate - 48000.0).abs() > 100.0 && !pcm_captured.is_empty() {
+                resample_i16_to_48k(&pcm_captured, sample_rate as usize)
+            } else {
+                pcm_captured
+            };
+
+            let had_new_samples = !pcm_48k.is_empty();
+            if !had_new_samples {
+                sample_ring.clear();
+            } else if sample_ring.len() > 1024 {
                 let excess = sample_ring.len() - 1024;
                 sample_ring.drain(0..excess);
             }
 
-            // Вычисляем RMS, min/max амплитуды и 20 спектральных бинов по реальным данным
             let mut packet = AudioSpectrumPacket {
                 peak_db: -60.0,
                 min_sample: 0.0,
                 max_sample: 0.0,
                 rms: 0.0,
                 bins: [0.01; AUDIO_SPECTROGRAM_BINS],
+                pcm_chunk: pcm_48k,
             };
 
-            let n = sample_ring.len();
-            if n >= 256 {
-                // 1. RMS и амплитудный диапазон волны (Waveform min/max)
-                let mut sum_sq = 0.0f32;
+            if had_new_samples && !packet.pcm_chunk.is_empty() {
+                let mut sum_sq = 0.0f64;
                 let mut min_val = 0.0f32;
                 let mut max_val = 0.0f32;
-                for &s in &sample_ring {
-                    sum_sq += s * s;
+                for &s_i16 in &packet.pcm_chunk {
+                    let s = s_i16 as f32 / 32768.0;
+                    sum_sq += (s * s) as f64;
                     if s < min_val { min_val = s; }
                     if s > max_val { max_val = s; }
                 }
-                let rms = (sum_sq / n as f32).sqrt();
+                let count = packet.pcm_chunk.len() as f64;
+                let rms = (sum_sq / count).sqrt() as f32;
                 packet.rms = rms;
                 packet.min_sample = min_val;
                 packet.max_sample = max_val;
                 packet.peak_db = (20.0 * rms.max(1e-4).log10()).clamp(-60.0, 0.0);
 
-                // 2. Спектральные бины через быстрое вычисление мощности частоты с окном Ханна
-                let analysis_len = n.min(512);
-                let start_idx = n - analysis_len;
-                let slice = &sample_ring[start_idx..];
+                let n = sample_ring.len();
+                if n >= 256 {
+                    let analysis_len = n.min(512);
+                    let start_idx = n - analysis_len;
+                    let slice = &sample_ring[start_idx..];
 
-                for (b, &fc) in center_freqs.iter().enumerate() {
-                    let k = fc / sample_rate * analysis_len as f32;
-                    let omega = 2.0 * PI * k / analysis_len as f32;
+                    for (b, &fc) in center_freqs.iter().enumerate() {
+                        let k = fc / sample_rate * analysis_len as f32;
+                        let omega = 2.0 * PI * k / analysis_len as f32;
+                        let mut real = 0.0f32;
+                        let mut imag = 0.0f32;
 
-                    let mut real = 0.0f32;
-                    let mut imag = 0.0f32;
+                        for (m, &val) in slice.iter().enumerate() {
+                            let w = 0.5 * (1.0 - (2.0 * PI * m as f32 / analysis_len as f32).cos());
+                            let sample = val * w;
+                            let angle = omega * m as f32;
+                            real += sample * angle.cos();
+                            imag -= sample * angle.sin();
+                        }
 
-                    for (m, &val) in slice.iter().enumerate() {
-                        // Окно Ханна: 0.5 * (1 - cos(2*pi*m / N))
-                        let w = 0.5 * (1.0 - (2.0 * PI * m as f32 / analysis_len as f32).cos());
-                        let sample = val * w;
-                        let angle = omega * m as f32;
-                        real += sample * angle.cos();
-                        imag -= sample * angle.sin();
+                        let mag = (real * real + imag * imag).sqrt() / (analysis_len as f32 * 0.25);
+                        let energy = (mag * 6.5).clamp(0.01, 0.99);
+                        packet.bins[b] = energy;
                     }
-
-                    let mag = (real * real + imag * imag).sqrt() / (analysis_len as f32 * 0.25);
-                    // Логарифмическая компрессия для контрастного отображения на спектрограмме
-                    let energy = (mag * 6.5).clamp(0.01, 0.99);
-                    packet.bins[b] = energy;
                 }
             }
 
             let _ = tx.try_send(packet);
         }
+        let _ = audio_client.Stop();
     }
+    Ok(())
 }

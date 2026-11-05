@@ -21,6 +21,7 @@ pub struct NetworkAudioPacket {
     pub max_sample: f32,
     pub rms: f32,
     pub bins: [f32; 20],
+    pub opus_data: Vec<u8>,
 }
 
 impl Default for NetworkAudioPacket {
@@ -31,24 +32,31 @@ impl Default for NetworkAudioPacket {
             max_sample: 0.0,
             rms: 0.0,
             bins: [0.0; 20],
+            opus_data: Vec::new(),
         }
     }
 }
 
 impl NetworkAudioPacket {
     pub fn new(peak_db: f32, min_sample: f32, max_sample: f32, rms: f32, bins: [f32; 20]) -> Self {
-        Self { peak_db, min_sample, max_sample, rms, bins }
+        Self { peak_db, min_sample, max_sample, rms, bins, opus_data: Vec::new() }
     }
 
-    pub fn to_bytes(&self) -> [u8; 96] {
-        let mut buf = [0u8; 96];
-        buf[0..4].copy_from_slice(&self.peak_db.to_le_bytes());
-        buf[4..8].copy_from_slice(&self.min_sample.to_le_bytes());
-        buf[8..12].copy_from_slice(&self.max_sample.to_le_bytes());
-        buf[12..16].copy_from_slice(&self.rms.to_le_bytes());
+    pub fn with_opus(peak_db: f32, min_sample: f32, max_sample: f32, rms: f32, bins: [f32; 20], opus_data: Vec<u8>) -> Self {
+        Self { peak_db, min_sample, max_sample, rms, bins, opus_data }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(96 + 4 + self.opus_data.len());
+        buf.extend_from_slice(&self.peak_db.to_le_bytes());
+        buf.extend_from_slice(&self.min_sample.to_le_bytes());
+        buf.extend_from_slice(&self.max_sample.to_le_bytes());
+        buf.extend_from_slice(&self.rms.to_le_bytes());
         for i in 0..20 {
-            buf[16 + i * 4..20 + i * 4].copy_from_slice(&self.bins[i].to_le_bytes());
+            buf.extend_from_slice(&self.bins[i].to_le_bytes());
         }
+        buf.extend_from_slice(&(self.opus_data.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&self.opus_data);
         buf
     }
 
@@ -64,12 +72,22 @@ impl NetworkAudioPacket {
         for i in 0..20 {
             bins[i] = f32::from_le_bytes(slice[16 + i * 4..20 + i * 4].try_into().ok()?);
         }
+
+        let mut opus_data = Vec::new();
+        if slice.len() >= 100 {
+            let opus_len = u32::from_le_bytes(slice[96..100].try_into().ok()?) as usize;
+            if slice.len() >= 100 + opus_len {
+                opus_data = slice[100..100 + opus_len].to_vec();
+            }
+        }
+
         Some(Self {
             peak_db,
             min_sample,
             max_sample,
             rms,
             bins,
+            opus_data,
         })
     }
 }
@@ -795,7 +813,7 @@ fn run_p2p_socket_session(
             sent_any = true;
         }
 
-        if let Ok(audio) = out_aud_rx.try_recv() {
+        while let Ok(audio) = out_aud_rx.try_recv() {
             let payload = audio.to_bytes();
             let mut pkt = Vec::with_capacity(12 + payload.len());
             pkt.extend_from_slice(&0x4E43u16.to_le_bytes());
@@ -915,15 +933,22 @@ mod tests {
         bins[0] = 0.12;
         bins[5] = 0.78;
         bins[19] = 0.95;
-        let pkt = NetworkAudioPacket::new(-14.5, -0.62, 0.71, 0.38, bins);
+        // Test with real Opus VBR payload
+        let mut enc = crate::audio::NanocordOpusEncoder::new();
+        let test_pcm: Vec<i16> = (0..960).map(|i| ((i as f32 * 0.1).sin() * 20000.0) as i16).collect();
+        let opus_pkts = enc.encode_chunk(&test_pcm);
+        assert!(!opus_pkts.is_empty());
+        let opus_data = opus_pkts[0].clone();
+        let pkt = NetworkAudioPacket::with_opus(-14.5, -0.62, 0.71, 0.38, bins, opus_data.clone());
         let bytes = pkt.to_bytes();
-        assert_eq!(bytes.len(), 96);
+        assert_eq!(bytes.len(), 96 + 4 + opus_data.len());
         let decoded = NetworkAudioPacket::from_bytes(&bytes).expect("audio decode failed");
         assert!((decoded.peak_db - (-14.5)).abs() < 1e-4);
         assert!((decoded.min_sample - (-0.62)).abs() < 1e-4);
         assert!((decoded.max_sample - 0.71).abs() < 1e-4);
         assert!((decoded.rms - 0.38).abs() < 1e-4);
         assert!((decoded.bins[5] - 0.78).abs() < 1e-4);
+        assert_eq!(decoded.opus_data, opus_data);
     }
 
     #[test]
@@ -1019,7 +1044,11 @@ mod tests {
         let mut test_bins = [0.0f32; 20];
         test_bins[2] = 0.55;
         test_bins[9] = 0.88;
-        let audio_pkt = NetworkAudioPacket::new(-16.0, -0.70, 0.75, 0.42, test_bins);
+        let mut enc = crate::audio::NanocordOpusEncoder::new();
+        let test_pcm: Vec<i16> = (0..960).map(|i| ((i as f32 * 0.05).sin() * 16000.0) as i16).collect();
+        let opus_pkts = enc.encode_chunk(&test_pcm);
+        assert!(!opus_pkts.is_empty());
+        let audio_pkt = NetworkAudioPacket::with_opus(-16.0, -0.70, 0.75, 0.42, test_bins, opus_pkts[0].clone());
 
         client.outgoing_audio_tx.send(audio_pkt.clone()).expect("send audio failed");
 
@@ -1037,6 +1066,105 @@ mod tests {
         assert!((rx_audio.peak_db - (-16.0)).abs() < 1e-4);
         assert!((rx_audio.rms - 0.42).abs() < 1e-4);
         assert!((rx_audio.bins[9] - 0.88).abs() < 1e-4);
+        assert_eq!(rx_audio.opus_data, opus_pkts[0]);
+
+        let mut dec = crate::audio::NanocordOpusDecoder::new();
+        let decoded = dec.decode_packet(&rx_audio.opus_data);
+        assert_eq!(decoded.len(), 960);
+
+        client.stop();
+        server.stop();
+    }
+
+    #[test]
+    fn test_e2e_bidirectional_real_pcm_audio_stream() {
+        let port = 49195;
+        let code = "Aud".to_string();
+
+        let server = P2PNetworkServer::start(port, code.clone());
+        thread::sleep(Duration::from_millis(100));
+
+        let client = P2PNetworkClient::connect("[::1]".to_string(), port, code);
+        thread::sleep(Duration::from_millis(300));
+
+        assert!(client.is_connected.load(Ordering::Relaxed), "Client should be connected");
+        assert!(server.is_connected.load(Ordering::Relaxed), "Server should be connected");
+
+        // Client streams 10 audio chunks encoded with Opus VBR
+        let num_packets = 10;
+        let mut client_enc = crate::audio::NanocordOpusEncoder::new();
+        let mut client_sent_opus = Vec::new();
+        for p in 0..num_packets {
+            let pcm: Vec<i16> = (0..960)
+                .map(|i| {
+                    let t = (p * 960 + i) as f32 / 48000.0;
+                    ( (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 22000.0 ) as i16
+                })
+                .collect();
+            let pkts = client_enc.encode_chunk(&pcm);
+            assert_eq!(pkts.len(), 1);
+            let opus_bytes = pkts[0].clone();
+            client_sent_opus.push(opus_bytes.clone());
+            let pkt = NetworkAudioPacket::with_opus(-12.0, -0.67, 0.67, 0.45, [0.3; 20], opus_bytes);
+            client.outgoing_audio_tx.send(pkt).expect("client send audio packet failed");
+        }
+
+        // Server simultaneously streams 10 audio chunks (880Hz sine wave) encoded with Opus VBR
+        let mut server_enc = crate::audio::NanocordOpusEncoder::new();
+        let mut server_sent_opus = Vec::new();
+        for p in 0..num_packets {
+            let pcm: Vec<i16> = (0..960)
+                .map(|i| {
+                    let t = (p * 960 + i) as f32 / 48000.0;
+                    ( (t * 880.0 * 2.0 * std::f32::consts::PI).sin() * 18000.0 ) as i16
+                })
+                .collect();
+            let pkts = server_enc.encode_chunk(&pcm);
+            assert_eq!(pkts.len(), 1);
+            let opus_bytes = pkts[0].clone();
+            server_sent_opus.push(opus_bytes.clone());
+            let pkt = NetworkAudioPacket::with_opus(-15.0, -0.55, 0.55, 0.38, [0.4; 20], opus_bytes);
+            server.outgoing_audio_tx.send(pkt).expect("server send audio packet failed");
+        }
+
+        // Collect all packets on both ends
+        let start = Instant::now();
+        let mut srv_received = Vec::new();
+        let mut cli_received = Vec::new();
+
+        while start.elapsed() < Duration::from_secs(4) {
+            while let Ok(pkt) = server.audio_rx.try_recv() {
+                srv_received.push(pkt);
+            }
+            while let Ok(pkt) = client.audio_rx.try_recv() {
+                cli_received.push(pkt);
+            }
+            if srv_received.len() == num_packets && cli_received.len() == num_packets {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(srv_received.len(), num_packets, "Server must receive all 10 audio packets from Client");
+        assert_eq!(cli_received.len(), num_packets, "Client must receive all 10 audio packets from Server");
+
+        // Verify Opus packet compression & decode back to 960 samples per frame
+        let mut srv_dec = crate::audio::NanocordOpusDecoder::new();
+        let mut cli_dec = crate::audio::NanocordOpusDecoder::new();
+
+        for (i, pkt) in srv_received.iter().enumerate() {
+            assert_eq!(pkt.opus_data, client_sent_opus[i], "Opus payload must match exactly");
+            assert!(pkt.opus_data.len() < 500, "Opus VBR must compress 1920-byte PCM to <500 bytes");
+            let decoded = srv_dec.decode_packet(&pkt.opus_data);
+            assert_eq!(decoded.len(), 960, "Decoded Opus frame must yield 960 audio samples");
+        }
+
+        for (i, pkt) in cli_received.iter().enumerate() {
+            assert_eq!(pkt.opus_data, server_sent_opus[i], "Opus payload must match exactly");
+            assert!(pkt.opus_data.len() < 500, "Opus VBR must compress 1920-byte PCM to <500 bytes");
+            let decoded = cli_dec.decode_packet(&pkt.opus_data);
+            assert_eq!(decoded.len(), 960, "Decoded Opus frame must yield 960 audio samples");
+        }
 
         client.stop();
         server.stop();
@@ -1059,12 +1187,16 @@ mod tests {
         // Client sends desktop video + audio to Server
         let dummy_dt = vec![120u8; 320 * 240 * 4];
         client.outgoing_desktop_tx.send(NetworkPeerFrame { width: 320, height: 240, rgba: dummy_dt }).unwrap();
-        client.outgoing_audio_tx.send(NetworkAudioPacket::new(-10.0, -0.5, 0.5, 0.3, [0.2; 20])).unwrap();
+        let mut enc_cli = crate::audio::NanocordOpusEncoder::new();
+        let cli_opus = enc_cli.encode_chunk(&vec![1234; 960]);
+        client.outgoing_audio_tx.send(NetworkAudioPacket::with_opus(-10.0, -0.5, 0.5, 0.3, [0.2; 20], cli_opus[0].clone())).unwrap();
 
         // Server sends camera video + audio to Client
         let dummy_cam = vec![200u8; 160 * 120 * 4];
         server.outgoing_camera_tx.send(NetworkPeerFrame { width: 160, height: 120, rgba: dummy_cam }).unwrap();
-        server.outgoing_audio_tx.send(NetworkAudioPacket::new(-8.0, -0.4, 0.6, 0.35, [0.4; 20])).unwrap();
+        let mut enc_srv = crate::audio::NanocordOpusEncoder::new();
+        let srv_opus = enc_srv.encode_chunk(&vec![5678; 960]);
+        server.outgoing_audio_tx.send(NetworkAudioPacket::with_opus(-8.0, -0.4, 0.6, 0.35, [0.4; 20], srv_opus[0].clone())).unwrap();
 
         let start = Instant::now();
         let mut srv_got_dt = false;
