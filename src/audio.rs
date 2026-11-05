@@ -23,33 +23,110 @@ use opus_pure::{Application, OpusDecoder, OpusEncoder, RateControl};
 
 pub const AUDIO_SPECTROGRAM_BINS: usize = 20;
 
-/// Высокопроизводительный энкодер Opus с VBR (Variable Bitrate) для P2P-стриминга
+/// Высокопроизводительный энкодер Opus с VBR (Variable Bitrate), FEC и DTX для P2P-стриминга
 pub struct NanocordOpusEncoder {
     encoder: OpusEncoder,
     pcm_buffer: Vec<i16>,
+    seq: u32,
 }
 
 impl NanocordOpusEncoder {
+    /// Создаёт энкодер по умолчанию (VoIP режим 64 kbps VBR с FEC и DTX)
     pub fn new() -> Self {
-        let mut encoder = OpusEncoder::new(48000, 1, Application::Audio).expect("OpusEncoder creation failed");
+        Self::new_voip(64_000)
+    }
+
+    /// Режим передачи голоса / микрофона: Application::Voip, In-band FEC, DTX (тишина сжимается в ~2 байта)
+    pub fn new_voip(bitrate_bps: i32) -> Self {
+        let mut encoder = OpusEncoder::new(48000, 1, Application::Voip).expect("OpusEncoder Voip creation failed");
         encoder.rate_control = RateControl::Vbr;
-        encoder.bitrate_bps = 64_000; // 64 kbps VBR — стандарт Discord для высококачественного звука
+        encoder.bitrate_bps = bitrate_bps; // По умолчанию 64 kbps (стандарт качества Discord)
         encoder.complexity = 8;
+        encoder.use_inband_fec = true;
+        encoder.packet_loss_perc = 10;
+        encoder.use_dtx = true;
         Self {
             encoder,
             pcm_buffer: Vec::with_capacity(1920),
+            seq: 0,
         }
+    }
+
+    /// Режим трансляции системного звука / игры: Application::Audio, Fullband Hi-Fi, In-band FEC
+    pub fn new_audio(bitrate_bps: i32) -> Self {
+        let mut encoder = OpusEncoder::new(48000, 1, Application::Audio).expect("OpusEncoder Audio creation failed");
+        encoder.rate_control = RateControl::Vbr;
+        encoder.bitrate_bps = bitrate_bps; // По умолчанию 96-128 kbps
+        encoder.complexity = 8;
+        encoder.use_inband_fec = true;
+        encoder.packet_loss_perc = 5;
+        encoder.use_dtx = false;
+        Self {
+            encoder,
+            pcm_buffer: Vec::with_capacity(1920),
+            seq: 0,
+        }
+    }
+
+    pub fn set_bitrate(&mut self, bitrate_bps: i32) {
+        self.encoder.bitrate_bps = bitrate_bps;
+    }
+
+    pub fn set_dtx(&mut self, enabled: bool) {
+        self.encoder.use_dtx = enabled;
+    }
+
+    pub fn set_fec(&mut self, enabled: bool) {
+        self.encoder.use_inband_fec = enabled;
+    }
+
+    pub fn next_seq(&mut self) -> u32 {
+        let s = self.seq;
+        self.seq = self.seq.wrapping_add(1);
+        s
+    }
+
+    pub fn reset(&mut self) {
+        let _ = self.encoder.reset_state();
+        self.pcm_buffer.clear();
+        self.seq = 0;
     }
 
     /// Принимает произвольную порцию PCM сэмплов и кодирует в Opus пакеты по 960 сэмплов (20 мс @ 48 кГц) с VBR
     pub fn encode_chunk(&mut self, samples: &[i16]) -> Vec<Vec<u8>> {
         self.pcm_buffer.extend_from_slice(samples);
-        let mut packets = Vec::new();
         let frame_size = 960; // 20 ms при 48 000 Гц
+
+        // Защита от накопления задержки: если накопилось больше 100 мс (5 фреймов), сбрасываем старый хвост
+        if self.pcm_buffer.len() > frame_size * 5 {
+            let excess = self.pcm_buffer.len() - frame_size * 2;
+            self.pcm_buffer.drain(0..excess);
+        }
+
+        let mut packets = Vec::new();
         let mut out_buf = vec![0u8; 1500];
 
         while self.pcm_buffer.len() >= frame_size {
             let frame: Vec<i16> = self.pcm_buffer.drain(0..frame_size).collect();
+            if let Ok(len) = self.encoder.encode_s16(&frame, frame_size, &mut out_buf) {
+                if len > 0 {
+                    packets.push(out_buf[..len].to_vec());
+                }
+            }
+        }
+        packets
+    }
+
+    /// Сбрасывает остаток буфера с дополнением нулями для закрытия сессии
+    pub fn encode_flush(&mut self) -> Vec<Vec<u8>> {
+        let frame_size = 960;
+        let mut packets = Vec::new();
+        if !self.pcm_buffer.is_empty() {
+            while self.pcm_buffer.len() < frame_size {
+                self.pcm_buffer.push(0);
+            }
+            let frame: Vec<i16> = self.pcm_buffer.drain(0..frame_size).collect();
+            let mut out_buf = vec![0u8; 1500];
             if let Ok(len) = self.encoder.encode_s16(&frame, frame_size, &mut out_buf) {
                 if len > 0 {
                     packets.push(out_buf[..len].to_vec());
@@ -66,24 +143,38 @@ impl Default for NanocordOpusEncoder {
     }
 }
 
-/// Высокопроизводительный декодер Opus для воспроизведения входящего P2P звука
+/// Высокопроизводительный декодер Opus с In-band FEC и PLC для кристально чистого звука без треска
 pub struct NanocordOpusDecoder {
     decoder: OpusDecoder,
+    last_seq: Option<u32>,
 }
 
 impl NanocordOpusDecoder {
     pub fn new() -> Self {
         let decoder = OpusDecoder::new(48000, 1).expect("OpusDecoder creation failed");
-        Self { decoder }
+        Self {
+            decoder,
+            last_seq: None,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        let _ = self.decoder.reset_state();
+        self.last_seq = None;
     }
 
     /// Декодирует VBR пакет Opus обратно в 960 сэмплов 16-бит PCM
     pub fn decode_packet(&mut self, opus_packet: &[u8]) -> Vec<i16> {
-        if opus_packet.is_empty() {
-            return Vec::new();
-        }
         let frame_size = 960;
         let mut pcm_out = vec![0i16; frame_size];
+        if opus_packet.is_empty() {
+            // PLC (Packet Loss Concealment): декодирование интерполяции при пропущенном пакете
+            if let Ok(samples_decoded) = self.decoder.decode_s16(&[], frame_size, &mut pcm_out) {
+                pcm_out.truncate(samples_decoded);
+                return pcm_out;
+            }
+            return Vec::new();
+        }
         match self.decoder.decode_s16(opus_packet, frame_size, &mut pcm_out) {
             Ok(samples_decoded) => {
                 pcm_out.truncate(samples_decoded);
@@ -91,6 +182,51 @@ impl NanocordOpusDecoder {
             }
             Err(_) => Vec::new(),
         }
+    }
+
+    /// Умное декодирование с контролем сетевых пропусков: если пакет был потерян,
+    /// восстанавливает его через In-Band FEC текущего пакета, либо интерполирует через PLC.
+    pub fn decode_packet_with_fec(&mut self, seq: u32, opus_packet: &[u8]) -> Vec<i16> {
+        let frame_size = 960;
+        let mut result = Vec::new();
+
+        if let Some(prev) = self.last_seq {
+            let diff = seq.wrapping_sub(prev);
+            if diff > 1 && diff <= 4 {
+                // Был пропуск пакета (1-3 пакета выпало)! Пытаемся восстановить через FEC текущего пакета
+                let mut fec_buf = vec![0i16; frame_size];
+                if !opus_packet.is_empty() {
+                    if let Ok(n) = self.decoder.decode_fec_s16(opus_packet, frame_size, &mut fec_buf) {
+                        if n > 0 {
+                            fec_buf.truncate(n);
+                            result.extend_from_slice(&fec_buf);
+                        }
+                    }
+                }
+                // Если пропуск был больше 1 пакета, добираем остальные интерполяцией PLC
+                for _ in 1..(diff - 1) {
+                    let mut plc_buf = vec![0i16; frame_size];
+                    if let Ok(n) = self.decoder.decode_s16(&[], frame_size, &mut plc_buf) {
+                        plc_buf.truncate(n);
+                        result.extend_from_slice(&plc_buf);
+                    }
+                }
+            }
+        }
+        self.last_seq = Some(seq);
+
+        if !opus_packet.is_empty() {
+            let mut out_buf = vec![0i16; frame_size];
+            match self.decoder.decode_s16(opus_packet, frame_size, &mut out_buf) {
+                Ok(n) => {
+                    out_buf.truncate(n);
+                    result.extend_from_slice(&out_buf);
+                }
+                Err(_) => {}
+            }
+        }
+
+        result
     }
 }
 
@@ -296,8 +432,8 @@ fn run_wasapi_playback_loop(
         audio_client.Start()?;
 
         let mut sample_queue: VecDeque<f32> = VecDeque::with_capacity(24000);
-        let target_prebuffer = (sample_rate as f32 * 0.040) as usize; // 40ms подушка от джиттера
-        let max_buffer = (sample_rate as f32 * 0.150) as usize; // 150ms макс буфер (против накопления задержки)
+        let target_prebuffer = (sample_rate as f32 * 0.020) as usize; // 20ms подушка от джиттера (ровно 1 Opus фрейм)
+        let max_buffer = (sample_rate as f32 * 0.100) as usize; // 100ms макс буфер (против накопления задержки)
         let mut is_prebuffering = true;
 
         while is_running.load(Ordering::Relaxed) {

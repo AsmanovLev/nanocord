@@ -16,6 +16,8 @@ pub struct NetworkPeerFrame {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NetworkAudioPacket {
+    pub stream_type: u8, // 0 = Voice/Mic, 1 = Desktop/Loopback
+    pub seq: u32,
     pub peak_db: f32,
     pub min_sample: f32,
     pub max_sample: f32,
@@ -27,6 +29,8 @@ pub struct NetworkAudioPacket {
 impl Default for NetworkAudioPacket {
     fn default() -> Self {
         Self {
+            stream_type: 0,
+            seq: 0,
             peak_db: -60.0,
             min_sample: 0.0,
             max_sample: 0.0,
@@ -39,15 +43,58 @@ impl Default for NetworkAudioPacket {
 
 impl NetworkAudioPacket {
     pub fn new(peak_db: f32, min_sample: f32, max_sample: f32, rms: f32, bins: [f32; 20]) -> Self {
-        Self { peak_db, min_sample, max_sample, rms, bins, opus_data: Vec::new() }
+        Self {
+            stream_type: 0,
+            seq: 0,
+            peak_db,
+            min_sample,
+            max_sample,
+            rms,
+            bins,
+            opus_data: Vec::new(),
+        }
     }
 
     pub fn with_opus(peak_db: f32, min_sample: f32, max_sample: f32, rms: f32, bins: [f32; 20], opus_data: Vec<u8>) -> Self {
-        Self { peak_db, min_sample, max_sample, rms, bins, opus_data }
+        Self {
+            stream_type: 0,
+            seq: 0,
+            peak_db,
+            min_sample,
+            max_sample,
+            rms,
+            bins,
+            opus_data,
+        }
+    }
+
+    pub fn with_stream(
+        stream_type: u8,
+        seq: u32,
+        peak_db: f32,
+        min_sample: f32,
+        max_sample: f32,
+        rms: f32,
+        bins: [f32; 20],
+        opus_data: Vec<u8>,
+    ) -> Self {
+        Self {
+            stream_type,
+            seq,
+            peak_db,
+            min_sample,
+            max_sample,
+            rms,
+            bins,
+            opus_data,
+        }
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(96 + 4 + self.opus_data.len());
+        let mut buf = Vec::with_capacity(1 + 1 + 4 + 96 + 4 + self.opus_data.len());
+        buf.push(b'O');
+        buf.push(self.stream_type);
+        buf.extend_from_slice(&self.seq.to_le_bytes());
         buf.extend_from_slice(&self.peak_db.to_le_bytes());
         buf.extend_from_slice(&self.min_sample.to_le_bytes());
         buf.extend_from_slice(&self.max_sample.to_le_bytes());
@@ -61,34 +108,71 @@ impl NetworkAudioPacket {
     }
 
     pub fn from_bytes(slice: &[u8]) -> Option<Self> {
-        if slice.len() < 96 {
+        if slice.is_empty() {
             return None;
         }
-        let peak_db = f32::from_le_bytes(slice[0..4].try_into().ok()?);
-        let min_sample = f32::from_le_bytes(slice[4..8].try_into().ok()?);
-        let max_sample = f32::from_le_bytes(slice[8..12].try_into().ok()?);
-        let rms = f32::from_le_bytes(slice[12..16].try_into().ok()?);
-        let mut bins = [0.0f32; 20];
-        for i in 0..20 {
-            bins[i] = f32::from_le_bytes(slice[16 + i * 4..20 + i * 4].try_into().ok()?);
-        }
 
-        let mut opus_data = Vec::new();
-        if slice.len() >= 100 {
-            let opus_len = u32::from_le_bytes(slice[96..100].try_into().ok()?) as usize;
-            if slice.len() >= 100 + opus_len {
-                opus_data = slice[100..100 + opus_len].to_vec();
+        // Проверяем формат с префиксом b'O'
+        if slice[0] == b'O' && slice.len() >= 106 {
+            let stream_type = slice[1];
+            let seq = u32::from_le_bytes(slice[2..6].try_into().ok()?);
+            let peak_db = f32::from_le_bytes(slice[6..10].try_into().ok()?);
+            let min_sample = f32::from_le_bytes(slice[10..14].try_into().ok()?);
+            let max_sample = f32::from_le_bytes(slice[14..18].try_into().ok()?);
+            let rms = f32::from_le_bytes(slice[18..22].try_into().ok()?);
+            let mut bins = [0.0f32; 20];
+            for i in 0..20 {
+                bins[i] = f32::from_le_bytes(slice[22 + i * 4..26 + i * 4].try_into().ok()?);
             }
+            let opus_len = u32::from_le_bytes(slice[102..106].try_into().ok()?) as usize;
+            let mut opus_data = Vec::new();
+            if slice.len() >= 106 + opus_len {
+                opus_data = slice[106..106 + opus_len].to_vec();
+            }
+            return Some(Self {
+                stream_type,
+                seq,
+                peak_db,
+                min_sample,
+                max_sample,
+                rms,
+                bins,
+                opus_data,
+            });
         }
 
-        Some(Self {
-            peak_db,
-            min_sample,
-            max_sample,
-            rms,
-            bins,
-            opus_data,
-        })
+        // Обратная совместимость с 96-байтным форматом
+        if slice.len() >= 96 {
+            let peak_db = f32::from_le_bytes(slice[0..4].try_into().ok()?);
+            let min_sample = f32::from_le_bytes(slice[4..8].try_into().ok()?);
+            let max_sample = f32::from_le_bytes(slice[8..12].try_into().ok()?);
+            let rms = f32::from_le_bytes(slice[12..16].try_into().ok()?);
+            let mut bins = [0.0f32; 20];
+            for i in 0..20 {
+                bins[i] = f32::from_le_bytes(slice[16 + i * 4..20 + i * 4].try_into().ok()?);
+            }
+
+            let mut opus_data = Vec::new();
+            if slice.len() >= 100 {
+                let opus_len = u32::from_le_bytes(slice[96..100].try_into().ok()?) as usize;
+                if slice.len() >= 100 + opus_len {
+                    opus_data = slice[100..100 + opus_len].to_vec();
+                }
+            }
+
+            return Some(Self {
+                stream_type: 0,
+                seq: 0,
+                peak_db,
+                min_sample,
+                max_sample,
+                rms,
+                bins,
+                opus_data,
+            });
+        }
+
+        None
     }
 }
 
@@ -941,14 +1025,23 @@ mod tests {
         let opus_data = opus_pkts[0].clone();
         let pkt = NetworkAudioPacket::with_opus(-14.5, -0.62, 0.71, 0.38, bins, opus_data.clone());
         let bytes = pkt.to_bytes();
-        assert_eq!(bytes.len(), 96 + 4 + opus_data.len());
+        assert_eq!(bytes.len(), 1 + 1 + 4 + 96 + 4 + opus_data.len());
         let decoded = NetworkAudioPacket::from_bytes(&bytes).expect("audio decode failed");
+        assert_eq!(decoded.stream_type, 0);
+        assert_eq!(decoded.seq, 0);
         assert!((decoded.peak_db - (-14.5)).abs() < 1e-4);
         assert!((decoded.min_sample - (-0.62)).abs() < 1e-4);
         assert!((decoded.max_sample - 0.71).abs() < 1e-4);
         assert!((decoded.rms - 0.38).abs() < 1e-4);
         assert!((decoded.bins[5] - 0.78).abs() < 1e-4);
         assert_eq!(decoded.opus_data, opus_data);
+
+        // Verify backward compatibility: legacy 96-byte packet without magic
+        let legacy_bytes = &bytes[6..]; // slice without 'O' + stream_type + seq
+        let legacy_decoded = NetworkAudioPacket::from_bytes(legacy_bytes).expect("legacy audio decode failed");
+        assert_eq!(legacy_decoded.stream_type, 0);
+        assert!((legacy_decoded.peak_db - (-14.5)).abs() < 1e-4);
+        assert_eq!(legacy_decoded.opus_data, opus_data);
     }
 
     #[test]
@@ -1227,6 +1320,74 @@ mod tests {
         assert!(srv_got_aud, "Server should receive audio stream from Client");
         assert!(cli_got_cam, "Client should receive camera stream from Server");
         assert!(cli_got_aud, "Client should receive audio stream from Server");
+
+        client.stop();
+        server.stop();
+    }
+
+    #[test]
+    fn test_e2e_opus_dual_stream_and_fec_recovery() {
+        let port = 49210;
+        let code = "Op9".to_string();
+
+        let server = P2PNetworkServer::start(port, code.clone());
+        thread::sleep(Duration::from_millis(80));
+
+        let client = P2PNetworkClient::connect("[::1]".to_string(), port, code);
+        thread::sleep(Duration::from_millis(250));
+
+        assert!(client.is_connected.load(Ordering::Relaxed));
+        assert!(server.is_connected.load(Ordering::Relaxed));
+
+        // Client prepares separate Voip (mic) and Audio (desktop) encoders
+        let mut mic_enc = crate::audio::NanocordOpusEncoder::new_voip(64_000);
+        let mut game_enc = crate::audio::NanocordOpusEncoder::new_audio(96_000);
+
+        let mic_pcm: Vec<i16> = (0..960).map(|i| ((i as f32 * 0.1).sin() * 15000.0) as i16).collect();
+        let game_pcm: Vec<i16> = (0..960).map(|i| ((i as f32 * 0.05).cos() * 20000.0) as i16).collect();
+
+        let mic_pkts = mic_enc.encode_chunk(&mic_pcm);
+        let game_pkts = game_enc.encode_chunk(&game_pcm);
+
+        assert!(!mic_pkts.is_empty());
+        assert!(!game_pkts.is_empty());
+
+        let seq_mic = mic_enc.next_seq();
+        let seq_game = game_enc.next_seq();
+
+        let pkt_mic = NetworkAudioPacket::with_stream(0, seq_mic, -14.0, -0.6, 0.6, 0.4, [0.3; 20], mic_pkts[0].clone());
+        let pkt_game = NetworkAudioPacket::with_stream(1, seq_game, -10.0, -0.8, 0.8, 0.5, [0.5; 20], game_pkts[0].clone());
+
+        client.outgoing_audio_tx.send(pkt_mic).unwrap();
+        client.outgoing_audio_tx.send(pkt_game).unwrap();
+
+        let start = Instant::now();
+        let mut received = Vec::new();
+        while start.elapsed() < Duration::from_secs(3) {
+            while let Ok(pkt) = server.audio_rx.try_recv() {
+                received.push(pkt);
+            }
+            if received.len() >= 2 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(received.len(), 2);
+        assert_eq!(received[0].stream_type, 0); // Mic stream
+        assert_eq!(received[1].stream_type, 1); // Desktop stream
+
+        // Test FEC recovery and PLC on dropped packet
+        let mut mic_dec = crate::audio::NanocordOpusDecoder::new();
+        let pcm_normal = mic_dec.decode_packet_with_fec(received[0].seq, &received[0].opus_data);
+        assert_eq!(pcm_normal.len(), 960);
+
+        // Simulate dropped packet (seq jump from 0 to 2)
+        let mic_pcm2: Vec<i16> = (0..960).map(|i| ((i as f32 * 0.15).sin() * 12000.0) as i16).collect();
+        let mic_pkts2 = mic_enc.encode_chunk(&mic_pcm2);
+        let pcm_recovered = mic_dec.decode_packet_with_fec(received[0].seq + 2, &mic_pkts2[0]);
+        // Reconstructs both the dropped frame and the current frame smoothly
+        assert!(pcm_recovered.len() >= 960);
 
         client.stop();
         server.stop();

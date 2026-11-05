@@ -393,6 +393,10 @@
         <ru>Аудиоустройства Windows (WASAPI):</ru>
         <en>Windows Audio Devices (WASAPI):</en>
     </string>
+    <string name="audio_opus_badge">
+        <ru>48 кГц • Голос: VoIP 64 kbps (DTX) • Стрим: Audio 96 kbps • Защита: In-Band FEC + PLC</ru>
+        <en>48 kHz • Voice: VoIP 64 kbps (DTX) • Stream: Audio 96 kbps • Protection: In-Band FEC + PLC</en>
+    </string>
     <string name="btn_refresh">
         <ru>Обновить</ru>
         <en>Refresh</en>

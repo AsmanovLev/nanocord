@@ -322,8 +322,10 @@ pub struct NanocordApp {
     pub game_waveform: AudioWaveform,
     pub anim_time: f32,
 
-    pub opus_encoder: crate::audio::NanocordOpusEncoder,
-    pub opus_decoder: crate::audio::NanocordOpusDecoder,
+    pub mic_opus_encoder: crate::audio::NanocordOpusEncoder,
+    pub game_opus_encoder: crate::audio::NanocordOpusEncoder,
+    pub peer_mic_opus_decoder: crate::audio::NanocordOpusDecoder,
+    pub peer_game_opus_decoder: crate::audio::NanocordOpusDecoder,
 
     // Сетевой P2P сервер и клиент (IPv6 + IPv4)
     pub p2p_server: Option<crate::network::P2PNetworkServer>,
@@ -448,8 +450,10 @@ impl Default for NanocordApp {
             game_waveform: AudioWaveform::new(),
             anim_time: 0.0,
 
-            opus_encoder: crate::audio::NanocordOpusEncoder::new(),
-            opus_decoder: crate::audio::NanocordOpusDecoder::new(),
+            mic_opus_encoder: crate::audio::NanocordOpusEncoder::new_voip(64_000),
+            game_opus_encoder: crate::audio::NanocordOpusEncoder::new_audio(96_000),
+            peer_mic_opus_decoder: crate::audio::NanocordOpusDecoder::new(),
+            peer_game_opus_decoder: crate::audio::NanocordOpusDecoder::new(),
 
             p2p_server: None,
             p2p_client: None,
@@ -1655,11 +1659,14 @@ impl eframe::App for NanocordApp {
                     self.audio_player.play_samples(processed_pcm.clone());
                 }
 
-                // Кодирование и отправка звука микрофона в P2P через Opus (VBR)
+                // Кодирование и отправка звука микрофона в P2P через Opus (VoIP VBR 64 kbps + FEC + DTX)
                 if is_peer_connected && !self.is_mic_muted {
-                    let opus_packets = self.opus_encoder.encode_chunk(&processed_pcm);
+                    let opus_packets = self.mic_opus_encoder.encode_chunk(&processed_pcm);
                     for opus_data in opus_packets {
-                        let net_audio = crate::network::NetworkAudioPacket::with_opus(
+                        let seq = self.mic_opus_encoder.next_seq();
+                        let net_audio = crate::network::NetworkAudioPacket::with_stream(
+                            0, // Mic
+                            seq,
                             (pkt.peak_db + 20.0 * mic_vol.max(0.01).log10()).clamp(-60.0, 0.0),
                             pkt.min_sample * mic_vol,
                             pkt.max_sample * mic_vol,
@@ -1691,9 +1698,12 @@ impl eframe::App for NanocordApp {
                     }
                 }
                 if is_peer_connected && !self.is_deafened {
-                    let opus_packets = self.opus_encoder.encode_chunk(&processed_pcm);
+                    let opus_packets = self.game_opus_encoder.encode_chunk(&processed_pcm);
                     for opus_data in opus_packets {
-                        let net_audio = crate::network::NetworkAudioPacket::with_opus(
+                        let seq = self.game_opus_encoder.next_seq();
+                        let net_audio = crate::network::NetworkAudioPacket::with_stream(
+                            1, // Desktop loopback
+                            seq,
                             (pkt.peak_db + 20.0 * loop_vol.max(0.01).log10()).clamp(-60.0, 0.0),
                             pkt.min_sample * loop_vol,
                             pkt.max_sample * loop_vol,
@@ -1725,7 +1735,11 @@ impl eframe::App for NanocordApp {
             }
             while let Ok(audio) = srv.audio_rx.try_recv() {
                 if !self.is_deafened {
-                    let mut samples = self.opus_decoder.decode_packet(&audio.opus_data);
+                    let mut samples = if audio.stream_type == 0 {
+                        self.peer_mic_opus_decoder.decode_packet_with_fec(audio.seq, &audio.opus_data)
+                    } else {
+                        self.peer_game_opus_decoder.decode_packet_with_fec(audio.seq, &audio.opus_data)
+                    };
                     if !samples.is_empty() {
                         let out_vol = self.game_waveform.volume;
                         if (out_vol - 1.0).abs() > 0.001 {
@@ -1747,7 +1761,11 @@ impl eframe::App for NanocordApp {
             }
             while let Ok(audio) = cli.audio_rx.try_recv() {
                 if !self.is_deafened {
-                    let mut samples = self.opus_decoder.decode_packet(&audio.opus_data);
+                    let mut samples = if audio.stream_type == 0 {
+                        self.peer_mic_opus_decoder.decode_packet_with_fec(audio.seq, &audio.opus_data)
+                    } else {
+                        self.peer_game_opus_decoder.decode_packet_with_fec(audio.seq, &audio.opus_data)
+                    };
                     if !samples.is_empty() {
                         let out_vol = self.game_waveform.volume;
                         if (out_vol - 1.0).abs() > 0.001 {
@@ -2756,7 +2774,23 @@ impl NanocordApp {
                 });
             });
 
-        ui.add_space(12.0);
+        ui.add_space(8.0);
+
+        // БЕЙДЖ СТАТУСА OPUS RFC 6716 VBR КОДЕКА
+        egui::Frame::new()
+            .fill(th.bg_card_secondary)
+            .stroke(Stroke::new(1.0, th.border))
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(12, 7))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("🎙 OPUS RFC 6716 VBR").strong().size(12.0).color(Color32::from_rgb(88, 101, 242)));
+                    ui.separator();
+                    ui.label(egui::RichText::new(self.t("audio_opus_badge")).size(11.0).color(th.text_sub));
+                });
+            });
+
+        ui.add_space(10.0);
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             // ИСТОЧНИК 1: ЗВУКОВАЯ ВОЛНА МИКРОФОНА
