@@ -116,6 +116,22 @@
         <ru>Скопировать адрес + код</ru>
         <en>Copy Address + Code</en>
     </string>
+    <string name="copy_local_ip_btn">
+        <ru>🏠 Скопировать локальный IP</ru>
+        <en>🏠 Copy Local IP</en>
+    </string>
+    <string name="copy_global_ip_btn">
+        <ru>🌐 Скопировать глобальный IP</ru>
+        <en>🌐 Copy Global IP</en>
+    </string>
+    <string name="copied_local_ip_toast">
+        <ru>Скопирован локальный адрес</ru>
+        <en>Copied local address</en>
+    </string>
+    <string name="copied_global_ip_toast">
+        <ru>Скопирован глобальный адрес</ru>
+        <en>Copied global address</en>
+    </string>
     <string name="copied_toast">
         <ru>Скопировано</ru>
         <en>Copied</en>

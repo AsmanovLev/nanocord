@@ -989,6 +989,25 @@ impl NanocordApp {
     fn render_lobby(&mut self, ui: &mut egui::Ui) {
         let th = self.app_theme.colors();
 
+        // Отрисовка силуэта Майкла Джексона на заднем плане в левой части экрана с диммированием
+        if let Some(ref tex) = self.hero_mj_texture {
+            let screen_rect = ui.max_rect();
+            let h = screen_rect.height().max(600.0);
+            let w = h * (516.0 / 885.0);
+            let mj_rect = Rect::from_min_size(
+                Pos2::new(screen_rect.left(), screen_rect.top()),
+                Vec2::new(w, h),
+            );
+            // Полупрозрачный диммированный силуэт (~14% непрозрачности)
+            let dimmed_tint = Color32::from_rgba_unmultiplied(255, 255, 255, 35);
+            ui.painter().image(
+                tex.id(),
+                mj_rect,
+                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                dimmed_tint,
+            );
+        }
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -1020,67 +1039,7 @@ impl NanocordApp {
                                     .color(th.text_sub),
                             );
                         });
-                        ui.add_space(10.0);
-
-                        // Маскот Майкл Джексон и кнопка копирования реального публичного IP
-                        ui.vertical_centered(|ui| {
-                            if let Some(ref tex) = self.hero_mj_texture {
-                                let h = 150.0f32;
-                                let w = h * (516.0 / 885.0);
-                                let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), egui::Sense::hover());
-                                ui.painter().image(
-                                    tex.id(),
-                                    rect,
-                                    Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                                    Color32::WHITE,
-                                );
-                                ui.add_space(6.0);
-                            }
-
-                            let maybe_ip = self.public_ip.read().ok().and_then(|guard| guard.clone());
-                            let is_fetching = self.is_fetching_ip.load(Ordering::Relaxed);
-
-                            let ip_button_text = if let Some(ref ip) = maybe_ip {
-                                format!("{} ({})", self.t("copy_real_ip_btn"), ip)
-                            } else if is_fetching {
-                                self.t("fetching_ip").to_string()
-                            } else {
-                                self.t("copy_real_ip_btn").to_string()
-                            };
-
-                            let btn = egui::Button::new(
-                                egui::RichText::new(&ip_button_text)
-                                    .size(12.0)
-                                    .color(Color32::WHITE)
-                                    .strong(),
-                            )
-                            .fill(Color32::from_rgb(88, 101, 242))
-                            .corner_radius(CornerRadius::same(16));
-
-                            if ui.add(btn).clicked() {
-                                if let Some(ref ip) = maybe_ip {
-                                    ui.ctx().copy_text(ip.clone());
-                                    crate::network::set_clipboard_text(ip);
-                                    self.copy_toast = Some((
-                                        format!("{}: {}", self.t("copied_real_ip_toast"), ip),
-                                        Instant::now(),
-                                    ));
-                                } else if !is_fetching {
-                                    let ip_clone = self.public_ip.clone();
-                                    let is_fetching_clone = self.is_fetching_ip.clone();
-                                    is_fetching_clone.store(true, Ordering::Relaxed);
-                                    std::thread::spawn(move || {
-                                        if let Some(ip) = crate::network::fetch_real_public_ip() {
-                                            if let Ok(mut lock) = ip_clone.write() {
-                                                *lock = Some(ip);
-                                            }
-                                        }
-                                        is_fetching_clone.store(false, Ordering::Relaxed);
-                                    });
-                                }
-                            }
-                        });
-                        ui.add_space(14.0);
+                        ui.add_space(16.0);
 
                         // Всплывающее уведомление (Toast) о копировании / вставке
                         if let Some((ref msg, time)) = self.copy_toast {
@@ -1153,17 +1112,16 @@ impl NanocordApp {
                                     ui.add_space(12.0);
 
                                     // Плашка готового адреса для приглашения
-                                    let invite_link_v6 = format!(
-                                        "[::1]:{}#{}",
-                                        self.server_port_str.trim(),
-                                        self.server_code_str.trim()
-                                    );
                                     let invite_link_v4 = format!(
                                         "{}:{}#{}",
                                         self.local_ipv4_hint,
                                         self.server_port_str.trim(),
                                         self.server_code_str.trim()
                                     );
+                                    let maybe_pub_ip = self.public_ip.read().ok().and_then(|g| g.clone());
+                                    let maybe_invite_pub = maybe_pub_ip.as_ref().map(|pub_ip| {
+                                        format!("{}:{}#{}", pub_ip, self.server_port_str.trim(), self.server_code_str.trim())
+                                    });
 
                                     egui::Frame::new()
                                         .fill(th.bg_card_secondary)
@@ -1177,36 +1135,35 @@ impl NanocordApp {
                                                     .color(th.text_sub),
                                             );
                                             ui.label(
-                                                egui::RichText::new(&invite_link_v6)
+                                                egui::RichText::new(format!("🏠 LAN: {}", invite_link_v4))
                                                     .strong()
-                                                    .size(12.5)
+                                                    .size(12.0)
                                                     .color(Color32::from_rgb(88, 101, 242)),
                                             );
-                                            ui.label(
-                                                egui::RichText::new(format!("IPv4 LAN: {}", invite_link_v4))
-                                                    .size(10.0)
-                                                    .color(th.text_sub),
-                                            );
-                                            if let Ok(guard) = self.public_ip.read() {
-                                                if let Some(pub_ip) = guard.as_deref() {
-                                                    let invite_link_pub = format!("{}:{}#{}", pub_ip, self.server_port_str.trim(), self.server_code_str.trim());
-                                                    ui.label(
-                                                        egui::RichText::new(format!("{}: {}", self.t("internet_address_label"), invite_link_pub))
-                                                            .size(10.0)
-                                                            .color(Color32::from_rgb(35, 165, 90)),
-                                                    );
-                                                }
+                                            if let Some(ref pub_link) = maybe_invite_pub {
+                                                ui.label(
+                                                    egui::RichText::new(format!("🌐 WAN: {}", pub_link))
+                                                        .strong()
+                                                        .size(12.0)
+                                                        .color(Color32::from_rgb(35, 165, 90)),
+                                                );
+                                            } else if self.is_fetching_ip.load(Ordering::Relaxed) {
+                                                ui.label(
+                                                    egui::RichText::new(self.t("fetching_ip"))
+                                                        .size(11.0)
+                                                        .color(th.text_sub),
+                                                );
                                             }
                                         });
 
                                     ui.add_space(10.0);
 
-                                    // Кнопка: Скопировать адрес сервера + код в буфер обмена
+                                    // Кнопка 1: Скопировать локальный IP
                                     if ui
                                         .add_sized(
-                                            [col_w, 36.0],
+                                            [col_w, 34.0],
                                             egui::Button::new(
-                                                egui::RichText::new(self.t("copy_address_btn"))
+                                                egui::RichText::new(self.t("copy_local_ip_btn"))
                                                     .strong()
                                                     .size(12.0)
                                                     .color(Color32::WHITE),
@@ -1216,12 +1173,56 @@ impl NanocordApp {
                                         )
                                         .clicked()
                                     {
-                                        ui.ctx().copy_text(invite_link_v6.clone());
-                                        crate::network::set_clipboard_text(&invite_link_v6);
+                                        ui.ctx().copy_text(invite_link_v4.clone());
+                                        crate::network::set_clipboard_text(&invite_link_v4);
                                         self.copy_toast = Some((
-                                            format!("{}: {}", self.t("copied_toast"), invite_link_v6),
+                                            format!("{}: {}", self.t("copied_local_ip_toast"), invite_link_v4),
                                             Instant::now(),
                                         ));
+                                    }
+
+                                    ui.add_space(6.0);
+
+                                    // Кнопка 2: Скопировать глобальный IP
+                                    let is_fetching = self.is_fetching_ip.load(Ordering::Relaxed);
+                                    let global_btn_label = if let Some(ref pub_ip) = maybe_pub_ip {
+                                        format!("{} ({})", self.t("copy_global_ip_btn"), pub_ip)
+                                    } else if is_fetching {
+                                        self.t("fetching_ip").to_string()
+                                    } else {
+                                        self.t("copy_global_ip_btn").to_string()
+                                    };
+
+                                    let global_btn = egui::Button::new(
+                                        egui::RichText::new(&global_btn_label)
+                                            .strong()
+                                             .size(12.0)
+                                            .color(Color32::WHITE),
+                                    )
+                                    .fill(Color32::from_rgb(35, 165, 90))
+                                    .corner_radius(CornerRadius::same(8));
+
+                                    if ui.add_sized([col_w, 34.0], global_btn).clicked() {
+                                        if let Some(ref pub_link) = maybe_invite_pub {
+                                            ui.ctx().copy_text(pub_link.clone());
+                                            crate::network::set_clipboard_text(pub_link);
+                                            self.copy_toast = Some((
+                                                format!("{}: {}", self.t("copied_global_ip_toast"), pub_link),
+                                                Instant::now(),
+                                            ));
+                                        } else if !is_fetching {
+                                            let ip_clone = self.public_ip.clone();
+                                            let is_fetching_clone = self.is_fetching_ip.clone();
+                                            is_fetching_clone.store(true, Ordering::Relaxed);
+                                            std::thread::spawn(move || {
+                                                if let Some(ip) = crate::network::fetch_real_public_ip() {
+                                                    if let Ok(mut lock) = ip_clone.write() {
+                                                        *lock = Some(ip);
+                                                    }
+                                                }
+                                                is_fetching_clone.store(false, Ordering::Relaxed);
+                                            });
+                                        }
                                     }
 
                                     ui.add_space(10.0);
