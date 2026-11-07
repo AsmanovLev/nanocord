@@ -90,7 +90,8 @@ pub fn create_process_loopback_audio_client(target_pid: u32) -> Result<IAudioCli
             pBlobData: &activation_params as *const _ as *mut u8,
         };
 
-        let mut prop_var: windows::Win32::System::Com::StructuredStorage::PROPVARIANT = std::mem::zeroed();
+        let mut prop_var: std::mem::ManuallyDrop<windows::Win32::System::Com::StructuredStorage::PROPVARIANT> =
+            std::mem::ManuallyDrop::new(std::mem::zeroed());
         let inner = std::ops::DerefMut::deref_mut(&mut prop_var.Anonymous.Anonymous);
         inner.vt = windows::Win32::System::Variant::VT_BLOB;
         inner.Anonymous.blob = blob;
@@ -101,11 +102,12 @@ pub fn create_process_loopback_audio_client(target_pid: u32) -> Result<IAudioCli
         let _async_op = ActivateAudioInterfaceAsync(
             VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
             &IAudioClient::IID,
-            Some(&prop_var as *const _),
+            Some(&*prop_var as *const _),
             &handler,
         )?;
 
-        rx.recv().map_err(|_| windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)))?
+        rx.recv_timeout(Duration::from_millis(500))
+            .map_err(|_| windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)))?
     }
 }
 
