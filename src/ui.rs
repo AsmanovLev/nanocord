@@ -32,6 +32,8 @@ pub const ICON_SETTINGS: &str = "\u{e8b8}";
 pub const ICON_REFRESH: &str = "\u{e5d5}";
 pub const ICON_LANGUAGE: &str = "\u{e894}";
 
+pub const HERO_MJ_BYTES: &[u8] = include_bytes!("../assets/hero_mj.png");
+
 pub use crate::i18n::AppLanguage;
 
 #[derive(Clone, Copy)]
@@ -335,6 +337,12 @@ pub struct NanocordApp {
     pub last_remote_desktop_time: Option<Instant>,
     pub last_remote_camera_time: Option<Instant>,
 
+    // Герой-маскот и внешний публичный IP в обход прокси
+    pub hero_mj_texture: Option<egui::TextureHandle>,
+    pub public_ip: Arc<std::sync::RwLock<Option<String>>>,
+    pub is_fetching_ip: Arc<std::sync::atomic::AtomicBool>,
+    pub downmix_to_mono: bool,
+
     // Поля начального экрана (Комната / Lobby)
     pub server_port_str: String,
     pub server_code_str: String,
@@ -398,6 +406,22 @@ impl Default for NanocordApp {
         let initial_in_id = in_devs.get(0).map(|d| d.id.clone()).unwrap_or_else(|| "default".to_string());
         let initial_out_id = out_devs.get(0).map(|d| d.id.clone()).unwrap_or_else(|| "default".to_string());
 
+        let public_ip = Arc::new(std::sync::RwLock::new(None));
+        let is_fetching_ip = Arc::new(AtomicBool::new(true));
+
+        {
+            let ip_clone = public_ip.clone();
+            let is_fetching_clone = is_fetching_ip.clone();
+            std::thread::spawn(move || {
+                if let Some(ip) = crate::network::fetch_real_public_ip() {
+                    if let Ok(mut lock) = ip_clone.write() {
+                        *lock = Some(ip);
+                    }
+                }
+                is_fetching_clone.store(false, Ordering::Relaxed);
+            });
+        }
+
         Self {
             active_tab: Tab::Lobby,
             app_theme: AppTheme::DarkDiscord,
@@ -411,7 +435,7 @@ impl Default for NanocordApp {
             is_streaming: Arc::new(AtomicBool::new(false)),
             is_mic_muted: false,
             is_deafened: false,
-            is_camera_on: true,
+            is_camera_on: false,
             is_camera_pip: false,
 
             desktop_texture: None,
@@ -461,6 +485,11 @@ impl Default for NanocordApp {
             remote_camera_texture: None,
             last_remote_desktop_time: None,
             last_remote_camera_time: None,
+
+            hero_mj_texture: None,
+            public_ip,
+            is_fetching_ip,
+            downmix_to_mono: true,
 
             server_port_str: "48120".to_string(),
             server_code_str: crate::network::generate_random_room_code(),
@@ -991,7 +1020,67 @@ impl NanocordApp {
                                     .color(th.text_sub),
                             );
                         });
-                        ui.add_space(16.0);
+                        ui.add_space(10.0);
+
+                        // Маскот Майкл Джексон и кнопка копирования реального публичного IP
+                        ui.vertical_centered(|ui| {
+                            if let Some(ref tex) = self.hero_mj_texture {
+                                let h = 150.0f32;
+                                let w = h * (516.0 / 885.0);
+                                let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), egui::Sense::hover());
+                                ui.painter().image(
+                                    tex.id(),
+                                    rect,
+                                    Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                                    Color32::WHITE,
+                                );
+                                ui.add_space(6.0);
+                            }
+
+                            let maybe_ip = self.public_ip.read().ok().and_then(|guard| guard.clone());
+                            let is_fetching = self.is_fetching_ip.load(Ordering::Relaxed);
+
+                            let ip_button_text = if let Some(ref ip) = maybe_ip {
+                                format!("{} ({})", self.t("copy_real_ip_btn"), ip)
+                            } else if is_fetching {
+                                self.t("fetching_ip").to_string()
+                            } else {
+                                self.t("copy_real_ip_btn").to_string()
+                            };
+
+                            let btn = egui::Button::new(
+                                egui::RichText::new(&ip_button_text)
+                                    .size(12.0)
+                                    .color(Color32::WHITE)
+                                    .strong(),
+                            )
+                            .fill(Color32::from_rgb(88, 101, 242))
+                            .corner_radius(CornerRadius::same(16));
+
+                            if ui.add(btn).clicked() {
+                                if let Some(ref ip) = maybe_ip {
+                                    ui.ctx().copy_text(ip.clone());
+                                    crate::network::set_clipboard_text(ip);
+                                    self.copy_toast = Some((
+                                        format!("{}: {}", self.t("copied_real_ip_toast"), ip),
+                                        Instant::now(),
+                                    ));
+                                } else if !is_fetching {
+                                    let ip_clone = self.public_ip.clone();
+                                    let is_fetching_clone = self.is_fetching_ip.clone();
+                                    is_fetching_clone.store(true, Ordering::Relaxed);
+                                    std::thread::spawn(move || {
+                                        if let Some(ip) = crate::network::fetch_real_public_ip() {
+                                            if let Ok(mut lock) = ip_clone.write() {
+                                                *lock = Some(ip);
+                                            }
+                                        }
+                                        is_fetching_clone.store(false, Ordering::Relaxed);
+                                    });
+                                }
+                            }
+                        });
+                        ui.add_space(14.0);
 
                         // Всплывающее уведомление (Toast) о копировании / вставке
                         if let Some((ref msg, time)) = self.copy_toast {
@@ -1098,6 +1187,16 @@ impl NanocordApp {
                                                     .size(10.0)
                                                     .color(th.text_sub),
                                             );
+                                            if let Ok(guard) = self.public_ip.read() {
+                                                if let Some(pub_ip) = guard.as_deref() {
+                                                    let invite_link_pub = format!("{}:{}#{}", pub_ip, self.server_port_str.trim(), self.server_code_str.trim());
+                                                    ui.label(
+                                                        egui::RichText::new(format!("{}: {}", self.t("internet_address_label"), invite_link_pub))
+                                                            .size(10.0)
+                                                            .color(Color32::from_rgb(35, 165, 90)),
+                                                    );
+                                                }
+                                            }
                                         });
 
                                     ui.add_space(10.0);
@@ -1537,6 +1636,19 @@ impl eframe::App for NanocordApp {
         let is_cli_connected = self.p2p_client.as_ref().map(|c| c.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
         let is_peer_connected = is_srv_connected || is_cli_connected;
 
+        // Ленивая инициализация текстуры героя Майкла Джексона
+        if self.hero_mj_texture.is_none() {
+            if let Ok(img) = image::load_from_memory(HERO_MJ_BYTES) {
+                let rgba = img.to_rgba8();
+                let (w, h) = rgba.dimensions();
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                    [w as usize, h as usize],
+                    rgba.as_raw(),
+                );
+                self.hero_mj_texture = Some(ctx.load_texture("hero_mj", color_image, egui::TextureOptions::LINEAR));
+            }
+        }
+
         // 0. Динамическое переключение микрофона при выборе в выпадающем списке
         if let Some(dev) = self.input_devices.get(self.selected_input_device_idx) {
             if dev.id != self.applied_input_device_id {
@@ -1572,8 +1684,8 @@ impl eframe::App for NanocordApp {
         // 1. Приём настоящих кадров захвата экрана
         if let Some(ref rx) = self.preview_rx {
             while let Ok(frame) = rx.try_recv() {
-                // Если собеседник подключен, отправляем захваченный кадр экрана в P2P
-                if is_peer_connected {
+                // Если собеседник подключен и стрим включен, отправляем захваченный кадр экрана в P2P
+                if is_peer_connected && self.is_streaming.load(Ordering::Relaxed) {
                     let net_frame = crate::network::NetworkPeerFrame {
                         width: frame.width,
                         height: frame.height,
@@ -2721,9 +2833,14 @@ impl NanocordApp {
                     }
                     let sidetone_label = self.t("audio_sidetone_check");
                     let sidetone_tip = self.t("audio_sidetone_tip");
+                    let downmix_label = self.t("audio_downmix_toggle");
+                    let downmix_tip = self.t("audio_downmix_tip");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.checkbox(&mut self.listen_to_mic_sidetone, sidetone_label)
                             .on_hover_text(sidetone_tip);
+                        ui.add_space(8.0);
+                        ui.checkbox(&mut self.downmix_to_mono, downmix_label)
+                            .on_hover_text(downmix_tip);
                     });
                 });
                 ui.add_space(8.0);

@@ -120,6 +120,22 @@
         <ru>Скопировано</ru>
         <en>Copied</en>
     </string>
+    <string name="copy_real_ip_btn">
+        <ru>🌐 Скопировать реальный IP</ru>
+        <en>🌐 Copy Real IP</en>
+    </string>
+    <string name="copied_real_ip_toast">
+        <ru>Скопирован реальный публичный IP</ru>
+        <en>Copied real public IP</en>
+    </string>
+    <string name="fetching_ip">
+        <ru>🌐 Определение внешнего IP...</ru>
+        <en>🌐 Fetching public IP...</en>
+    </string>
+    <string name="internet_address_label">
+        <ru>Интернет IP</ru>
+        <en>Internet IP</en>
+    </string>
     <string name="start_server_btn">
         <ru>Запустить сервер (IPv6 + IPv4)</ru>
         <en>Start Server (IPv6 + IPv4)</en>
@@ -408,6 +424,14 @@
     <string name="audio_sidetone_tip">
         <ru>Прямое воспроизведение вашего микрофона в динамики/наушники для проверки звука</ru>
         <en>Direct loopback of your microphone to speakers/headphones for audio test</en>
+    </string>
+    <string name="audio_downmix_toggle">
+        <ru>Объединять каналы в моно (VoIP / Стрим)</ru>
+        <en>Downmix channels to mono (VoIP / Stream)</en>
+    </string>
+    <string name="audio_downmix_tip">
+        <ru>Микширование стерео каналов (L+R)/2 в моно для оптимального сжатия Opus и максимальной экономии трафика</ru>
+        <en>Mix stereo channels (L+R)/2 into mono for optimal Opus compression and minimal bandwidth</en>
     </string>
     <string name="audio_input_device">
         <ru>Устройство захвата (Микрофон):</ru>

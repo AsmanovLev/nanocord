@@ -278,6 +278,52 @@ pub fn get_local_ip_hint() -> (String, String) {
     (ipv6_str, ipv4_str)
 }
 
+/// Определение реального публичного IP-адреса через прямой сетевой сокет в обход любых HTTP/HTTPS прокси
+pub fn fetch_real_public_ip() -> Option<String> {
+    use std::io::{Read, Write};
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::time::Duration;
+
+    // Список надёжных сервисов (обращение напрямую через сырой Winsock TCP сокет в обход системных прокси)
+    let services = [
+        ("api64.ipify.org", "api64.ipify.org:80", "/"),
+        ("api.ipify.org", "api.ipify.org:80", "/"),
+        ("icanhazip.com", "icanhazip.com:80", "/"),
+        ("ifconfig.me", "ifconfig.me:80", "/ip"),
+    ];
+
+    for (host_hdr, target_addr, path) in services {
+        if let Ok(mut addrs) = target_addr.to_socket_addrs() {
+            if let Some(addr) = addrs.next() {
+                if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(1800)) {
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(1800)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_millis(1800)));
+                    let req = format!(
+                        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: curl/7.88.1\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+                        path, host_hdr
+                    );
+                    if stream.write_all(req.as_bytes()).is_ok() {
+                        let mut resp = Vec::new();
+                        if stream.read_to_end(&mut resp).is_ok() {
+                            let text = String::from_utf8_lossy(&resp);
+                            if let Some(pos) = text.find("\r\n\r\n") {
+                                let body = text[pos + 4..].trim();
+                                if !body.is_empty() && (body.contains('.') || body.contains(':')) && body.len() <= 45 {
+                                    let clean_ip = body.lines().next().unwrap_or("").trim().to_string();
+                                    if !clean_ip.is_empty() {
+                                        return Some(clean_ip);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Чтение текста из системного буфера обмена Windows (user32.dll)
 pub fn get_clipboard_text() -> Option<String> {
     unsafe {
