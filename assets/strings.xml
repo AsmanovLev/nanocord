@@ -6,8 +6,8 @@
         <en>NANOCORD</en>
     </string>
     <string name="app_subtitle">
-        <ru>v0.1.0 • P2P Ultra-Low Latency</ru>
-        <en>v0.1.0 • P2P Ultra-Low Latency</en>
+        <ru>v0.2.0 • P2P Ultra-Low Latency • Opus VBR</ru>
+        <en>v0.2.0 • P2P Ultra-Low Latency • Opus VBR</en>
     </string>
     <string name="nav_lobby">
         <ru>Комната</ru>
