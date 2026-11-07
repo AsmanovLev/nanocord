@@ -7,12 +7,21 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use windows::core::{Interface, Result, GUID};
+use windows::core::{Interface, Result, GUID, Ref};
 use windows::Win32::Media::Audio::{
     eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IAudioRenderClient,
     IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
     AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
     DEVICE_STATE,
+    ActivateAudioInterfaceAsync,
+    IActivateAudioInterfaceAsyncOperation,
+    IActivateAudioInterfaceCompletionHandler,
+    IActivateAudioInterfaceCompletionHandler_Impl,
+    AUDIOCLIENT_ACTIVATION_PARAMS,
+    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+    AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
+    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL,
@@ -20,6 +29,85 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Variant::VARENUM;
 use opus_pure::{Application, OpusDecoder, OpusEncoder, RateControl};
+
+#[windows::core::implement(IActivateAudioInterfaceCompletionHandler)]
+struct ActivationHandler {
+    tx: std::sync::mpsc::Sender<windows::core::Result<IAudioClient>>,
+}
+
+impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationHandler_Impl {
+    fn ActivateCompleted(
+        &self,
+        operation: Ref<'_, IActivateAudioInterfaceAsyncOperation>,
+    ) -> windows::core::Result<()> {
+        let op = match operation.as_ref() {
+            Some(o) => o,
+            None => {
+                let _ = self.tx.send(Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259))));
+                return Ok(());
+            }
+        };
+
+        unsafe {
+            let mut activate_hr = windows::core::HRESULT(0);
+            let mut unk: Option<windows::core::IUnknown> = None;
+            let hr = op.GetActivateResult(&mut activate_hr, &mut unk);
+            if hr.is_err() {
+                let _ = self.tx.send(Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259))));
+                return Ok(());
+            }
+            if activate_hr.is_err() {
+                let _ = self.tx.send(Err(windows::core::Error::from_hresult(activate_hr)));
+                return Ok(());
+            }
+
+            if let Some(unk_client) = unk {
+                let client: windows::core::Result<IAudioClient> = unk_client.cast();
+                let _ = self.tx.send(client);
+            } else {
+                let _ = self.tx.send(Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259))));
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn create_process_loopback_audio_client(target_pid: u32) -> Result<IAudioClient> {
+    unsafe {
+        let loopback_params = AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+            TargetProcessId: target_pid,
+            ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+        };
+
+        let mut activation_params = AUDIOCLIENT_ACTIVATION_PARAMS {
+            ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+            Anonymous: std::mem::zeroed(),
+        };
+        activation_params.Anonymous.ProcessLoopbackParams = loopback_params;
+
+        let blob = windows::Win32::System::Com::BLOB {
+            cbSize: std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
+            pBlobData: &activation_params as *const _ as *mut u8,
+        };
+
+        let mut prop_var: windows::Win32::System::Com::StructuredStorage::PROPVARIANT = std::mem::zeroed();
+        let inner = std::ops::DerefMut::deref_mut(&mut prop_var.Anonymous.Anonymous);
+        inner.vt = windows::Win32::System::Variant::VT_BLOB;
+        inner.Anonymous.blob = blob;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handler: IActivateAudioInterfaceCompletionHandler = ActivationHandler { tx }.into();
+
+        let _async_op = ActivateAudioInterfaceAsync(
+            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+            &IAudioClient::IID,
+            Some(&prop_var as *const _),
+            &handler,
+        )?;
+
+        rx.recv().map_err(|_| windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)))?
+    }
+}
 
 pub const AUDIO_SPECTROGRAM_BINS: usize = 20;
 
@@ -101,10 +189,11 @@ impl NanocordOpusEncoder {
         self.pcm_buffer.extend_from_slice(samples);
         let frame_size = 960; // 20 ms при 48 000 Гц
 
-        // Защита от накопления задержки: если накопилось больше 100 мс (5 фреймов), сбрасываем старый хвост
-        if self.pcm_buffer.len() > frame_size * 5 {
-            let excess = self.pcm_buffer.len() - frame_size * 2;
-            self.pcm_buffer.drain(0..excess);
+        // Защита от накопления задержки: сбрасываем старый хвост только при аномальном накоплении более 500 мс (25 фреймов)
+        // и строго кратными порциями фреймов, сохраняя непрерывность фазы
+        if self.pcm_buffer.len() > frame_size * 25 {
+            let excess_frames = (self.pcm_buffer.len() - frame_size * 5) / frame_size;
+            self.pcm_buffer.drain(0..(excess_frames * frame_size));
         }
 
         let mut packets = Vec::new();
@@ -459,45 +548,108 @@ impl WasapiAudioPlayer {
     }
 }
 
+#[link(name = "winmm")]
+unsafe extern "system" {
+    fn timeBeginPeriod(uPeriod: u32) -> u32;
+    fn timeEndPeriod(uPeriod: u32) -> u32;
+}
+
+/// Высокоточный линейный ресемплер с сохранением фазы и предыдущего сэмпла
+/// между порциями данных (устраняет ступенчатые скачки фазы и высокочастотный хруст/треск)
+pub struct LinearResampler {
+    in_rate: usize,
+    out_rate: usize,
+    phase: f64,
+    last_sample: f32,
+}
+
+impl LinearResampler {
+    pub fn new(in_rate: usize, out_rate: usize) -> Self {
+        Self {
+            in_rate,
+            out_rate,
+            phase: 0.0,
+            last_sample: 0.0,
+        }
+    }
+
+    pub fn resample_i16_to_48k(&mut self, input: &[i16]) -> Vec<i16> {
+        if self.in_rate == 48000 || input.is_empty() {
+            return input.to_vec();
+        }
+        let ratio = self.in_rate as f64 / 48000.0;
+        let mut out = Vec::with_capacity((input.len() as f64 / ratio + 2.0) as usize);
+
+        let mut pos = self.phase;
+        while (pos.floor() as usize) < input.len() {
+            let idx0 = pos.floor() as usize;
+            let frac = (pos - idx0 as f64) as f32;
+            let s0 = if idx0 == 0 && self.phase < 0.0 {
+                self.last_sample
+            } else {
+                input[idx0] as f32
+            };
+            let s1 = if idx0 + 1 < input.len() {
+                input[idx0 + 1] as f32
+            } else {
+                s0
+            };
+            let interpolated = s0 + (s1 - s0) * frac;
+            out.push(interpolated.clamp(-32768.0, 32767.0) as i16);
+            pos += ratio;
+        }
+
+        self.phase = pos - input.len() as f64;
+        if let Some(&last) = input.last() {
+            self.last_sample = last as f32;
+        }
+        out
+    }
+
+    pub fn resample_48k_to_target(&mut self, input: &[i16]) -> Vec<f32> {
+        if self.out_rate == 48000 {
+            return input.iter().map(|&s| s as f32 / 32768.0).collect();
+        }
+        if input.is_empty() {
+            return Vec::new();
+        }
+        let ratio = 48000.0 / self.out_rate as f64;
+        let mut out = Vec::with_capacity((input.len() as f64 / ratio + 2.0) as usize);
+
+        let mut pos = self.phase;
+        while (pos.floor() as usize) < input.len() {
+            let idx0 = pos.floor() as usize;
+            let frac = (pos - idx0 as f64) as f32;
+            let s0 = if idx0 == 0 && self.phase < 0.0 {
+                self.last_sample
+            } else {
+                input[idx0] as f32 / 32768.0
+            };
+            let s1 = if idx0 + 1 < input.len() {
+                input[idx0 + 1] as f32 / 32768.0
+            } else {
+                s0
+            };
+            out.push(s0 + (s1 - s0) * frac);
+            pos += ratio;
+        }
+
+        self.phase = pos - input.len() as f64;
+        if let Some(&last) = input.last() {
+            self.last_sample = last as f32 / 32768.0;
+        }
+        out
+    }
+}
+
 fn resample_linear(input: &[i16], in_rate: usize, out_rate: usize) -> Vec<f32> {
-    if input.is_empty() {
-        return Vec::new();
-    }
-    if in_rate == out_rate {
-        return input.iter().map(|&s| s as f32 / 32768.0).collect();
-    }
-    let ratio = in_rate as f64 / out_rate as f64;
-    let out_len = (input.len() as f64 / ratio).round() as usize;
-    let mut out = Vec::with_capacity(out_len);
-    for i in 0..out_len {
-        let src_idx = i as f64 * ratio;
-        let idx0 = src_idx.floor() as usize;
-        let idx1 = (idx0 + 1).min(input.len() - 1);
-        let frac = (src_idx - idx0 as f64) as f32;
-        let s0 = input[idx0] as f32 / 32768.0;
-        let s1 = input[idx1] as f32 / 32768.0;
-        out.push(s0 + (s1 - s0) * frac);
-    }
-    out
+    let mut r = LinearResampler::new(in_rate, out_rate);
+    r.resample_48k_to_target(input)
 }
 
 fn resample_i16_to_48k(input: &[i16], in_rate: usize) -> Vec<i16> {
-    if in_rate == 48000 || input.is_empty() {
-        return input.to_vec();
-    }
-    let ratio = in_rate as f64 / 48000.0;
-    let out_len = (input.len() as f64 / ratio).round() as usize;
-    let mut out = Vec::with_capacity(out_len);
-    for i in 0..out_len {
-        let src_idx = i as f64 * ratio;
-        let idx0 = src_idx.floor() as usize;
-        let idx1 = (idx0 + 1).min(input.len() - 1);
-        let frac = (src_idx - idx0 as f64) as f32;
-        let s0 = input[idx0] as f32;
-        let s1 = input[idx1] as f32;
-        out.push((s0 + (s1 - s0) * frac).clamp(-32768.0, 32767.0) as i16);
-    }
-    out
+    let mut r = LinearResampler::new(in_rate, 48000);
+    r.resample_i16_to_48k(input)
 }
 
 fn run_wasapi_playback_loop(
@@ -506,6 +658,7 @@ fn run_wasapi_playback_loop(
     rx: Receiver<Vec<i16>>,
 ) -> Result<()> {
     unsafe {
+        let _ = timeBeginPeriod(1);
         let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
         let device: IMMDevice = if let Some(ref dev_id) = device_id {
             if dev_id != "default" && !dev_id.is_empty() {
@@ -542,27 +695,30 @@ fn run_wasapi_playback_loop(
         audio_client.Start()?;
 
         let mut sample_queue: VecDeque<f32> = VecDeque::with_capacity(48000);
-        let target_prebuffer = (sample_rate as f32 * 0.040) as usize; // 40ms подушка от джиттера (2 Opus фрейма)
-        let max_buffer = (sample_rate as f32 * 0.600) as usize; // 600ms адаптивный предел для джиттера в сетях с задержками до 1500мс
+        let target_prebuffer = (sample_rate as f32 * 0.030) as usize; // 30ms стартовая подушка
+        let max_buffer = (sample_rate as f32 * 0.600) as usize; // 600ms
         let mut is_prebuffering = true;
         let mut last_sample = 0.0f32;
+        let mut resampler = LinearResampler::new(48000, sample_rate);
+        let mut consecutive_empty = 0usize;
+        let empty_freeze_threshold = (sample_rate as f32 * 0.150) as usize; // 150ms тишины перед возвратом в prebuffering
 
         while is_running.load(Ordering::Relaxed) {
             while let Ok(chunk) = rx.try_recv() {
-                let resampled = resample_linear(&chunk, 48000, sample_rate);
+                let resampled = resampler.resample_48k_to_target(&chunk);
                 for s in resampled {
                     sample_queue.push_back(s);
                 }
             }
 
             if sample_queue.len() > max_buffer {
-                // Плавное выравнивание по 20мс за цикл вместо резкого среза (предотвращает щелчки)
                 let step = (sample_rate as f32 * 0.020) as usize;
                 sample_queue.drain(0..step.min(sample_queue.len().saturating_sub(target_prebuffer)));
             }
 
             if is_prebuffering && sample_queue.len() >= target_prebuffer {
                 is_prebuffering = false;
+                consecutive_empty = 0;
             }
 
             let padding = audio_client.GetCurrentPadding()?;
@@ -577,14 +733,18 @@ fn run_wasapi_playback_loop(
                                 let sample = if !is_prebuffering {
                                     if let Some(s) = sample_queue.pop_front() {
                                         last_sample = s;
+                                        consecutive_empty = 0;
                                         s
                                     } else {
-                                        is_prebuffering = true;
-                                        last_sample *= 0.92; // Мягкое экспоненциальное затухание (предотвращает клики)
+                                        consecutive_empty += 1;
+                                        if consecutive_empty > empty_freeze_threshold {
+                                            is_prebuffering = true;
+                                        }
+                                        last_sample *= 0.96; // Мягкая экстраполяция без блокировки на 40мс
                                         last_sample
                                     }
                                 } else {
-                                    last_sample *= 0.92;
+                                    last_sample *= 0.96;
                                     last_sample
                                 };
                                 for c in 0..channels {
@@ -597,14 +757,18 @@ fn run_wasapi_playback_loop(
                                 let sample = if !is_prebuffering {
                                     if let Some(s) = sample_queue.pop_front() {
                                         last_sample = s;
+                                        consecutive_empty = 0;
                                         (s.clamp(-1.0, 1.0) * 32767.0) as i16
                                     } else {
-                                        is_prebuffering = true;
-                                        last_sample *= 0.92;
+                                        consecutive_empty += 1;
+                                        if consecutive_empty > empty_freeze_threshold {
+                                            is_prebuffering = true;
+                                        }
+                                        last_sample *= 0.96;
                                         (last_sample.clamp(-1.0, 1.0) * 32767.0) as i16
                                     }
                                 } else {
-                                    last_sample *= 0.92;
+                                    last_sample *= 0.96;
                                     (last_sample.clamp(-1.0, 1.0) * 32767.0) as i16
                                 };
                                 for c in 0..channels {
@@ -619,6 +783,9 @@ fn run_wasapi_playback_loop(
 
             thread::sleep(Duration::from_millis(5));
         }
+        let _ = audio_client.Stop();
+        let _ = timeEndPeriod(1);
+        let _ = timeEndPeriod(1);
     }
     Ok(())
 }
@@ -672,36 +839,45 @@ fn run_wasapi_capture_loop(
     tx: &SyncSender<AudioSpectrumPacket>,
 ) -> Result<()> {
     unsafe {
+        let _ = timeBeginPeriod(1);
         let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
 
-        let data_flow = if is_loopback { eRender } else { eCapture };
-        let device: IMMDevice = if let Some(ref dev_id) = device_id {
-            if dev_id != "default" && !dev_id.is_empty() {
-                let id_wide: Vec<u16> = dev_id.encode_utf16().chain(std::iter::once(0)).collect();
-                match enumerator.GetDevice(windows::core::PCWSTR(id_wide.as_ptr())) {
-                    Ok(d) => d,
-                    Err(_) => enumerator.GetDefaultAudioEndpoint(data_flow, eConsole)?,
+        // Для системного звука (Loopback) активируем Process Loopback с исключением процесса nanocord.exe,
+        // чтобы воспроизводимый голос собеседника и собственные звуки приложения не зацикливались
+        let (audio_client, stream_flags) = if is_loopback && (device_id.is_none() || device_id.as_deref() == Some("default")) {
+            match create_process_loopback_audio_client(std::process::id()) {
+                Ok(client) => (client, AUDCLNT_STREAMFLAGS_LOOPBACK),
+                Err(_) => {
+                    let device: IMMDevice = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
+                    let client = device.Activate::<IAudioClient>(CLSCTX_ALL, None)?;
+                    (client, AUDCLNT_STREAMFLAGS_LOOPBACK)
+                }
+            }
+        } else {
+            let data_flow = if is_loopback { eRender } else { eCapture };
+            let device: IMMDevice = if let Some(ref dev_id) = device_id {
+                if dev_id != "default" && !dev_id.is_empty() {
+                    let id_wide: Vec<u16> = dev_id.encode_utf16().chain(std::iter::once(0)).collect();
+                    match enumerator.GetDevice(windows::core::PCWSTR(id_wide.as_ptr())) {
+                        Ok(d) => d,
+                        Err(_) => enumerator.GetDefaultAudioEndpoint(data_flow, eConsole)?,
+                    }
+                } else {
+                    enumerator.GetDefaultAudioEndpoint(data_flow, eConsole)?
                 }
             } else {
                 enumerator.GetDefaultAudioEndpoint(data_flow, eConsole)?
-            }
-        } else {
-            enumerator.GetDefaultAudioEndpoint(data_flow, eConsole)?
+            };
+            let client = device.Activate::<IAudioClient>(CLSCTX_ALL, None)?;
+            (client, if is_loopback { AUDCLNT_STREAMFLAGS_LOOPBACK } else { 0 })
         };
 
-        let audio_client: IAudioClient = device.Activate::<IAudioClient>(CLSCTX_ALL, None)?;
         let mix_format_ptr = audio_client.GetMixFormat()?;
         let pwfx = &*mix_format_ptr;
 
         let sample_rate = pwfx.nSamplesPerSec as f32;
         let channels = pwfx.nChannels as usize;
         let bits_per_sample = pwfx.wBitsPerSample as usize;
-
-        let stream_flags = if is_loopback {
-            AUDCLNT_STREAMFLAGS_LOOPBACK
-        } else {
-            0
-        };
 
         // Буфер на 100 мс (1_000_000 * 100 нс)
         audio_client.Initialize(
@@ -719,6 +895,9 @@ fn run_wasapi_capture_loop(
         // Накопительный буфер для спектрального анализа (~1024 семплов)
         let mut sample_ring: Vec<f32> = Vec::with_capacity(2048);
 
+        // Высокоточный ресемплер с сохранением фазы между тиками таймера
+        let mut resampler = LinearResampler::new(sample_rate as usize, 48000);
+
         // Частотные центры 20 полос (от 60 Гц до 16 кГц по логарифмической шкале)
         let mut center_freqs = [0.0f32; AUDIO_SPECTROGRAM_BINS];
         let f_min = 60.0f32;
@@ -728,7 +907,7 @@ fn run_wasapi_capture_loop(
         }
 
         while is_running.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(20)); // Ровно 50 тиков в секунду (для 10с буфера из 500 семплов)
+            thread::sleep(Duration::from_millis(10)); // 10 мс для предотвращения переполнения буфера WASAPI
 
             let mut pcm_captured: Vec<i16> = Vec::new();
             let mut next_packet_size = capture_client.GetNextPacketSize()?;
@@ -784,11 +963,7 @@ fn run_wasapi_capture_loop(
                 next_packet_size = capture_client.GetNextPacketSize()?;
             }
 
-            let pcm_48k = if (sample_rate - 48000.0).abs() > 100.0 && !pcm_captured.is_empty() {
-                resample_i16_to_48k(&pcm_captured, sample_rate as usize)
-            } else {
-                pcm_captured
-            };
+            let pcm_48k = resampler.resample_i16_to_48k(&pcm_captured);
 
             let had_new_samples = !pcm_48k.is_empty();
             if !had_new_samples {
@@ -854,6 +1029,7 @@ fn run_wasapi_capture_loop(
             let _ = tx.try_send(packet);
         }
         let _ = audio_client.Stop();
+        let _ = timeEndPeriod(1);
     }
     Ok(())
 }

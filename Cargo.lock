@@ -1718,6 +1718,7 @@ dependencies = [
  "nokhwa",
  "opus-pure",
  "windows",
+ "windows-core",
  "winit",
 ]
 
