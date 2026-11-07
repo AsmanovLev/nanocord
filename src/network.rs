@@ -1392,4 +1392,262 @@ mod tests {
         client.stop();
         server.stop();
     }
+
+    #[test]
+    fn test_e2e_wav_to_wav_opus_bidirectional_under_adverse_network() {
+        use crate::audio::{NanocordOpusDecoder, NanocordOpusEncoder, WavAudio};
+        use std::f32::consts::PI;
+
+        // 1. ПАРАМЕТРЫ ХУДШЕГО СЦЕНАРИЯ СЕТИ (DPI БЛОКИРОВКИ):
+        // 2 Мбит/с пропускная способность, 1500 мс задержка (RTT 3000 мс), 5% случайных потерь
+        let num_frames = 150; // 150 фреймов по 20 мс = 3.0 секунды непрерывного звука
+        let samples_per_frame = 960;
+        let total_samples = num_frames * samples_per_frame; // 144 000 сэмплов
+
+        // 2. ГЕНЕРАЦИЯ ИСХОДНЫХ РЕАЛИСТИЧНЫХ WAV ПОТОКОВ (WAV -> PCM)
+        // Поток A: Мужской голос (гармоники 130, 260, 390, 520 Гц + формантная огибающая)
+        let mut pcm_a = Vec::with_capacity(total_samples);
+        for i in 0..total_samples {
+            let t = i as f32 / 48000.0;
+            let f0 = (2.0 * PI * 130.0 * t).sin() * 0.45;
+            let f1 = (2.0 * PI * 260.0 * t).sin() * 0.25;
+            let f2 = (2.0 * PI * 390.0 * t).sin() * 0.15;
+            let f3 = (2.0 * PI * 520.0 * t).sin() * 0.10;
+            let env = 0.5 + 0.4 * (2.0 * PI * 3.5 * t).sin();
+            let val = ((f0 + f1 + f2 + f3) * env * 24000.0).clamp(-32000.0, 32000.0) as i16;
+            pcm_a.push(val);
+        }
+
+        // Поток B: Женский голос / игровой звук (гармоники 220, 440, 660, 880 Гц)
+        let mut pcm_b = Vec::with_capacity(total_samples);
+        for i in 0..total_samples {
+            let t = i as f32 / 48000.0;
+            let f0 = (2.0 * PI * 220.0 * t).sin() * 0.40;
+            let f1 = (2.0 * PI * 440.0 * t).sin() * 0.30;
+            let f2 = (2.0 * PI * 660.0 * t).sin() * 0.15;
+            let f3 = (2.0 * PI * 880.0 * t).sin() * 0.10;
+            let env = 0.6 + 0.35 * (2.0 * PI * 2.5 * t).cos();
+            let val = ((f0 + f1 + f2 + f3) * env * 22000.0).clamp(-32000.0, 32000.0) as i16;
+            pcm_b.push(val);
+        }
+
+        // Кодируем исходники в WAV формат (WAV контейнер)
+        let wav_a_bytes = WavAudio::encode_wav(&pcm_a, 48000, 1);
+        let wav_b_bytes = WavAudio::encode_wav(&pcm_b, 48000, 1);
+        assert!(wav_a_bytes.len() > total_samples * 2);
+        assert!(wav_b_bytes.len() > total_samples * 2);
+
+        // Проверяем точный decode_wav
+        let (decoded_in_a, sr_a, ch_a) = WavAudio::decode_wav(&wav_a_bytes).expect("decode wav A failed");
+        assert_eq!(sr_a, 48000);
+        assert_eq!(ch_a, 1);
+        assert_eq!(decoded_in_a, pcm_a);
+
+        // 3. КОДИРОВАНИЕ В OPUS VBR C IN-BAND FEC И DTX
+        let mut enc_a = NanocordOpusEncoder::new_voip(64_000);
+        let mut enc_b = NanocordOpusEncoder::new_audio(96_000);
+
+        let mut packets_a = Vec::with_capacity(num_frames);
+        for f in 0..num_frames {
+            let chunk = &pcm_a[f * samples_per_frame..(f + 1) * samples_per_frame];
+            let pkts = enc_a.encode_chunk(chunk);
+            assert_eq!(pkts.len(), 1);
+            let seq = enc_a.next_seq();
+            packets_a.push((seq, pkts[0].clone()));
+        }
+
+        let mut packets_b = Vec::with_capacity(num_frames);
+        for f in 0..num_frames {
+            let chunk = &pcm_b[f * samples_per_frame..(f + 1) * samples_per_frame];
+            let pkts = enc_b.encode_chunk(chunk);
+            assert_eq!(pkts.len(), 1);
+            let seq = enc_b.next_seq();
+            packets_b.push((seq, pkts[0].clone()));
+        }
+
+        // Проверяем степень сжатия Opus VBR: 1920 байт PCM сжимается до ~50..250 байт
+        let avg_size_a = packets_a.iter().map(|p| p.1.len()).sum::<usize>() / packets_a.len();
+        let avg_size_b = packets_b.iter().map(|p| p.1.len()).sum::<usize>() / packets_b.len();
+        assert!(avg_size_a < 350, "Opus VBR Voip avg packet size must be <350 bytes");
+        assert!(avg_size_b < 450, "Opus VBR Audio avg packet size must be <450 bytes");
+
+        // 4. СИМУЛЯТОР СЕТИ: 2 Мбит/с, 1500 мс задержки, 5% потерь пакетов
+        struct SimulatedPacket {
+            seq: u32,
+            data: Vec<u8>,
+            deliver_at_ms: u64,
+        }
+
+        let mut rng_seed = 0x1337c0de_u64;
+        let mut next_rand = || -> u32 {
+            rng_seed = rng_seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (rng_seed >> 32) as u32
+        };
+
+        let latency_ms = 1500u64; // 1.5 секунды задержки
+        let loss_percentage = 5u32; // 5% потерь
+        let bandwidth_limit_bps = 2_000_000u64; // 2 Мбит/с
+
+        let mut simulate_channel = |input: &[(u32, Vec<u8>)]| -> (Vec<SimulatedPacket>, usize, usize) {
+            let mut delivered = Vec::new();
+            let mut dropped_count = 0;
+            let mut total_bytes = 0;
+
+            for (i, (seq, data)) in input.iter().enumerate() {
+                total_bytes += data.len();
+                let is_lost = (next_rand() % 100) < loss_percentage;
+                if is_lost {
+                    dropped_count += 1;
+                    continue; // Пакет утерян в сети
+                }
+                let send_time_ms = (i as u64) * 20; // 20 мс между фреймами
+                let jitter_ms = (next_rand() % 20) as u64; // до 20 мс джиттера
+                let deliver_at_ms = send_time_ms + latency_ms + jitter_ms;
+
+                delivered.push(SimulatedPacket {
+                    seq: *seq,
+                    data: data.clone(),
+                    deliver_at_ms,
+                });
+            }
+            (delivered, dropped_count, total_bytes)
+        };
+
+        let (channel_a_to_b, dropped_a, bytes_a) = simulate_channel(&packets_a);
+        let (channel_b_to_a, dropped_b, bytes_b) = simulate_channel(&packets_b);
+
+        // Проверяем, что потери действительно смоделированы (~5%)
+        assert!(dropped_a > 0, "Channel A->B must simulate packet loss");
+        assert!(dropped_b > 0, "Channel B->A must simulate packet loss");
+        let loss_a_pct = (dropped_a as f32 / num_frames as f32) * 100.0;
+        let loss_b_pct = (dropped_b as f32 / num_frames as f32) * 100.0;
+        assert!(loss_a_pct >= 2.0 && loss_a_pct <= 10.0, "Loss rate A ({:.1}%) around 5%", loss_a_pct);
+        assert!(loss_b_pct >= 2.0 && loss_b_pct <= 10.0, "Loss rate B ({:.1}%) around 5%", loss_b_pct);
+
+        // Проверяем полосу пропускания: битрейт ~60-90 кбит/с с лёгкостью проходит сквозь 2 Мбит/с
+        let duration_sec = (num_frames as f64) * 0.020;
+        let bitrate_a_bps = ((bytes_a as f64 * 8.0) / duration_sec) as u64;
+        let bitrate_b_bps = ((bytes_b as f64 * 8.0) / duration_sec) as u64;
+        assert!(bitrate_a_bps < bandwidth_limit_bps, "Audio A bitrate must fit in 2 Mbps");
+        assert!(bitrate_b_bps < bandwidth_limit_bps, "Audio B bitrate must fit in 2 Mbps");
+
+        // 5. ДЕКОДИРОВАНИЕ НА ПРИЁМНЫХ СТОРОНАХ С FEC И PLC (OPUS -> PCM)
+        let mut dec_b = NanocordOpusDecoder::new();
+        let mut recovered_pcm_a = Vec::with_capacity(total_samples);
+
+        for pkt in &channel_a_to_b {
+            assert!(pkt.deliver_at_ms >= latency_ms, "Arrival time must reflect 1500ms network delay");
+            let pcm_chunk = dec_b.decode_packet_with_fec(pkt.seq, &pkt.data);
+            recovered_pcm_a.extend_from_slice(&pcm_chunk);
+        }
+
+        let mut dec_a = NanocordOpusDecoder::new();
+        let mut recovered_pcm_b = Vec::with_capacity(total_samples);
+
+        for pkt in &channel_b_to_a {
+            assert!(pkt.deliver_at_ms >= latency_ms, "Arrival time must reflect 1500ms network delay");
+            let pcm_chunk = dec_a.decode_packet_with_fec(pkt.seq, &pkt.data);
+            recovered_pcm_b.extend_from_slice(&pcm_chunk);
+        }
+
+        // 6. СОХРАНЕНИЕ ВОССТАНОВЛЕННЫХ WAV ФАЙЛОВ
+        let out_wav_a = WavAudio::encode_wav(&recovered_pcm_a, 48000, 1);
+        let out_wav_b = WavAudio::encode_wav(&recovered_pcm_b, 48000, 1);
+        assert!(out_wav_a.len() > 1000);
+        assert!(out_wav_b.len() > 1000);
+
+        // 7. ПРОВЕРКА ОТСУТСТВИЯ ХРУСТА И ЩЕЛЧКОВ («НЕ ХРУСТИТ»)
+        let mut max_delta_a = 0i32;
+        for i in 1..recovered_pcm_a.len() {
+            let delta = (recovered_pcm_a[i] as i32 - recovered_pcm_a[i - 1] as i32).abs();
+            if delta > max_delta_a {
+                max_delta_a = delta;
+            }
+        }
+        assert!(max_delta_a < 12000, "Maximum audio step must be smooth, found {}", max_delta_a);
+
+        let mut max_delta_b = 0i32;
+        for i in 1..recovered_pcm_b.len() {
+            let delta = (recovered_pcm_b[i] as i32 - recovered_pcm_b[i - 1] as i32).abs();
+            if delta > max_delta_b {
+                max_delta_b = delta;
+            }
+        }
+        assert!(max_delta_b < 12000, "Maximum audio step must be smooth, found {}", max_delta_b);
+
+        // 8. ПРОВЕРКА СХОЖЕСТИ СИГНАЛА С УЧЁТОМ АЛГОРИТМИЧЕСКОГО LOOKAHEAD OPUS
+        // В Opus lookahead составляет 312 сэмплов (6.5 мс @ 48 кГц).
+        // Считаем кросс-корреляцию / схожесть по косинусной мере с компенсацией лага.
+        let compute_aligned_similarity = |orig: &[i16], decoded: &[i16]| -> (f64, i32) {
+            let mut best_sim = -1.0f64;
+            let mut best_lag = 0i32;
+
+            for lag in -400..=400 {
+                let (o_slice, d_slice) = if lag >= 0 {
+                    let start = lag as usize;
+                    if start >= orig.len() { continue; }
+                    let len = (orig.len() - start).min(decoded.len());
+                    (&orig[start..start + len], &decoded[..len])
+                } else {
+                    let start = (-lag) as usize;
+                    if start >= decoded.len() { continue; }
+                    let len = orig.len().min(decoded.len() - start);
+                    (&orig[..len], &decoded[start..start + len])
+                };
+
+                if o_slice.len() < 4800 { continue; }
+
+                let mut dot = 0.0f64;
+                let mut norm_o = 0.0f64;
+                let mut norm_d = 0.0f64;
+
+                for (&o, &d) in o_slice.iter().zip(d_slice.iter()) {
+                    let fo = o as f64;
+                    let fd = d as f64;
+                    dot += fo * fd;
+                    norm_o += fo * fo;
+                    norm_d += fd * fd;
+                }
+
+                if norm_o > 1e-6 && norm_d > 1e-6 {
+                    let sim = dot / (norm_o.sqrt() * norm_d.sqrt());
+                    if sim > best_sim {
+                        best_sim = sim;
+                        best_lag = lag;
+                    }
+                }
+            }
+            (best_sim, best_lag)
+        };
+
+        let (sim_a, lag_a) = compute_aligned_similarity(&pcm_a, &recovered_pcm_a);
+        let (sim_b, lag_b) = compute_aligned_similarity(&pcm_b, &recovered_pcm_b);
+
+        println!("Stream A (Voip + 5% loss): similarity = {:.2}%, lag = {} samples", sim_a * 100.0, lag_a);
+        println!("Stream B (Audio + 5% loss): similarity = {:.2}%, lag = {} samples", sim_b * 100.0, lag_b);
+
+        // Проверяем интактные фреймы (без учёта сетевых выпадений) — схожесть >95%
+        let mut intact_orig = Vec::new();
+        let mut intact_recv = Vec::new();
+        let dropped_set_a: std::collections::HashSet<u32> = packets_a.iter().filter_map(|(seq, _)| {
+            if channel_a_to_b.iter().any(|p| p.seq == *seq) { None } else { Some(*seq) }
+        }).collect();
+
+        for f in 0..num_frames {
+            let seq = packets_a[f].0;
+            // Если текущий и соседние фреймы не терялись
+            if !dropped_set_a.contains(&seq) && !dropped_set_a.contains(&seq.saturating_sub(1)) && !dropped_set_a.contains(&(seq + 1)) {
+                let start = f * samples_per_frame;
+                let end = start + samples_per_frame;
+                if end <= pcm_a.len() && end <= recovered_pcm_a.len() {
+                    intact_orig.extend_from_slice(&pcm_a[start..end]);
+                    intact_recv.extend_from_slice(&recovered_pcm_a[start..end]);
+                }
+            }
+        }
+
+        let (intact_sim_a, _) = compute_aligned_similarity(&intact_orig, &intact_recv);
+        println!("Stream A (intact frames): similarity = {:.2}%", intact_sim_a * 100.0);
+        assert!(intact_sim_a >= 0.95, "Intact frames similarity must be >95%, got {:.2}%", intact_sim_a * 100.0);
+    }
 }

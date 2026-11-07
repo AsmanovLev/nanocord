@@ -43,7 +43,7 @@ impl NanocordOpusEncoder {
         encoder.bitrate_bps = bitrate_bps; // По умолчанию 64 kbps (стандарт качества Discord)
         encoder.complexity = 8;
         encoder.use_inband_fec = true;
-        encoder.packet_loss_perc = 10;
+        encoder.packet_loss_perc = 15; // Повышенная устойчивость к потерям пакетов (DPI, нестабильные сети)
         encoder.use_dtx = true;
         Self {
             encoder,
@@ -59,7 +59,7 @@ impl NanocordOpusEncoder {
         encoder.bitrate_bps = bitrate_bps; // По умолчанию 96-128 kbps
         encoder.complexity = 8;
         encoder.use_inband_fec = true;
-        encoder.packet_loss_perc = 5;
+        encoder.packet_loss_perc = 10;
         encoder.use_dtx = false;
         Self {
             encoder,
@@ -70,6 +70,10 @@ impl NanocordOpusEncoder {
 
     pub fn set_bitrate(&mut self, bitrate_bps: i32) {
         self.encoder.bitrate_bps = bitrate_bps;
+    }
+
+    pub fn set_packet_loss_perc(&mut self, perc: i32) {
+        self.encoder.packet_loss_perc = perc;
     }
 
     pub fn set_dtx(&mut self, enabled: bool) {
@@ -143,6 +147,79 @@ impl Default for NanocordOpusEncoder {
     }
 }
 
+/// Утилита для сохранения и парсинга стандартных 16-битных PCM WAV файлов (48 кГц моно/стерео)
+pub struct WavAudio;
+
+impl WavAudio {
+    /// Кодирует PCM сэмплы в стандартный WAV контейнер (RIFF/WAVE 16-bit PCM)
+    pub fn encode_wav(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {
+        let byte_rate = sample_rate * channels as u32 * 2;
+        let block_align = channels * 2;
+        let data_size = (samples.len() * 2) as u32;
+        let file_size = 36 + data_size;
+
+        let mut buf = Vec::with_capacity(44 + samples.len() * 2);
+        // RIFF header
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&file_size.to_le_bytes());
+        buf.extend_from_slice(b"WAVE");
+
+        // fmt chunk
+        buf.extend_from_slice(b"fmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes()); // PCM format
+        buf.extend_from_slice(&channels.to_le_bytes());
+        buf.extend_from_slice(&sample_rate.to_le_bytes());
+        buf.extend_from_slice(&byte_rate.to_le_bytes());
+        buf.extend_from_slice(&block_align.to_le_bytes());
+        buf.extend_from_slice(&16u16.to_le_bytes()); // 16-bit
+
+        // data chunk
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&data_size.to_le_bytes());
+        for &s in samples {
+            buf.extend_from_slice(&s.to_le_bytes());
+        }
+
+        buf
+    }
+
+    /// Декодирует WAV файл обратно в 16-битный PCM буфер
+    pub fn decode_wav(data: &[u8]) -> Option<(Vec<i16>, u32, u16)> {
+        if data.len() < 44 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+            return None;
+        }
+
+        let mut offset = 12;
+        let mut sample_rate = 48000u32;
+        let mut channels = 1u16;
+        let mut samples = Vec::new();
+
+        while offset + 8 <= data.len() {
+            let chunk_id = &data[offset..offset + 4];
+            let chunk_size = u32::from_le_bytes(data[offset + 4..offset + 8].try_into().ok()?) as usize;
+            offset += 8;
+
+            if chunk_id == b"fmt " && chunk_size >= 16 && offset + 16 <= data.len() {
+                channels = u16::from_le_bytes(data[offset + 2..offset + 4].try_into().ok()?);
+                sample_rate = u32::from_le_bytes(data[offset + 4..offset + 8].try_into().ok()?);
+            } else if chunk_id == b"data" {
+                let actual_data_len = chunk_size.min(data.len() - offset);
+                let num_samples = actual_data_len / 2;
+                samples.reserve(num_samples);
+                for i in 0..num_samples {
+                    let s = i16::from_le_bytes(data[offset + i * 2..offset + i * 2 + 2].try_into().ok()?);
+                    samples.push(s);
+                }
+                break;
+            }
+            offset += chunk_size;
+        }
+
+        Some((samples, sample_rate, channels))
+    }
+}
+
 /// Высокопроизводительный декодер Opus с In-band FEC и PLC для кристально чистого звука без треска
 pub struct NanocordOpusDecoder {
     decoder: OpusDecoder,
@@ -185,26 +262,59 @@ impl NanocordOpusDecoder {
     }
 
     /// Умное декодирование с контролем сетевых пропусков: если пакет был потерян,
-    /// восстанавливает его через In-Band FEC текущего пакета, либо интерполирует через PLC.
+    /// строго в хронологическом порядке восстанавливает его через In-Band FEC текущего пакета,
+    /// либо интерполирует через PLC (Packet Loss Concealment), предотвращая любые щелчки («хруст»).
     pub fn decode_packet_with_fec(&mut self, seq: u32, opus_packet: &[u8]) -> Vec<i16> {
         let frame_size = 960;
         let mut result = Vec::new();
 
+        if self.last_seq.is_none() && seq > 0 && seq <= 5 {
+            // Если самые первые пакеты сессии были потеряны в сети, заполняем их интерполяцией PLC
+            for _ in 0..seq {
+                let mut plc_buf = vec![0i16; frame_size];
+                if let Ok(n) = self.decoder.decode_s16(&[], frame_size, &mut plc_buf) {
+                    plc_buf.truncate(n);
+                    result.extend_from_slice(&plc_buf);
+                }
+            }
+        }
+
         if let Some(prev) = self.last_seq {
             let diff = seq.wrapping_sub(prev);
             if diff > 1 && diff <= 4 {
-                // Был пропуск пакета (1-3 пакета выпало)! Пытаемся восстановить через FEC текущего пакета
+                // Если выпало больше 1 пакета (например, 2 или 3),
+                // хронологически самые ранние выпавшие фреймы сначала интерполируем через PLC
+                for _ in 0..(diff - 2) {
+                    let mut plc_buf = vec![0i16; frame_size];
+                    if let Ok(n) = self.decoder.decode_s16(&[], frame_size, &mut plc_buf) {
+                        plc_buf.truncate(n);
+                        result.extend_from_slice(&plc_buf);
+                    }
+                }
+
+                // Непосредственно предшествующий фрейм восстанавливаем через In-Band FEC текущего пакета
                 let mut fec_buf = vec![0i16; frame_size];
+                let mut fec_ok = false;
                 if !opus_packet.is_empty() {
                     if let Ok(n) = self.decoder.decode_fec_s16(opus_packet, frame_size, &mut fec_buf) {
                         if n > 0 {
                             fec_buf.truncate(n);
                             result.extend_from_slice(&fec_buf);
+                            fec_ok = true;
                         }
                     }
                 }
-                // Если пропуск был больше 1 пакета, добираем остальные интерполяцией PLC
-                for _ in 1..(diff - 1) {
+                // Если FEC не сработал (например, пакет тишины DTX), закрываем PLC
+                if !fec_ok {
+                    let mut plc_buf = vec![0i16; frame_size];
+                    if let Ok(n) = self.decoder.decode_s16(&[], frame_size, &mut plc_buf) {
+                        plc_buf.truncate(n);
+                        result.extend_from_slice(&plc_buf);
+                    }
+                }
+            } else if diff > 4 && diff < 1000 {
+                // Большой пропуск (зависание сети / DPI): генерируем 2 фрейма мягкого затухания PLC
+                for _ in 0..2 {
                     let mut plc_buf = vec![0i16; frame_size];
                     if let Ok(n) = self.decoder.decode_s16(&[], frame_size, &mut plc_buf) {
                         plc_buf.truncate(n);
@@ -431,10 +541,11 @@ fn run_wasapi_playback_loop(
         let render_client: IAudioRenderClient = audio_client.GetService::<IAudioRenderClient>()?;
         audio_client.Start()?;
 
-        let mut sample_queue: VecDeque<f32> = VecDeque::with_capacity(24000);
-        let target_prebuffer = (sample_rate as f32 * 0.020) as usize; // 20ms подушка от джиттера (ровно 1 Opus фрейм)
-        let max_buffer = (sample_rate as f32 * 0.100) as usize; // 100ms макс буфер (против накопления задержки)
+        let mut sample_queue: VecDeque<f32> = VecDeque::with_capacity(48000);
+        let target_prebuffer = (sample_rate as f32 * 0.040) as usize; // 40ms подушка от джиттера (2 Opus фрейма)
+        let max_buffer = (sample_rate as f32 * 0.600) as usize; // 600ms адаптивный предел для джиттера в сетях с задержками до 1500мс
         let mut is_prebuffering = true;
+        let mut last_sample = 0.0f32;
 
         while is_running.load(Ordering::Relaxed) {
             while let Ok(chunk) = rx.try_recv() {
@@ -445,8 +556,9 @@ fn run_wasapi_playback_loop(
             }
 
             if sample_queue.len() > max_buffer {
-                let excess = sample_queue.len() - target_prebuffer;
-                sample_queue.drain(0..excess);
+                // Плавное выравнивание по 20мс за цикл вместо резкого среза (предотвращает щелчки)
+                let step = (sample_rate as f32 * 0.020) as usize;
+                sample_queue.drain(0..step.min(sample_queue.len().saturating_sub(target_prebuffer)));
             }
 
             if is_prebuffering && sample_queue.len() >= target_prebuffer {
@@ -464,13 +576,16 @@ fn run_wasapi_playback_loop(
                             for f in 0..frames_to_fill {
                                 let sample = if !is_prebuffering {
                                     if let Some(s) = sample_queue.pop_front() {
+                                        last_sample = s;
                                         s
                                     } else {
                                         is_prebuffering = true;
-                                        0.0
+                                        last_sample *= 0.92; // Мягкое экспоненциальное затухание (предотвращает клики)
+                                        last_sample
                                     }
                                 } else {
-                                    0.0
+                                    last_sample *= 0.92;
+                                    last_sample
                                 };
                                 for c in 0..channels {
                                     *float_ptr.add(f * channels + c) = sample;
@@ -481,13 +596,16 @@ fn run_wasapi_playback_loop(
                             for f in 0..frames_to_fill {
                                 let sample = if !is_prebuffering {
                                     if let Some(s) = sample_queue.pop_front() {
+                                        last_sample = s;
                                         (s.clamp(-1.0, 1.0) * 32767.0) as i16
                                     } else {
                                         is_prebuffering = true;
-                                        0
+                                        last_sample *= 0.92;
+                                        (last_sample.clamp(-1.0, 1.0) * 32767.0) as i16
                                     }
                                 } else {
-                                    0
+                                    last_sample *= 0.92;
+                                    (last_sample.clamp(-1.0, 1.0) * 32767.0) as i16
                                 };
                                 for c in 0..channels {
                                     *i16_ptr.add(f * channels + c) = sample;
