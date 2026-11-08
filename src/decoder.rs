@@ -1,7 +1,7 @@
 #![allow(dead_code, unused_variables, unused_imports)]
 
 use std::ptr::null_mut;
-use windows::core::{Result, GUID};
+use windows::core::{Interface, Result, GUID};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::Media::MediaFoundation::*;
 
@@ -132,36 +132,53 @@ impl HevcDecoder {
             out_buffer_desc.pSample = std::mem::ManuallyDrop::new(Some(out_sample));
 
             let mut status = 0u32;
+            let mut res_frame = None;
+
             match self.transform.ProcessOutput(0, std::slice::from_mut(&mut out_buffer_desc), &mut status) {
                 Ok(_) => {
                     if let Some(ref sample_res) = out_buffer_desc.pSample.as_ref() {
-                        let media_buf = sample_res.ConvertToContiguousBuffer()?;
-                        let mut p_nv12: *mut u8 = null_mut();
-                        let mut len = 0u32;
-                        media_buf.Lock(&mut p_nv12, None, Some(&mut len))?;
-
-                        let nv12_slice = std::slice::from_raw_parts(p_nv12, len as usize);
-                        nv12_to_rgba(width as usize, height as usize, nv12_slice, &mut self.rgba_buffer);
-                        media_buf.Unlock()?;
-
-                        return Ok(Some((width, height, self.rgba_buffer.clone())));
+                        if let Ok(media_buf) = sample_res.ConvertToContiguousBuffer() {
+                            let buf2d_res: Result<IMF2DBuffer> = media_buf.cast();
+                            if let Ok(buf2d) = buf2d_res {
+                                let mut packed_nv12 = vec![0u8; (width * height * 3 / 2) as usize];
+                                if buf2d.ContiguousCopyTo(&mut packed_nv12).is_ok() {
+                                    nv12_to_rgba(width as usize, height as usize, &packed_nv12, &mut self.rgba_buffer);
+                                    res_frame = Some((width, height, self.rgba_buffer.clone()));
+                                }
+                            } else {
+                                let mut p_nv12: *mut u8 = null_mut();
+                                let mut len = 0u32;
+                                if media_buf.Lock(&mut p_nv12, None, Some(&mut len)).is_ok() {
+                                    let stride = if height > 0 && len >= width * height {
+                                        ((len as usize) * 2 / ((height as usize) * 3)).max(width as usize)
+                                    } else {
+                                        width as usize
+                                    };
+                                    let nv12_slice = std::slice::from_raw_parts(p_nv12, len as usize);
+                                    nv12_to_rgba_strided(width as usize, height as usize, stride, nv12_slice, &mut self.rgba_buffer);
+                                    let _ = media_buf.Unlock();
+                                    res_frame = Some((width, height, self.rgba_buffer.clone()));
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => {
                     const MF_E_TRANSFORM_NEED_MORE_INPUT: i32 = -1072875852;
                     const MF_E_TRANSFORM_STREAM_CHANGE: i32 = -1072861855;
-                    if e.code().0 == MF_E_TRANSFORM_NEED_MORE_INPUT {
-                        return Ok(None);
-                    } else if e.code().0 == MF_E_TRANSFORM_STREAM_CHANGE {
+                    if e.code().0 == MF_E_TRANSFORM_STREAM_CHANGE {
                         if let Ok(new_out_type) = self.transform.GetOutputAvailableType(0, 0) {
                             let _ = self.transform.SetOutputType(0, &new_out_type, 0);
                         }
-                        return Ok(None);
                     }
                 }
             }
 
-            Ok(None)
+            // CRITICAL: Освобождаем COM sample и events, чтобы не утекала память
+            let _ = std::mem::ManuallyDrop::take(&mut out_buffer_desc.pSample);
+            let _ = std::mem::ManuallyDrop::take(&mut out_buffer_desc.pEvents);
+
+            Ok(res_frame)
         }
     }
 }
@@ -279,48 +296,62 @@ impl H264Decoder {
             out_buffer_desc.pSample = std::mem::ManuallyDrop::new(Some(out_sample));
 
             let mut status = 0u32;
+            let mut res_frame = None;
+
             match self.transform.ProcessOutput(0, std::slice::from_mut(&mut out_buffer_desc), &mut status) {
                 Ok(_) => {
                     if let Some(ref sample_res) = out_buffer_desc.pSample.as_ref() {
-                        let media_buf = sample_res.ConvertToContiguousBuffer()?;
-                        let mut p_nv12: *mut u8 = null_mut();
-                        let mut len = 0u32;
-                        media_buf.Lock(&mut p_nv12, None, Some(&mut len))?;
-
-                        let nv12_slice = std::slice::from_raw_parts(p_nv12, len as usize);
-                        nv12_to_rgba(width as usize, height as usize, nv12_slice, &mut self.rgba_buffer);
-                        media_buf.Unlock()?;
-
-                        return Ok(Some((width, height, self.rgba_buffer.clone())));
+                        if let Ok(media_buf) = sample_res.ConvertToContiguousBuffer() {
+                            let buf2d_res: Result<IMF2DBuffer> = media_buf.cast();
+                            if let Ok(buf2d) = buf2d_res {
+                                let mut packed_nv12 = vec![0u8; (width * height * 3 / 2) as usize];
+                                if buf2d.ContiguousCopyTo(&mut packed_nv12).is_ok() {
+                                    nv12_to_rgba(width as usize, height as usize, &packed_nv12, &mut self.rgba_buffer);
+                                    res_frame = Some((width, height, self.rgba_buffer.clone()));
+                                }
+                            } else {
+                                let mut p_nv12: *mut u8 = null_mut();
+                                let mut len = 0u32;
+                                if media_buf.Lock(&mut p_nv12, None, Some(&mut len)).is_ok() {
+                                    let stride = if height > 0 && len >= width * height {
+                                        ((len as usize) * 2 / ((height as usize) * 3)).max(width as usize)
+                                    } else {
+                                        width as usize
+                                    };
+                                    let nv12_slice = std::slice::from_raw_parts(p_nv12, len as usize);
+                                    nv12_to_rgba_strided(width as usize, height as usize, stride, nv12_slice, &mut self.rgba_buffer);
+                                    let _ = media_buf.Unlock();
+                                    res_frame = Some((width, height, self.rgba_buffer.clone()));
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => {
                     const MF_E_TRANSFORM_NEED_MORE_INPUT: i32 = -1072875852; // 0xC00D36B4
                     const MF_E_TRANSFORM_STREAM_CHANGE: i32 = -1072861855; // 0xC00D6D61
-                    if e.code().0 == MF_E_TRANSFORM_NEED_MORE_INPUT {
-                        return Ok(None);
-                    } else if e.code().0 == MF_E_TRANSFORM_STREAM_CHANGE {
-                        // Stream format changed according to bitstream SPS/PPS. Re-negotiate output type.
+                    if e.code().0 == MF_E_TRANSFORM_STREAM_CHANGE {
                         if let Ok(new_out_type) = self.transform.GetOutputAvailableType(0, 0) {
                             let _ = self.transform.SetOutputType(0, &new_out_type, 0);
                         }
-                        return Ok(None);
-                    } else {
-                        eprintln!("[H264Decoder] ProcessOutput returned: 0x{:08X}", e.code().0 as u32);
                     }
                 }
             }
 
-            Ok(None)
+            // CRITICAL: Освобождаем COM sample и events, чтобы не утекала память
+            let _ = std::mem::ManuallyDrop::take(&mut out_buffer_desc.pSample);
+            let _ = std::mem::ManuallyDrop::take(&mut out_buffer_desc.pEvents);
+
+            Ok(res_frame)
         }
     }
 }
 
-/// Быстрое целочисленное преобразование цветового пространства NV12 (Y-plane + interleaved UV) в RGBA8888
+/// Быстрое целочисленное преобразование цветового пространства NV12 (Y-plane + interleaved UV) в RGBA8888 с учетом аппаратного stride
 #[inline]
-pub fn nv12_to_rgba(width: usize, height: usize, nv12: &[u8], rgba: &mut [u8]) {
-    let y_plane_size = width * height;
-    if nv12.len() < y_plane_size + (y_plane_size / 2) || rgba.len() < width * height * 4 {
+pub fn nv12_to_rgba_strided(width: usize, height: usize, stride: usize, nv12: &[u8], rgba: &mut [u8]) {
+    let y_plane_size = stride * height;
+    if nv12.len() < y_plane_size + (stride * height / 2) || rgba.len() < width * height * 4 {
         return;
     }
 
@@ -328,8 +359,8 @@ pub fn nv12_to_rgba(width: usize, height: usize, nv12: &[u8], rgba: &mut [u8]) {
     let uv_plane = &nv12[y_plane_size..];
 
     for y in 0..height {
-        let y_row = y * width;
-        let uv_row = (y / 2) * width;
+        let y_row = y * stride;
+        let uv_row = (y / 2) * stride;
         let dst_row = y * width * 4;
 
         for x in 0..width {
@@ -338,7 +369,6 @@ pub fn nv12_to_rgba(width: usize, height: usize, nv12: &[u8], rgba: &mut [u8]) {
             let u_val = uv_plane[uv_idx] as i32;
             let v_val = uv_plane[uv_idx + 1] as i32;
 
-            // Стандартное быстрое целочисленное преобразование BT.601
             let c = y_val - 16;
             let d = u_val - 128;
             let e = v_val - 128;
@@ -354,4 +384,9 @@ pub fn nv12_to_rgba(width: usize, height: usize, nv12: &[u8], rgba: &mut [u8]) {
             rgba[d_idx + 3] = 255;
         }
     }
+}
+
+#[inline]
+pub fn nv12_to_rgba(width: usize, height: usize, nv12: &[u8], rgba: &mut [u8]) {
+    nv12_to_rgba_strided(width, height, width, nv12, rgba);
 }

@@ -2005,55 +2005,57 @@ impl eframe::App for NanocordApp {
         egui::TopBottomPanel::top("top_nav")
             .frame(egui::Frame::new().fill(th.bg_top_nav).stroke(Stroke::new(1.0, th.border)).inner_margin(egui::Margin::symmetric(14, 8)))
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("NANOCORD").strong().size(18.0).color(Color32::from_rgb(88, 101, 242)));
-                    ui.label(egui::RichText::new("v0.1.0 • P2P Ultra-Low Latency").weak().size(12.0).color(th.text_sub));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // 1. Тройной тумблер тем оформления (Солнышко, Ночь, Сова)
+                    render_theme_triple_toggle(ui, &mut self.app_theme, &mut self.applied_theme, &th);
 
-                    ui.add_space(20.0);
+                    ui.add_space(8.0);
 
-                    // Кнопка "Комната" заменяется на "Звонок и Стрим", когда запущен сервер или установлено подключение
-                    let tab_lobby_title = if is_in_room {
-                        self.t("nav_call_and_stream")
-                    } else {
-                        self.t("nav_lobby")
-                    };
-                    let tab_bench_title = self.t("nav_benchmark_matrix");
-                    let tab_audio_title = self.t("nav_audio_spectrum");
-                    let tab_nvenc_title = self.t("nav_encoder_settings");
+                    // 2. Тумблер выбора языка (Русский и Американский флаги)
+                    render_language_toggle(ui, &mut self.app_language, &th);
 
-                    if is_in_room {
-                        Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::CallAndStream, tab_lobby_title, &th);
-                    } else {
-                        Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::Lobby, tab_lobby_title, &th);
+                    ui.add_space(8.0);
+
+                    let is_srv_conn = self.p2p_server.as_ref().map(|s| s.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+                    let is_cli_conn = self.p2p_client.as_ref().map(|c| c.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
+                    let is_srv_running = self.p2p_server.as_ref().map(|s| s.is_running.load(Ordering::Relaxed)).unwrap_or(false);
+
+                    if is_srv_conn || is_cli_conn {
+                        ui.label(egui::RichText::new(self.t("top_online_p2p")).color(Color32::from_rgb(35, 165, 90)).strong().size(12.0));
+                    } else if is_srv_running {
+                        ui.label(egui::RichText::new(self.t("top_server_listening")).color(Color32::from_rgb(234, 179, 8)).strong().size(12.0));
+                    } else if self.is_streaming.load(Ordering::Relaxed) {
+                        ui.label(egui::RichText::new(self.t("top_live_60fps")).color(Color32::from_rgb(220, 38, 38)).strong().size(12.0));
+                    } else if self.is_benchmarking {
+                        ui.label(egui::RichText::new(self.t("top_benchmarking")).color(Color32::from_rgb(217, 119, 6)).strong().size(12.0));
                     }
-                    Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::BenchmarkMatrix, tab_bench_title, &th);
-                    Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::AudioAndSpectrum, tab_audio_title, &th);
-                    Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::EncoderSettings, tab_nvenc_title, &th);
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // 1. Тройной тумблер тем оформления (Солнышко, Ночь, Сова)
-                        render_theme_triple_toggle(ui, &mut self.app_theme, &mut self.applied_theme, &th);
+                    ui.add_space(10.0);
 
-                        ui.add_space(8.0);
+                    // Слева направо: логотип и вкладки
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new("NANOCORD").strong().size(17.0).color(Color32::from_rgb(88, 101, 242)));
+                        ui.label(egui::RichText::new("v0.1.0 • P2P Ultra-Low Latency").weak().size(11.5).color(th.text_sub));
 
-                        // 2. Тумблер выбора языка (Русский и Американский флаги)
-                        render_language_toggle(ui, &mut self.app_language, &th);
+                        ui.add_space(14.0);
 
-                        ui.add_space(8.0);
+                        let tab_lobby_title = if is_in_room {
+                            self.t("nav_call_and_stream")
+                        } else {
+                            self.t("nav_lobby")
+                        };
+                        let tab_bench_title = self.t("nav_benchmark_matrix");
+                        let tab_audio_title = self.t("nav_audio_spectrum");
+                        let tab_nvenc_title = self.t("nav_encoder_settings");
 
-                        let is_srv_conn = self.p2p_server.as_ref().map(|s| s.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
-                        let is_cli_conn = self.p2p_client.as_ref().map(|c| c.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
-                        let is_srv_running = self.p2p_server.as_ref().map(|s| s.is_running.load(Ordering::Relaxed)).unwrap_or(false);
-
-                        if is_srv_conn || is_cli_conn {
-                            ui.label(egui::RichText::new(self.t("top_online_p2p")).color(Color32::from_rgb(35, 165, 90)).strong());
-                        } else if is_srv_running {
-                            ui.label(egui::RichText::new(self.t("top_server_listening")).color(Color32::from_rgb(234, 179, 8)).strong());
-                        } else if self.is_streaming.load(Ordering::Relaxed) {
-                            ui.label(egui::RichText::new(self.t("top_live_60fps")).color(Color32::from_rgb(220, 38, 38)).strong());
-                        } else if self.is_benchmarking {
-                            ui.label(egui::RichText::new(self.t("top_benchmarking")).color(Color32::from_rgb(217, 119, 6)).strong());
+                        if is_in_room {
+                            Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::CallAndStream, tab_lobby_title, &th);
+                        } else {
+                            Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::Lobby, tab_lobby_title, &th);
                         }
+                        Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::BenchmarkMatrix, tab_bench_title, &th);
+                        Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::AudioAndSpectrum, tab_audio_title, &th);
+                        Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::EncoderSettings, tab_nvenc_title, &th);
                     });
                 });
             });
