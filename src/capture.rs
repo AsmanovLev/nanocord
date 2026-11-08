@@ -401,10 +401,12 @@ pub fn capture_desktop_gdi(target_w: u32, target_h: u32) -> Option<Vec<u8>> {
     }
 }
 
-/// Запускает фоновый поток захвата настоящего экрана для превью в UI (30 FPS)
+/// Запускает фоновый поток захвата настоящего экрана для превью в UI:
+/// 30 FPS во время активной трансляции, 1 FPS в режиме паузы для нулевой нагрузки на CPU/GPU
 pub fn start_desktop_preview_worker(
     target_w: u32,
     target_h: u32,
+    is_streaming: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> std::sync::mpsc::Receiver<PreviewFrame> {
     let (tx, rx) = std::sync::mpsc::sync_channel(2);
     std::thread::spawn(move || {
@@ -413,7 +415,12 @@ pub fn start_desktop_preview_worker(
         let mut last_frame: Option<Vec<u8>> = None;
 
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(33)); // ~30 FPS
+            let streaming = is_streaming.load(std::sync::atomic::Ordering::Relaxed);
+            if streaming {
+                std::thread::sleep(std::time::Duration::from_millis(33)); // ~30 FPS при стриме
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(1000)); // 1 FPS при выключенной демке
+            }
             let mut new_rgba = None;
 
             // Периодическая попытка подключить DXGI, если он был потерян

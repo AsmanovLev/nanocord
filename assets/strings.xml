@@ -286,6 +286,22 @@
         <ru>Ваш рабочий стол</ru>
         <en>Your Screen</en>
     </string>
+    <string name="feed_screen_live">
+        <ru>Прямой эфир (30 FPS)</ru>
+        <en>Live (30 FPS)</en>
+    </string>
+    <string name="feed_screen_idle">
+        <ru>Выключено (1 FPS)</ru>
+        <en>Off (1 FPS)</en>
+    </string>
+    <string name="badge_demo_paused_short">
+        <ru>⏸ Пауза (1 FPS)</ru>
+        <en>⏸ Paused (1 FPS)</en>
+    </string>
+    <string name="badge_demo_paused_full">
+        <ru>⏸ Демонстрация выключена (1 FPS)</ru>
+        <en>⏸ Screen share off (1 FPS)</en>
+    </string>
     <string name="feed_local_camera">
         <ru>Ваша веб-камера</ru>
         <en>Your Camera</en>

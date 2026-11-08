@@ -428,8 +428,8 @@ pub fn set_clipboard_text(text: &str) {
     }
 }
 
-/// Быстрое сжатие RGBA кадра в JPEG для сетевой передачи (~40 KB)
-pub fn encode_frame_to_jpeg(w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+/// Быстрое сжатие RGBA кадра в JPEG с заданным качеством (CQ-VBR адаптация)
+pub fn encode_frame_to_jpeg_with_quality(w: u32, h: u32, rgba: &[u8], quality: u8) -> Option<Vec<u8>> {
     if rgba.len() < (w * h * 4) as usize {
         return None;
     }
@@ -440,12 +440,37 @@ pub fn encode_frame_to_jpeg(w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
         rgb.push(chunk[2]);
     }
     let mut out = Vec::new();
-    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 65);
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality.clamp(10, 100));
     if encoder.encode(&rgb, w, h, image::ExtendedColorType::Rgb8).is_ok() {
         Some(out)
     } else {
         None
     }
+}
+
+/// Быстрое сжатие RGBA кадра в JPEG для сетевой передачи (~40 KB)
+pub fn encode_frame_to_jpeg(w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    encode_frame_to_jpeg_with_quality(w, h, rgba, 65)
+}
+
+#[derive(Clone, Debug)]
+pub struct VideoEncoderConfig {
+    pub cq_quality: u8,
+    pub max_bitrate_mbps: u32,
+}
+
+impl Default for VideoEncoderConfig {
+    fn default() -> Self {
+        Self {
+            cq_quality: 22,
+            max_bitrate_mbps: 30,
+        }
+    }
+}
+
+pub fn cq_to_jpeg_quality(cq: u8) -> u8 {
+    let q = 100.0 - (cq.clamp(16, 32) as f32 - 16.0) * 2.2;
+    q.clamp(50.0, 95.0) as u8
 }
 
 /// Распаковка JPEG в RGBA
@@ -474,10 +499,15 @@ pub struct P2PNetworkServer {
     pub outgoing_camera_tx: SyncSender<NetworkPeerFrame>,
     pub outgoing_audio_tx: SyncSender<NetworkAudioPacket>,
     pub telemetry: Arc<RwLock<P2PTelemetry>>,
+    pub encoder_config: Arc<RwLock<VideoEncoderConfig>>,
 }
 
 impl P2PNetworkServer {
     pub fn start(port: u16, room_code: String) -> Self {
+        Self::start_with_config(port, room_code, Arc::new(RwLock::new(VideoEncoderConfig::default())))
+    }
+
+    pub fn start_with_config(port: u16, room_code: String, encoder_config: Arc<RwLock<VideoEncoderConfig>>) -> Self {
         let is_running = Arc::new(AtomicBool::new(true));
         let is_connected = Arc::new(AtomicBool::new(false));
         let peer_addr = Arc::new(RwLock::new(String::new()));
@@ -497,6 +527,7 @@ impl P2PNetworkServer {
         let status_clone = status.clone();
         let telem_clone = telemetry.clone();
         let expected_code = room_code.clone();
+        let enc_config_clone = encoder_config.clone();
 
         thread::spawn(move || {
             let l_v6 = TcpListener::bind(format!("[::]:{}", port)).ok();
@@ -580,6 +611,7 @@ impl P2PNetworkServer {
                             &out_cam_rx,
                             &out_aud_rx,
                             telem_clone.clone(),
+                            enc_config_clone.clone(),
                         );
 
                         connected_clone.store(false, Ordering::Relaxed);
@@ -616,6 +648,7 @@ impl P2PNetworkServer {
             outgoing_camera_tx: out_cam_tx,
             outgoing_audio_tx: out_aud_tx,
             telemetry,
+            encoder_config,
         }
     }
 
@@ -639,10 +672,15 @@ pub struct P2PNetworkClient {
     pub outgoing_camera_tx: SyncSender<NetworkPeerFrame>,
     pub outgoing_audio_tx: SyncSender<NetworkAudioPacket>,
     pub telemetry: Arc<RwLock<P2PTelemetry>>,
+    pub encoder_config: Arc<RwLock<VideoEncoderConfig>>,
 }
 
 impl P2PNetworkClient {
     pub fn connect(target_host: String, port: u16, room_code: String) -> Self {
+        Self::connect_with_config(target_host, port, room_code, Arc::new(RwLock::new(VideoEncoderConfig::default())))
+    }
+
+    pub fn connect_with_config(target_host: String, port: u16, room_code: String, encoder_config: Arc<RwLock<VideoEncoderConfig>>) -> Self {
         let is_running = Arc::new(AtomicBool::new(true));
         let is_connected = Arc::new(AtomicBool::new(false));
         let status = Arc::new(RwLock::new(format!("Подключение к {}:{}...", target_host, port)));
@@ -661,6 +699,7 @@ impl P2PNetworkClient {
         let telem_clone = telemetry.clone();
         let code_to_send = room_code.clone();
         let host_clone = target_host.clone();
+        let enc_config_clone = encoder_config.clone();
 
         thread::spawn(move || {
             let resolve_target = if host_clone.starts_with('[') && host_clone.ends_with(']') {
@@ -753,6 +792,7 @@ impl P2PNetworkClient {
                     &out_cam_rx,
                     &out_aud_rx,
                     telem_clone.clone(),
+                    enc_config_clone.clone(),
                 );
 
                 connected_clone.store(false, Ordering::Relaxed);
@@ -788,6 +828,7 @@ impl P2PNetworkClient {
             outgoing_camera_tx: out_cam_tx,
             outgoing_audio_tx: out_aud_tx,
             telemetry,
+            encoder_config,
         }
     }
 
@@ -809,6 +850,7 @@ fn run_p2p_socket_session(
     out_cam_rx: &Receiver<NetworkPeerFrame>,
     out_aud_rx: &Receiver<NetworkAudioPacket>,
     telemetry: Arc<RwLock<P2PTelemetry>>,
+    encoder_config: Arc<RwLock<VideoEncoderConfig>>,
 ) {
     let mut reader = match stream.try_clone() {
         Ok(s) => s,
@@ -897,7 +939,13 @@ fn run_p2p_socket_session(
         let mut sent_any = false;
 
         if let Ok(frame) = out_dt_rx.try_recv() {
-            let (flags, payload) = if let Some(jpeg) = encode_frame_to_jpeg(frame.width, frame.height, &frame.rgba) {
+            let (cq, _max_br) = if let Ok(cfg) = encoder_config.read() {
+                (cfg.cq_quality, cfg.max_bitrate_mbps)
+            } else {
+                (22, 30)
+            };
+            let jpeg_quality = cq_to_jpeg_quality(cq);
+            let (flags, payload) = if let Some(jpeg) = encode_frame_to_jpeg_with_quality(frame.width, frame.height, &frame.rgba, jpeg_quality) {
                 (1u8, jpeg)
             } else {
                 (0u8, frame.rgba)

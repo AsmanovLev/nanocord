@@ -467,7 +467,7 @@ impl NvencEncoder {
 
             let status = create_instance(api_ptr);
             if status != NV_ENC_SUCCESS {
-                panic!("NvEncodeAPICreateInstance failed with code {}", status);
+                return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }
             let api = api_uninit.assume_init();
 
@@ -481,7 +481,7 @@ impl NvencEncoder {
             let mut encoder: *mut c_void = std::ptr::null_mut();
             let status = (api.nvEncOpenEncodeSessionEx)(&mut session_params, &mut encoder);
             if status != NV_ENC_SUCCESS {
-                panic!("nvEncOpenEncodeSessionEx failed with code {}", status);
+                return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }
 
             // 5. Конфигурация пресета и CQ-VBR
@@ -529,7 +529,7 @@ impl NvencEncoder {
 
             let status = (api.nvEncInitializeEncoder)(encoder, &mut init_params);
             if status != NV_ENC_SUCCESS {
-                panic!("nvEncInitializeEncoder failed with code {}", status);
+                return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }
 
             // 7. Создаем буфер для выходного битстрима (4 МБ)
@@ -539,7 +539,7 @@ impl NvencEncoder {
 
             let status = (api.nvEncCreateBitstreamBuffer)(encoder, &mut bitstream_params);
             if status != NV_ENC_SUCCESS {
-                panic!("nvEncCreateBitstreamBuffer failed with code {}", status);
+                return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }
 
             // 8. Если разные адаптеры, подготавливаем staging-текстуру на capture GPU и dynamic-текстуру на NVIDIA GPU
@@ -592,7 +592,7 @@ impl NvencEncoder {
 
                 let status = (api.nvEncRegisterResource)(encoder, &mut reg_res);
                 if status != NV_ENC_SUCCESS {
-                    panic!("nvEncRegisterResource failed: {}", status);
+                    return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
                 }
                 registered_resource = reg_res.registeredResource;
                 opt_nv_tex = Some(nt);
@@ -669,7 +669,7 @@ impl NvencEncoder {
 
                 let status = (self.api.nvEncRegisterResource)(self.encoder, &mut reg_res);
                 if status != NV_ENC_SUCCESS {
-                    panic!("nvEncRegisterResource failed: {}", status);
+                    return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
                 }
                 reg_to_cleanup = reg_res.registeredResource;
                 reg_res.registeredResource
@@ -682,7 +682,10 @@ impl NvencEncoder {
 
             let status = (self.api.nvEncMapInputResource)(self.encoder, &mut map_res);
             if status != NV_ENC_SUCCESS {
-                panic!("nvEncMapInputResource failed: {}", status);
+                if !reg_to_cleanup.is_null() {
+                    (self.api.nvEncUnregisterResource)(self.encoder, reg_to_cleanup);
+                }
+                return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }
 
             // Отправляем кадр на кодирование
@@ -700,13 +703,12 @@ impl NvencEncoder {
             }
 
             let status = (self.api.nvEncEncodePicture)(self.encoder, &mut pic_params);
-            if status != NV_ENC_SUCCESS {
-                panic!("nvEncEncodePicture failed: {}", status);
-            }
-
             (self.api.nvEncUnmapInputResource)(self.encoder, map_res.mappedResource);
             if !reg_to_cleanup.is_null() {
                 (self.api.nvEncUnregisterResource)(self.encoder, reg_to_cleanup);
+            }
+            if status != NV_ENC_SUCCESS {
+                return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }
 
             // Считываем сжатый NAL битстрим
@@ -717,7 +719,7 @@ impl NvencEncoder {
 
             let status = (self.api.nvEncLockBitstream)(self.encoder, &mut lock_params);
             if status != NV_ENC_SUCCESS {
-                panic!("nvEncLockBitstream failed: {}", status);
+                return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }
 
             let byte_slice = std::slice::from_raw_parts(

@@ -15,7 +15,13 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 
 fn main() -> eframe::Result<()> {
     std::panic::set_hook(Box::new(|info| {
-        let _ = std::fs::write("panic.txt", format!("{:#?}", info));
+        let msg = format!("{:#?}\n", info);
+        let _ = std::fs::write("panic.txt", &msg);
+        if let Ok(mut exe) = std::env::current_exe() {
+            exe.pop();
+            exe.push("panic.txt");
+            let _ = std::fs::write(exe, &msg);
+        }
     }));
     let args: Vec<String> = std::env::args().collect();
     let is_test_mode = args.iter().any(|a| a == "--test");

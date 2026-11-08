@@ -106,9 +106,28 @@ pub fn create_process_loopback_audio_client(target_pid: u32) -> Result<IAudioCli
             &handler,
         )?;
 
-        rx.recv_timeout(Duration::from_millis(500))
+        rx.recv_timeout(Duration::from_millis(1000))
             .map_err(|_| windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)))?
     }
+}
+
+/// Плавный аналоговый soft-saturation лимитер для чистой оверамплификации (до 2.0x - 3.0x) без цифрового хруста/клиппинга
+#[inline]
+pub fn apply_gain_soft_clip(sample: i16, gain: f32) -> i16 {
+    if (gain - 1.0).abs() < 0.001 {
+        return sample;
+    }
+    if gain <= 0.001 {
+        return 0;
+    }
+    let s = (sample as f32 / 32768.0) * gain;
+    let out = if s.abs() <= 0.70 {
+        s
+    } else {
+        // Мягкая нелинейная гиперболическая сатурация пиков вместо жесткого клиппинга в квадратную волну
+        s.tanh()
+    };
+    (out * 32767.0).clamp(-32768.0, 32767.0) as i16
 }
 
 pub const AUDIO_SPECTROGRAM_BINS: usize = 20;
@@ -845,14 +864,41 @@ fn run_wasapi_capture_loop(
         let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
 
         // Для системного звука (Loopback) активируем Process Loopback с исключением процесса nanocord.exe,
-        // чтобы воспроизводимый голос собеседника и собственные звуки приложения не зацикливались
-        let (audio_client, stream_flags) = if is_loopback && (device_id.is_none() || device_id.as_deref() == Some("default")) {
-            match create_process_loopback_audio_client(std::process::id()) {
-                Ok(client) => (client, AUDCLNT_STREAMFLAGS_LOOPBACK),
+        // чтобы воспроизводимый голос собеседника и собственные звуки приложения не зацикливались.
+        // Если Process Loopback не поддерживается ОС или выдал ошибку, гарантированно переключаемся
+        // на классический WASAPI Render Loopback.
+        let (audio_client, mix_format_ptr) = if is_loopback && (device_id.is_none() || device_id.as_deref() == Some("default")) {
+            let proc_res = (|| -> Result<(IAudioClient, *mut windows::Win32::Media::Audio::WAVEFORMATEX)> {
+                let client = create_process_loopback_audio_client(std::process::id())?;
+                let fmt = client.GetMixFormat()?;
+                // ВАЖНО: При активации Process Loopback нельзя передавать AUDCLNT_STREAMFLAGS_LOOPBACK (MSDN: E_INVALIDARG)!
+                // Используем AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM (или 0)
+                client.Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    windows::Win32::Media::Audio::AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+                    1_000_000,
+                    0,
+                    fmt,
+                    None,
+                )?;
+                Ok((client, fmt))
+            })();
+
+            match proc_res {
+                Ok((client, fmt)) => (client, fmt),
                 Err(_) => {
                     let device: IMMDevice = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
                     let client = device.Activate::<IAudioClient>(CLSCTX_ALL, None)?;
-                    (client, AUDCLNT_STREAMFLAGS_LOOPBACK)
+                    let fmt = client.GetMixFormat()?;
+                    client.Initialize(
+                        AUDCLNT_SHAREMODE_SHARED,
+                        AUDCLNT_STREAMFLAGS_LOOPBACK,
+                        1_000_000,
+                        0,
+                        fmt,
+                        None,
+                    )?;
+                    (client, fmt)
                 }
             }
         } else {
@@ -871,25 +917,23 @@ fn run_wasapi_capture_loop(
                 enumerator.GetDefaultAudioEndpoint(data_flow, eConsole)?
             };
             let client = device.Activate::<IAudioClient>(CLSCTX_ALL, None)?;
-            (client, if is_loopback { AUDCLNT_STREAMFLAGS_LOOPBACK } else { 0 })
+            let stream_flags = if is_loopback { AUDCLNT_STREAMFLAGS_LOOPBACK } else { 0 };
+            let fmt = client.GetMixFormat()?;
+            client.Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                stream_flags,
+                1_000_000,
+                0,
+                fmt,
+                None,
+            )?;
+            (client, fmt)
         };
 
-        let mix_format_ptr = audio_client.GetMixFormat()?;
         let pwfx = &*mix_format_ptr;
-
         let sample_rate = pwfx.nSamplesPerSec as f32;
         let channels = pwfx.nChannels as usize;
         let bits_per_sample = pwfx.wBitsPerSample as usize;
-
-        // Буфер на 100 мс (1_000_000 * 100 нс)
-        audio_client.Initialize(
-            AUDCLNT_SHAREMODE_SHARED,
-            stream_flags,
-            1_000_000,
-            0,
-            mix_format_ptr,
-            None,
-        )?;
 
         let capture_client: IAudioCaptureClient = audio_client.GetService::<IAudioCaptureClient>()?;
         audio_client.Start()?;

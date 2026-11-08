@@ -318,6 +318,7 @@ pub struct NanocordApp {
     pub manual_preset: u8,
     pub cq_quality: u8,
     pub max_bitrate_mbps: u32,
+    pub encoder_config: Arc<std::sync::RwLock<crate::network::VideoEncoderConfig>>,
 
     // Двухканальная звуковая волна (10 секунд истории)
     pub mic_waveform: AudioWaveform,
@@ -382,8 +383,11 @@ impl Default for NanocordApp {
         let default_res_idx = available.len().saturating_sub(1);
         let default_matrix = build_default_matrix(native_w, native_h, native_hz);
 
-        // 1. Запуск настоящего фонового захвата экрана в полном нативном разрешении (четкий 1080p без мыла)
-        let rx_desktop = start_desktop_preview_worker(native_w, native_h);
+        let is_streaming = Arc::new(AtomicBool::new(false));
+        let encoder_config = Arc::new(std::sync::RwLock::new(crate::network::VideoEncoderConfig::default()));
+
+        // 1. Запуск настоящего фонового захвата экрана в полном нативном разрешении (30 FPS при стриме, 1 FPS в режиме паузы)
+        let rx_desktop = start_desktop_preview_worker(native_w, native_h, is_streaming.clone());
 
         // 2. Запуск настоящего фонового захвата веб-камеры (BisonCam,NB Pro)
         let rx_camera = start_camera_worker();
@@ -432,7 +436,7 @@ impl Default for NanocordApp {
             fit_aspect_ratio: true,
 
             active_stage: StageSource::RemoteDesktop,
-            is_streaming: Arc::new(AtomicBool::new(false)),
+            is_streaming,
             is_mic_muted: false,
             is_deafened: false,
             is_camera_on: false,
@@ -469,6 +473,7 @@ impl Default for NanocordApp {
             manual_preset: 3,
             cq_quality: 22,
             max_bitrate_mbps: 30,
+            encoder_config,
 
             mic_waveform: AudioWaveform::new(),
             game_waveform: AudioWaveform::new(),
@@ -1261,7 +1266,7 @@ impl NanocordApp {
                                                 .unwrap_or(48120);
                                             let code = self.server_code_str.trim().to_string();
                                             self.p2p_server =
-                                                Some(crate::network::P2PNetworkServer::start(port, code));
+                                                Some(crate::network::P2PNetworkServer::start_with_config(port, code, self.encoder_config.clone()));
                                         }
                                     } else {
                                         if ui
@@ -1535,7 +1540,7 @@ impl NanocordApp {
         if let Some(old) = self.p2p_client.take() {
             old.stop();
         }
-        self.p2p_client = Some(crate::network::P2PNetworkClient::connect(host, port, code));
+        self.p2p_client = Some(crate::network::P2PNetworkClient::connect_with_config(host, port, code, self.encoder_config.clone()));
     }
     /// Отрисовка высококонтрастной бирки навигации с динамической адаптацией к выбранной теме
     fn render_nav_tab_pill(ui: &mut egui::Ui, current: &mut Tab, tab: Tab, label: &str, th: &ThemeColors) {
@@ -1758,12 +1763,12 @@ impl eframe::App for NanocordApp {
             while let Ok(pkt) = rx.try_recv() {
                 self.mic_waveform.push_real_sample(pkt.min_sample, pkt.max_sample, pkt.rms, pkt.peak_db);
 
-                // Реальное аппаратное масштабирование громкости микрофона
+                // Реальное аппаратное масштабирование громкости микрофона с soft-saturation лимитером
                 let mic_vol = if self.is_mic_muted { 0.0 } else { self.mic_waveform.volume };
                 let mut processed_pcm = pkt.pcm_chunk.clone();
                 if (mic_vol - 1.0).abs() > 0.001 || self.is_mic_muted {
                     for s in &mut processed_pcm {
-                        *s = (*s as f32 * mic_vol).clamp(-32768.0, 32767.0) as i16;
+                        *s = crate::audio::apply_gain_soft_clip(*s, mic_vol);
                     }
                 }
 
@@ -1807,7 +1812,7 @@ impl eframe::App for NanocordApp {
                 let mut processed_pcm = pkt.pcm_chunk.clone();
                 if (loop_vol - 1.0).abs() > 0.001 || self.is_deafened {
                     for s in &mut processed_pcm {
-                        *s = (*s as f32 * loop_vol).clamp(-32768.0, 32767.0) as i16;
+                        *s = crate::audio::apply_gain_soft_clip(*s, loop_vol);
                     }
                 }
                 if is_peer_connected && !self.is_deafened {
@@ -1857,7 +1862,7 @@ impl eframe::App for NanocordApp {
                         let out_vol = self.game_waveform.volume;
                         if (out_vol - 1.0).abs() > 0.001 {
                             for s in &mut samples {
-                                *s = (*s as f32 * out_vol).clamp(-32768.0, 32767.0) as i16;
+                                *s = crate::audio::apply_gain_soft_clip(*s, out_vol);
                             }
                         }
                         self.audio_player.play_samples(samples);
@@ -1883,7 +1888,7 @@ impl eframe::App for NanocordApp {
                         let out_vol = self.game_waveform.volume;
                         if (out_vol - 1.0).abs() > 0.001 {
                             for s in &mut samples {
-                                *s = (*s as f32 * out_vol).clamp(-32768.0, 32767.0) as i16;
+                                *s = crate::audio::apply_gain_soft_clip(*s, out_vol);
                             }
                         }
                         self.audio_player.play_samples(samples);
@@ -2177,7 +2182,7 @@ impl NanocordApp {
             if is_stream {
                 scr_painter.circle_filled(scr_center, scr_radius, Color32::from_rgb(88, 101, 242));
                 scr_painter.circle_stroke(scr_center, scr_radius, Stroke::new(1.0, Color32::from_rgb(114, 137, 218)));
-                scr_painter.text(scr_center, egui::Align2::CENTER_CENTER, ICON_STOP_SCREEN_SHARE, egui::FontId::proportional(20.0), Color32::WHITE);
+                scr_painter.text(scr_center, egui::Align2::CENTER_CENTER, ICON_SCREEN_SHARE, egui::FontId::proportional(20.0), Color32::WHITE);
             } else {
                 scr_painter.circle_filled(scr_center, scr_radius, dock_btn_bg);
                 scr_painter.circle_stroke(scr_center, scr_radius, Stroke::new(1.0, if scr_resp.hovered() { Color32::from_rgb(88, 101, 242) } else { dock_btn_border }));
@@ -2482,7 +2487,9 @@ impl NanocordApp {
                         };
                         self.render_feed_card(ui, self.t("feed_peer_camera"), cam_status, StageSource::RemoteCamera);
                         ui.add_space(8.0);
-                        self.render_feed_card(ui, self.t("feed_local_screen"), "Live DXGI / GDI", StageSource::LocalDesktop);
+                        let is_stream = self.is_streaming.load(Ordering::Relaxed);
+                        let dt_status = if is_stream { self.t("feed_screen_live") } else { self.t("feed_screen_idle") };
+                        self.render_feed_card(ui, self.t("feed_local_screen"), dt_status, StageSource::LocalDesktop);
                         ui.add_space(8.0);
                         self.render_feed_card(ui, self.t("feed_local_camera"), "BisonCam • 720p 30 FPS", StageSource::LocalCamera);
                     });
@@ -2538,6 +2545,7 @@ impl NanocordApp {
 
         match source {
             StageSource::LocalDesktop => {
+                let is_stream = self.is_streaming.load(Ordering::Relaxed);
                 if let Some(tex) = self.desktop_texture.as_ref() {
                     let draw_rect = if self.fit_aspect_ratio {
                         let [tw, th_sz] = tex.size();
@@ -2548,12 +2556,38 @@ impl NanocordApp {
                     if draw_rect != rect {
                         painter.rect_filled(rect, CornerRadius::same(6), Color32::from_rgb(12, 14, 18));
                     }
+
+                    // При отключенной демонстрации экран слегка диммируется
+                    let tint = if is_stream {
+                        Color32::WHITE
+                    } else {
+                        Color32::from_rgba_unmultiplied(120, 125, 140, 130)
+                    };
+
                     painter.image(
                         tex.id(),
                         draw_rect,
                         Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                        Color32::WHITE,
+                        tint,
                     );
+
+                    if !is_stream {
+                        // Затемняющий оверлей и аккуратная плашка статуса паузы
+                        painter.rect_filled(draw_rect, CornerRadius::same(6), Color32::from_rgba_unmultiplied(10, 12, 18, 110));
+                        let badge_w = if is_thumb { 104.0 } else { 190.0 };
+                        let badge_h = if is_thumb { 22.0 } else { 30.0 };
+                        let badge_rect = Rect::from_center_size(draw_rect.center(), Vec2::new(badge_w, badge_h));
+                        let rad = (badge_h * 0.5) as u8;
+                        painter.rect_filled(badge_rect, CornerRadius::same(rad), Color32::from_rgba_unmultiplied(22, 26, 36, 215));
+                        painter.rect_stroke(badge_rect, CornerRadius::same(rad), Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 30)), egui::StrokeKind::Inside);
+                        painter.text(
+                            badge_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            if is_thumb { self.t("badge_demo_paused_short") } else { self.t("badge_demo_paused_full") },
+                            egui::FontId::proportional(if is_thumb { 10.0 } else { 12.0 }),
+                            Color32::from_rgb(220, 225, 235),
+                        );
+                    }
                 } else {
                     painter.rect_filled(rect, CornerRadius::same(6), surface_placeholder_bg);
                     if !is_thumb {
@@ -3292,7 +3326,16 @@ impl NanocordApp {
                 ui.label(egui::RichText::new(format!("{} {} Mbps", self.t("nvenc_bitrate_title"), self.max_bitrate_mbps)).strong().size(13.0).color(th.text_main));
                 ui.label(egui::RichText::new(self.t("nvenc_bitrate_desc")).size(11.0).color(th.text_sub));
                 ui.add_space(4.0);
-                ui.add(egui::Slider::new(&mut self.max_bitrate_mbps, 5..=60).suffix(" Mbps"));
+                if ui.add(egui::Slider::new(&mut self.max_bitrate_mbps, 5..=60).suffix(" Mbps")).changed() {
+                    if let Ok(mut cfg) = self.encoder_config.write() {
+                        cfg.max_bitrate_mbps = self.max_bitrate_mbps;
+                    }
+                }
+
+                if let Ok(mut cfg) = self.encoder_config.write() {
+                    cfg.cq_quality = self.cq_quality;
+                    cfg.max_bitrate_mbps = self.max_bitrate_mbps;
+                }
 
                 ui.add_space(16.0);
                 ui.separator();

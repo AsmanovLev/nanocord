@@ -81,7 +81,7 @@ pub fn run_full_benchmark() -> Vec<BenchmarkResult> {
     let mut fl = windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
 
     unsafe {
-        windows::Win32::Graphics::Direct3D11::D3D11CreateDevice(
+        if windows::Win32::Graphics::Direct3D11::D3D11CreateDevice(
             None,
             windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE,
             windows::Win32::Foundation::HMODULE::default(),
@@ -91,11 +91,19 @@ pub fn run_full_benchmark() -> Vec<BenchmarkResult> {
             Some(&mut dev),
             Some(&mut fl),
             Some(&mut ctx),
-        ).expect("Failed to create dummy D3D11 device for benchmark");
+        ).is_err() {
+            return results;
+        }
     }
 
-    let dev = dev.unwrap();
-    let ctx = ctx.unwrap();
+    let dev = match dev {
+        Some(d) => d,
+        None => return results,
+    };
+    let ctx = match ctx {
+        Some(c) => c,
+        None => return results,
+    };
 
     for &(w, h, res_label) in &valid_resolutions {
         let desc = D3D11_TEXTURE2D_DESC {
