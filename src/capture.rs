@@ -413,13 +413,14 @@ pub fn start_desktop_preview_worker(
         let mut capture = DxgiCapture::new().ok();
         let mut retry_counter = 0usize;
         let mut last_frame: Option<Vec<u8>> = None;
+        let mut was_streaming = false;
 
         loop {
             let streaming = is_streaming.load(std::sync::atomic::Ordering::Relaxed);
             if streaming {
-                std::thread::sleep(std::time::Duration::from_millis(33)); // ~30 FPS при стриме
+                std::thread::sleep(std::time::Duration::from_millis(33)); // ~30 FPS при активном стриме
             } else {
-                std::thread::sleep(std::time::Duration::from_millis(1000)); // 1 FPS при выключенной демке
+                std::thread::sleep(std::time::Duration::from_millis(1000)); // 1 FPS при паузе (0% CPU/GPU)
             }
             let mut new_rgba = None;
 
@@ -437,7 +438,7 @@ pub fn start_desktop_preview_worker(
                         new_rgba = Some(rgba);
                     }
                     Ok(None) => {
-                        // Экран статичен (DXGI timeout) — если нет сохраненного кадра, берем GDI
+                        // Экран статичен (DXGI timeout) — если вообще не было кадра, берем разовый GDI
                         if last_frame.is_none() {
                             new_rgba = capture_desktop_gdi(target_w, target_h);
                         }
@@ -447,10 +448,13 @@ pub fn start_desktop_preview_worker(
                     }
                 }
             } else {
-                // Если DXGI не работает, гарантированно захватываем через быстрый GDI
-                new_rgba = capture_desktop_gdi(target_w, target_h);
+                // Если DXGI недоступен, захватываем через быстрый GDI только при старте или при стриме
+                if last_frame.is_none() || streaming {
+                    new_rgba = capture_desktop_gdi(target_w, target_h);
+                }
             }
 
+            // Отправляем кадр только если пиксели действительно изменились (Dirty detection)
             if let Some(rgba) = new_rgba {
                 last_frame = Some(rgba.clone());
                 let _ = tx.try_send(PreviewFrame {
@@ -458,14 +462,17 @@ pub fn start_desktop_preview_worker(
                     height: target_h,
                     rgba,
                 });
-            } else if let Some(ref rgba) = last_frame {
-                // При статичном экране повторно отдаем последний кадр, чтобы P2P-стрим не зависал в ожидании
-                let _ = tx.try_send(PreviewFrame {
-                    width: target_w,
-                    height: target_h,
-                    rgba: rgba.clone(),
-                });
+            } else if streaming && !was_streaming {
+                // При включении стрима отправляем последний сохраненный кадр для мгновенной инициализации
+                if let Some(ref rgba) = last_frame {
+                    let _ = tx.try_send(PreviewFrame {
+                        width: target_w,
+                        height: target_h,
+                        rgba: rgba.clone(),
+                    });
+                }
             }
+            was_streaming = streaming;
         }
     });
     rx

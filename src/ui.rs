@@ -279,6 +279,7 @@ pub struct NanocordApp {
     pub is_mic_muted: bool,
     pub is_deafened: bool,
     pub is_camera_on: bool,
+    pub is_camera_on_flag: Arc<AtomicBool>,
     pub is_camera_pip: bool,
 
     // Реальный захват рабочего стола (DXGI + GDI)
@@ -384,13 +385,14 @@ impl Default for NanocordApp {
         let default_matrix = build_default_matrix(native_w, native_h, native_hz);
 
         let is_streaming = Arc::new(AtomicBool::new(false));
+        let is_camera_on_flag = Arc::new(AtomicBool::new(false));
         let encoder_config = Arc::new(std::sync::RwLock::new(crate::network::VideoEncoderConfig::default()));
 
         // 1. Запуск настоящего фонового захвата экрана в полном нативном разрешении (30 FPS при стриме, 1 FPS в режиме паузы)
         let rx_desktop = start_desktop_preview_worker(native_w, native_h, is_streaming.clone());
 
-        // 2. Запуск настоящего фонового захвата веб-камеры (BisonCam,NB Pro)
-        let rx_camera = start_camera_worker();
+        // 2. Запуск настоящего фонового захвата веб-камеры (спит с 0% CPU/GPU, пока камера выключена)
+        let rx_camera = start_camera_worker(is_camera_on_flag.clone());
 
         // 3. Запуск реального захвата аудио через Windows WASAPI (микрофон и loopback системы)
         let mic_is_running = Arc::new(AtomicBool::new(true));
@@ -440,6 +442,7 @@ impl Default for NanocordApp {
             is_mic_muted: false,
             is_deafened: false,
             is_camera_on: false,
+            is_camera_on_flag,
             is_camera_pip: false,
 
             desktop_texture: None,
@@ -1725,8 +1728,11 @@ impl eframe::App for NanocordApp {
         // 2. Приём настоящих кадров с веб-камеры (nokhwa)
         if let Some(ref rx) = self.camera_rx {
             while let Ok(frame) = rx.try_recv() {
+                if !self.is_camera_on {
+                    continue;
+                }
                 // Если собеседник подключен и камера включена, отправляем кадр веб-камеры
-                if is_peer_connected && self.is_camera_on {
+                if is_peer_connected {
                     let net_frame = crate::network::NetworkPeerFrame {
                         width: frame.width,
                         height: frame.height,
@@ -1976,7 +1982,12 @@ impl eframe::App for NanocordApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
         }
 
-        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        let is_active = is_peer_connected || self.is_streaming.load(Ordering::Relaxed) || self.is_camera_on;
+        if is_active {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(60));
+        }
 
         // ЕСЛИ ВКЛЮЧЕН ПОЛНОЭКРАННЫЙ РЕЖИМ (FULLSCREEN)
         if self.is_fullscreen {
@@ -2170,6 +2181,7 @@ impl NanocordApp {
 
             if cam_resp.clicked() {
                 self.is_camera_on = !self.is_camera_on;
+                self.is_camera_on_flag.store(self.is_camera_on, Ordering::Relaxed);
             }
             cam_resp.on_hover_text(if self.is_camera_on { self.t("dock_turn_off_cam") } else { self.t("dock_turn_on_cam") });
 

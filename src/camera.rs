@@ -15,9 +15,8 @@ pub struct CameraFrame {
 }
 
 /// Запускает отдельный поток захвата видео с веб-камеры (Media Foundation / nokhwa)
-/// В случае отсутствия или блокировки аппаратной камеры вторым процессом,
-/// генерирует мягкий виртуальный поток камеры для бесперебойного звонка.
-pub fn start_camera_worker() -> Receiver<CameraFrame> {
+/// При выключенной камере (is_camera_on == false) поток засыпает с нулевым потреблением CPU/GPU.
+pub fn start_camera_worker(is_camera_on: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Receiver<CameraFrame> {
     let (tx, rx) = sync_channel(2);
     thread::spawn(move || {
         let index = CameraIndex::Index(0);
@@ -35,6 +34,12 @@ pub fn start_camera_worker() -> Receiver<CameraFrame> {
         if let Some(mut cam) = camera {
             println!("[CAMERA] Hardware webcam active: {}x{}", cam.resolution().width_x, cam.resolution().height_y);
             loop {
+                // Если камера выключена в UI, спим с 0% нагрузки
+                if !is_camera_on.load(std::sync::atomic::Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(300));
+                    continue;
+                }
+
                 thread::sleep(Duration::from_millis(33)); // ~30 FPS
 
                 match cam.frame() {
@@ -59,6 +64,11 @@ pub fn start_camera_worker() -> Receiver<CameraFrame> {
             println!("[CAMERA] Physical webcam not available or locked, running virtual camera pattern");
             let mut seq = 0u64;
             loop {
+                if !is_camera_on.load(std::sync::atomic::Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(300));
+                    continue;
+                }
+
                 thread::sleep(Duration::from_millis(33)); // 30 FPS
                 seq += 1;
                 let rgba = generate_virtual_camera_frame(640, 360, seq);
