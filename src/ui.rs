@@ -3335,6 +3335,14 @@ impl NanocordApp {
                 if let Ok(mut cfg) = self.encoder_config.write() {
                     cfg.cq_quality = self.cq_quality;
                     cfg.max_bitrate_mbps = self.max_bitrate_mbps;
+                    cfg.preset_index = match self.preset_mode {
+                        PresetMode::AutoSmart | PresetMode::ManualP1 => 1,
+                        PresetMode::ManualP3 => 3,
+                        PresetMode::ManualP4 => 4,
+                        PresetMode::ManualP5 => 5,
+                        PresetMode::ManualP6 => 6,
+                        PresetMode::ManualP7 => 7,
+                    };
                 }
 
                 ui.add_space(16.0);

@@ -457,6 +457,7 @@ pub fn encode_frame_to_jpeg(w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
 pub struct VideoEncoderConfig {
     pub cq_quality: u8,
     pub max_bitrate_mbps: u32,
+    pub preset_index: usize,
 }
 
 impl Default for VideoEncoderConfig {
@@ -464,6 +465,7 @@ impl Default for VideoEncoderConfig {
         Self {
             cq_quality: 22,
             max_bitrate_mbps: 30,
+            preset_index: 1,
         }
     }
 }
@@ -866,6 +868,7 @@ fn run_p2p_socket_session(
     let read_handle = thread::spawn(move || {
         let _ = reader.set_read_timeout(Some(Duration::from_millis(1500)));
         let mut header = [0u8; 12];
+        let mut h264_decoder = crate::decoder::H264Decoder::new().ok();
 
         while r_run.load(Ordering::Relaxed) && r_conn.load(Ordering::Relaxed) {
             match reader.read_exact(&mut header) {
@@ -890,12 +893,24 @@ fn run_p2p_socket_session(
                     }
 
                     if msg_type == 1 {
-                        let rgba = if flags == 1 {
-                            decode_frame_from_jpeg(&payload).map(|(_, _, d)| d).unwrap_or(payload)
+                        let rgba_opt = if flags == 2 {
+                            if let Some(ref mut dec) = h264_decoder {
+                                match dec.decode_packet(width, height, &payload) {
+                                    Ok(Some((_, _, frame_rgba))) => Some(frame_rgba),
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            }
+                        } else if flags == 1 {
+                            decode_frame_from_jpeg(&payload).map(|(_, _, d)| d)
                         } else {
-                            payload
+                            Some(payload)
                         };
-                        let _ = in_dt_tx.try_send(NetworkPeerFrame { width, height, rgba });
+
+                        if let Some(rgba) = rgba_opt {
+                            let _ = in_dt_tx.try_send(NetworkPeerFrame { width, height, rgba });
+                        }
                     } else if msg_type == 2 {
                         let rgba = if flags == 1 {
                             decode_frame_from_jpeg(&payload).map(|(_, _, d)| d).unwrap_or(payload)
@@ -935,20 +950,61 @@ fn run_p2p_socket_session(
     let mut fps_timer = Instant::now();
     let mut total_bytes_sent = 0u64;
 
+    let mut nv_encoder: Option<crate::nvenc::NvencEncoder> = None;
+    let mut cur_enc_config = (0u8, 0u32, 0u32, 0u32, 0usize);
+    let mut frame_idr_counter = 0u32;
+
     while is_running.load(Ordering::Relaxed) && is_connected.load(Ordering::Relaxed) {
         let mut sent_any = false;
 
         if let Ok(frame) = out_dt_rx.try_recv() {
-            let (cq, _max_br) = if let Ok(cfg) = encoder_config.read() {
-                (cfg.cq_quality, cfg.max_bitrate_mbps)
+            let (cq, max_br, preset_idx) = if let Ok(cfg) = encoder_config.read() {
+                (cfg.cq_quality, cfg.max_bitrate_mbps, cfg.preset_index)
             } else {
-                (22, 30)
+                (22, 30, 0)
             };
-            let jpeg_quality = cq_to_jpeg_quality(cq);
-            let (flags, payload) = if let Some(jpeg) = encode_frame_to_jpeg_with_quality(frame.width, frame.height, &frame.rgba, jpeg_quality) {
-                (1u8, jpeg)
+
+            let needed_config = (cq, max_br, frame.width, frame.height, preset_idx);
+            if cur_enc_config != needed_config {
+                let preset_guid = match preset_idx {
+                    0 => crate::nvenc::NV_ENC_PRESET_P1_GUID,
+                    1 => crate::nvenc::NV_ENC_PRESET_P3_GUID,
+                    2 => crate::nvenc::NV_ENC_PRESET_P7_GUID,
+                    _ => crate::nvenc::NV_ENC_PRESET_P1_GUID,
+                };
+                nv_encoder = crate::nvenc::NvencEncoder::new_standalone_h264(
+                    frame.width,
+                    frame.height,
+                    cq,
+                    max_br,
+                    60,
+                    preset_guid,
+                ).ok();
+                cur_enc_config = needed_config;
+            }
+
+            let force_idr = frame_idr_counter % 120 == 0;
+            frame_idr_counter = frame_idr_counter.wrapping_add(1);
+
+            let (flags, payload) = if let Some(ref mut enc) = nv_encoder {
+                match enc.encode_rgba_bytes(&frame.rgba, force_idr) {
+                    Ok(nal) => (2u8, nal),
+                    Err(_) => {
+                        let jpeg_quality = cq_to_jpeg_quality(cq);
+                        if let Some(jpeg) = encode_frame_to_jpeg_with_quality(frame.width, frame.height, &frame.rgba, jpeg_quality) {
+                            (1u8, jpeg)
+                        } else {
+                            (0u8, frame.rgba)
+                        }
+                    }
+                }
             } else {
-                (0u8, frame.rgba)
+                let jpeg_quality = cq_to_jpeg_quality(cq);
+                if let Some(jpeg) = encode_frame_to_jpeg_with_quality(frame.width, frame.height, &frame.rgba, jpeg_quality) {
+                    (1u8, jpeg)
+                } else {
+                    (0u8, frame.rgba)
+                }
             };
 
             let mut pkt = Vec::with_capacity(12 + payload.len());
