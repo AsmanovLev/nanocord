@@ -868,6 +868,7 @@ fn run_p2p_socket_session(
     let read_handle = thread::spawn(move || {
         let _ = reader.set_read_timeout(Some(Duration::from_millis(1500)));
         let mut header = [0u8; 12];
+        let mut hevc_decoder = crate::decoder::HevcDecoder::new().ok();
         let mut h264_decoder = crate::decoder::H264Decoder::new().ok();
 
         while r_run.load(Ordering::Relaxed) && r_conn.load(Ordering::Relaxed) {
@@ -893,7 +894,16 @@ fn run_p2p_socket_session(
                     }
 
                     if msg_type == 1 {
-                        let rgba_opt = if flags == 2 {
+                        let rgba_opt = if flags == 3 {
+                            if let Some(ref mut dec) = hevc_decoder {
+                                match dec.decode_packet(width, height, &payload) {
+                                    Ok(Some((_, _, frame_rgba))) => Some(frame_rgba),
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            }
+                        } else if flags == 2 {
                             if let Some(ref mut dec) = h264_decoder {
                                 match dec.decode_packet(width, height, &payload) {
                                     Ok(Some((_, _, frame_rgba))) => Some(frame_rgba),
@@ -950,7 +960,7 @@ fn run_p2p_socket_session(
     let mut fps_timer = Instant::now();
     let mut total_bytes_sent = 0u64;
 
-    let mut nv_encoder: Option<crate::nvenc::NvencEncoder> = None;
+    let mut nv_encoder: Option<(crate::nvenc::NvencEncoder, u8)> = None;
     let mut cur_enc_config = (0u8, 0u32, 0u32, 0u32, 0usize);
     let mut frame_idr_counter = 0u32;
 
@@ -972,23 +982,38 @@ fn run_p2p_socket_session(
                     2 => crate::nvenc::NV_ENC_PRESET_P7_GUID,
                     _ => crate::nvenc::NV_ENC_PRESET_P1_GUID,
                 };
-                nv_encoder = crate::nvenc::NvencEncoder::new_standalone_h264(
+
+                // Приоритет: аппаратный HEVC (H.265, flags = 3) -> аппаратный H.264 (flags = 2)
+                let mut enc = crate::nvenc::NvencEncoder::new_standalone_hevc(
                     frame.width,
                     frame.height,
                     cq,
                     max_br,
                     60,
                     preset_guid,
-                ).ok();
+                ).map(|e| (e, 3u8));
+
+                if enc.is_err() {
+                    enc = crate::nvenc::NvencEncoder::new_standalone_h264(
+                        frame.width,
+                        frame.height,
+                        cq,
+                        max_br,
+                        60,
+                        preset_guid,
+                    ).map(|e| (e, 2u8));
+                }
+
+                nv_encoder = enc.ok();
                 cur_enc_config = needed_config;
             }
 
             let force_idr = frame_idr_counter % 120 == 0;
             frame_idr_counter = frame_idr_counter.wrapping_add(1);
 
-            let (flags, payload) = if let Some(ref mut enc) = nv_encoder {
+            let (flags, payload) = if let Some((ref mut enc, codec_flag)) = nv_encoder {
                 match enc.encode_rgba_bytes(&frame.rgba, force_idr) {
-                    Ok(nal) => (2u8, nal),
+                    Ok(nal) => (codec_flag, nal),
                     Err(_) => {
                         let jpeg_quality = cq_to_jpeg_quality(cq);
                         if let Some(jpeg) = encode_frame_to_jpeg_with_quality(frame.width, frame.height, &frame.rgba, jpeg_quality) {

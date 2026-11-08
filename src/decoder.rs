@@ -5,6 +5,167 @@ use windows::core::{Result, GUID};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::Media::MediaFoundation::*;
 
+/// Нативный аппаратный декодер HEVC (H.265) на базе Windows Media Foundation / GPU MFT.
+pub struct HevcDecoder {
+    transform: IMFTransform,
+    pub width: u32,
+    pub height: u32,
+    is_stream_started: bool,
+    rgba_buffer: Vec<u8>,
+    pts_hns: i64,
+}
+
+impl HevcDecoder {
+    pub fn new() -> Result<Self> {
+        unsafe {
+            let _ = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
+            let in_type = MFT_REGISTER_TYPE_INFO {
+                guidMajorType: MFMediaType_Video,
+                guidSubtype: MFVideoFormat_HEVC,
+            };
+            let mut p_activate: *mut Option<IMFActivate> = null_mut();
+            let mut count: u32 = 0;
+            let _ = MFTEnumEx(
+                MFT_CATEGORY_VIDEO_DECODER,
+                MFT_ENUM_FLAG_ALL,
+                Some(&in_type),
+                None,
+                &mut p_activate,
+                &mut count,
+            );
+            if count > 0 && !p_activate.is_null() {
+                let slice = std::slice::from_raw_parts(p_activate, count as usize);
+                for act_opt in slice {
+                    if let Some(act) = act_opt {
+                        if let Ok(transform) = act.ActivateObject::<IMFTransform>() {
+                            if let Ok(attrs) = transform.GetAttributes() {
+                                let _ = attrs.SetUINT32(&MF_LOW_LATENCY, 1);
+                            }
+                            return Ok(Self {
+                                transform,
+                                width: 0,
+                                height: 0,
+                                is_stream_started: false,
+                                rgba_buffer: Vec::new(),
+                                pts_hns: 0,
+                            });
+                        }
+                    }
+                }
+            }
+            Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)))
+        }
+    }
+
+    pub fn configure(&mut self, width: u32, height: u32) -> Result<()> {
+        if self.width == width && self.height == height && self.is_stream_started {
+            return Ok(());
+        }
+
+        unsafe {
+            let in_type = MFCreateMediaType()?;
+            in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+            in_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_HEVC)?;
+            in_type.SetUINT64(&MF_MT_FRAME_SIZE, ((width as u64) << 32) | (height as u64))?;
+            self.transform.SetInputType(0, &in_type, 0)?;
+
+            let out_type = MFCreateMediaType()?;
+            out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+            out_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
+            out_type.SetUINT64(&MF_MT_FRAME_SIZE, ((width as u64) << 32) | (height as u64))?;
+            self.transform.SetOutputType(0, &out_type, 0)?;
+
+            let _ = self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+            let _ = self.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+            let _ = self.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+
+            self.width = width;
+            self.height = height;
+            self.is_stream_started = true;
+            self.rgba_buffer = vec![0u8; (width * height * 4) as usize];
+            Ok(())
+        }
+    }
+
+    pub fn decode_packet(&mut self, width: u32, height: u32, nal_bytes: &[u8]) -> Result<Option<(u32, u32, Vec<u8>)>> {
+        if nal_bytes.is_empty() {
+            return Ok(None);
+        }
+
+        if !self.is_stream_started || self.width != width || self.height != height {
+            self.configure(width, height)?;
+        }
+
+        unsafe {
+            let sample = MFCreateSample()?;
+            let buffer = MFCreateMemoryBuffer(nal_bytes.len() as u32)?;
+
+            let mut p_data: *mut u8 = null_mut();
+            let mut max_len = 0u32;
+            let mut cur_len = 0u32;
+            buffer.Lock(&mut p_data, Some(&mut max_len), Some(&mut cur_len))?;
+            std::ptr::copy_nonoverlapping(nal_bytes.as_ptr(), p_data, nal_bytes.len());
+            buffer.Unlock()?;
+            buffer.SetCurrentLength(nal_bytes.len() as u32)?;
+            sample.AddBuffer(&buffer)?;
+            let _ = sample.SetSampleTime(self.pts_hns);
+            let _ = sample.SetSampleDuration(166_666);
+            self.pts_hns += 166_666;
+
+            match self.transform.ProcessInput(0, &sample, 0) {
+                Ok(_) => {}
+                Err(e) => {
+                    const MF_E_NOTACCEPTING: i32 = -1072875847;
+                    if e.code().0 != MF_E_NOTACCEPTING {
+                        return Err(e);
+                    }
+                }
+            }
+
+            let mut out_buffer_desc = MFT_OUTPUT_DATA_BUFFER::default();
+            out_buffer_desc.dwStreamID = 0;
+
+            let out_sample = MFCreateSample()?;
+            let nv12_size = (width * height * 3 / 2) as u32;
+            let out_media_buffer = MFCreateMemoryBuffer(nv12_size * 2)?;
+            out_sample.AddBuffer(&out_media_buffer)?;
+            out_buffer_desc.pSample = std::mem::ManuallyDrop::new(Some(out_sample));
+
+            let mut status = 0u32;
+            match self.transform.ProcessOutput(0, std::slice::from_mut(&mut out_buffer_desc), &mut status) {
+                Ok(_) => {
+                    if let Some(ref sample_res) = out_buffer_desc.pSample.as_ref() {
+                        let media_buf = sample_res.ConvertToContiguousBuffer()?;
+                        let mut p_nv12: *mut u8 = null_mut();
+                        let mut len = 0u32;
+                        media_buf.Lock(&mut p_nv12, None, Some(&mut len))?;
+
+                        let nv12_slice = std::slice::from_raw_parts(p_nv12, len as usize);
+                        nv12_to_rgba(width as usize, height as usize, nv12_slice, &mut self.rgba_buffer);
+                        media_buf.Unlock()?;
+
+                        return Ok(Some((width, height, self.rgba_buffer.clone())));
+                    }
+                }
+                Err(e) => {
+                    const MF_E_TRANSFORM_NEED_MORE_INPUT: i32 = -1072875852;
+                    const MF_E_TRANSFORM_STREAM_CHANGE: i32 = -1072861855;
+                    if e.code().0 == MF_E_TRANSFORM_NEED_MORE_INPUT {
+                        return Ok(None);
+                    } else if e.code().0 == MF_E_TRANSFORM_STREAM_CHANGE {
+                        if let Ok(new_out_type) = self.transform.GetOutputAvailableType(0, 0) {
+                            let _ = self.transform.SetOutputType(0, &new_out_type, 0);
+                        }
+                        return Ok(None);
+                    }
+                }
+            }
+
+            Ok(None)
+        }
+    }
+}
+
 /// Нативный аппаратный декодер H.264 на базе встроенного в Windows Media Foundation MFT (CMSH264DecoderMFT).
 /// Не требует внешних DLL (FFmpeg), работает из коробки на любой версии Windows 10/11.
 pub struct H264Decoder {

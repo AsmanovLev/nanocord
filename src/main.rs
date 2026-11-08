@@ -38,75 +38,44 @@ fn main() -> eframe::Result<()> {
     }
 
     if is_test_decoder {
-        println!("Testing Windows Media Foundation H.264 Decoder MFT...");
-        match nanocord::decoder::H264Decoder::new() {
+        println!("Testing Hardware NVENC H.265 (HEVC) -> Media Foundation HEVC Decoder...");
+        match nanocord::decoder::HevcDecoder::new() {
             Ok(mut dec) => {
-                println!("SUCCESS: CMSH264DecoderMFT initialized!");
-
-                println!("Testing NVENC H.264 -> Media Foundation Decoder loopback...");
+                println!("SUCCESS: HevcDecoder initialized!");
                 let width = 1280;
                 let height = 720;
-                let mut dev = None;
-                let mut ctx = None;
-                let mut fl = windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
-
-                unsafe {
-                    let _ = windows::Win32::Graphics::Direct3D11::D3D11CreateDevice(
-                        None,
-                        windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE,
-                        windows::Win32::Foundation::HMODULE::default(),
-                        windows::Win32::Graphics::Direct3D11::D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                        Some(&[windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0]),
-                        windows::Win32::Graphics::Direct3D11::D3D11_SDK_VERSION,
-                        Some(&mut dev),
-                        Some(&mut fl),
-                        Some(&mut ctx),
-                    );
-                }
-
-                if let (Some(dev), Some(ctx)) = (dev, ctx) {
-                    let desc = D3D11_TEXTURE2D_DESC {
-                        Width: width,
-                        Height: height,
-                        MipLevels: 1,
-                        ArraySize: 1,
-                        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                        SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                        Usage: D3D11_USAGE_DEFAULT,
-                        BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
-                        CPUAccessFlags: 0,
-                        MiscFlags: 0,
-                    };
-                    let mut tex = None;
-                    unsafe {
-                        let _ = dev.CreateTexture2D(&desc, None, Some(&mut tex));
-                    }
-                    if let Some(tex) = tex {
-                        match NvencEncoder::new_h264(&dev, width, height, 22, 30, 60, nvenc::NV_ENC_PRESET_P1_GUID) {
-                            Ok(mut enc) => {
-                                for i in 1..=5 {
-                                    let is_idr = i == 1;
-                                    match enc.encode_texture(&tex, &ctx, is_idr) {
-                                        Ok(nal) => {
-                                            println!("  [Frame {}] NVENC H.264 encoded: {} bytes (is_idr: {})", i, nal.len(), is_idr);
-                                            match dec.decode_packet(width, height, &nal) {
-                                                Ok(Some((dw, dh, rgba))) => {
-                                                    println!("  [Frame {}] SUCCESS: Hardware decoded frame: {}x{}, RGBA: {} bytes!", i, dw, dh, rgba.len());
-                                                }
-                                                Ok(None) => println!("  [Frame {}] Decoder accepted packet (buffered)", i),
-                                                Err(e) => println!("  [Frame {}] Decode error: {:?}", i, e),
-                                            }
+                let dummy_rgba = vec![128u8; (width * height * 4) as usize];
+                match nanocord::nvenc::NvencEncoder::new_standalone_hevc(
+                    width,
+                    height,
+                    22,
+                    30,
+                    60,
+                    nanocord::nvenc::NV_ENC_PRESET_P1_GUID,
+                ) {
+                    Ok(mut enc) => {
+                        println!("SUCCESS: NvencEncoder HEVC initialized!");
+                        for i in 1..=5 {
+                            let is_idr = i == 1;
+                            match enc.encode_rgba_bytes(&dummy_rgba, is_idr) {
+                                Ok(nal) => {
+                                    println!("  [Frame {}] NVENC H.265 encoded: {} bytes (is_idr: {})", i, nal.len(), is_idr);
+                                    match dec.decode_packet(width, height, &nal) {
+                                        Ok(Some((dw, dh, rgba))) => {
+                                            println!("  [Frame {}] SUCCESS: Hardware HEVC decoded frame: {}x{}, RGBA: {} bytes!", i, dw, dh, rgba.len());
                                         }
-                                        Err(e) => println!("  [Frame {}] NVENC encode error: {:?}", i, e),
+                                        Ok(None) => println!("  [Frame {}] Decoder accepted packet (buffered)", i),
+                                        Err(e) => println!("  [Frame {}] Decode error: {:?}", i, e),
                                     }
                                 }
+                                Err(e) => println!("  [Frame {}] NVENC encode error: {:?}", i, e),
                             }
-                            Err(e) => println!("  NVENC init error: {:?}", e),
                         }
                     }
+                    Err(e) => println!("ERROR: NVENC HEVC init error: {:?}", e),
                 }
             }
-            Err(e) => println!("ERROR: Failed to initialize CMSH264DecoderMFT: {:?}", e),
+            Err(e) => println!("ERROR: Failed to initialize HevcDecoder: {:?}", e),
         }
         return Ok(());
     }

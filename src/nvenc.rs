@@ -399,14 +399,37 @@ impl NvencEncoder {
         )
     }
 
-    /// Автономный конструктор NVENC H.264 энкодера, создающий собственный D3D11 Device на NVIDIA GPU.
-    /// Позволяет кодировать произвольные RGBA кадры без привязки к внешнему контексту захвата.
+    /// Автономный конструктор NVENC HEVC (H.265) энкодера с собственным контекстом NVIDIA D3D11
+    pub fn new_standalone_hevc(
+        width: u32,
+        height: u32,
+        cq: u8,
+        max_bitrate_mbps: u32,
+        fps: u32,
+        preset_guid: GUID,
+    ) -> Result<Self> {
+        Self::new_standalone_codec(width, height, cq, max_bitrate_mbps, fps, NV_ENC_CODEC_HEVC_GUID, preset_guid)
+    }
+
+    /// Автономный конструктор NVENC H.264 энкодера с собственным контекстом NVIDIA D3D11
     pub fn new_standalone_h264(
         width: u32,
         height: u32,
         cq: u8,
         max_bitrate_mbps: u32,
         fps: u32,
+        preset_guid: GUID,
+    ) -> Result<Self> {
+        Self::new_standalone_codec(width, height, cq, max_bitrate_mbps, fps, NV_ENC_CODEC_H264_GUID, preset_guid)
+    }
+
+    pub fn new_standalone_codec(
+        width: u32,
+        height: u32,
+        cq: u8,
+        max_bitrate_mbps: u32,
+        fps: u32,
+        codec_guid: GUID,
         preset_guid: GUID,
     ) -> Result<Self> {
         unsafe {
@@ -497,7 +520,7 @@ impl NvencEncoder {
 
             let status = (api.nvEncGetEncodePresetConfigEx)(
                 encoder,
-                NV_ENC_CODEC_H264_GUID,
+                codec_guid,
                 preset_guid,
                 NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY,
                 &mut preset_config,
@@ -511,6 +534,8 @@ impl NvencEncoder {
                 cfg.rcParams.averageBitRate = max_bitrate_mbps * 1_000_000;
                 cfg.rcParams.vbvBufferSize = (max_bitrate_mbps * 1_000_000) / fps.max(1);
                 cfg.rcParams.flags |= 1 << 9; // zeroReorderDelay
+                cfg.gopLength = 0xFFFFFFFF;
+                cfg.frameIntervalP = 1;
                 Some(cfg)
             } else {
                 None
@@ -518,8 +543,9 @@ impl NvencEncoder {
 
             let mut init_params: NvEncInitializeParams = zeroed();
             init_params.version = NV_ENC_INITIALIZE_PARAMS_VER;
-            init_params.encodeGUID = NV_ENC_CODEC_H264_GUID;
+            init_params.encodeGUID = codec_guid;
             init_params.presetGUID = preset_guid;
+            init_params.tuningInfo = NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
             init_params.encodeWidth = width;
             init_params.encodeHeight = height;
             init_params.darWidth = width;
