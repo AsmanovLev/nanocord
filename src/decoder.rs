@@ -9,6 +9,8 @@ use windows::Win32::Media::MediaFoundation::*;
 pub struct HevcDecoder {
     transform: IMFTransform,
     pub width: u32,
+    /// true — MF отдаёт BGRA (RGB32) и наша YUV-конвертация не нужна вовсе.
+    is_rgb: bool,
     pub height: u32,
     is_stream_started: bool,
     rgba_buffer: Vec<u8>,
@@ -45,6 +47,7 @@ impl HevcDecoder {
                                 transform,
                                 width: 0,
                                 height: 0,
+                                is_rgb: false,
                                 is_stream_started: false,
                                 rgba_buffer: Vec::new(),
                                 pts_hns: 0,
@@ -72,9 +75,26 @@ impl HevcDecoder {
 
             let out_type = MFCreateMediaType()?;
             out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-            out_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
+            // RGB32 просим первым: тогда конвертацию YUV→RGB делает Media
+            // Foundation, а не наш код, и любой баг разметки строк исчезает.
+            out_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)?;
             out_type.SetUINT64(&MF_MT_FRAME_SIZE, ((width as u64) << 32) | (height as u64))?;
-            self.transform.SetOutputType(0, &out_type, 0)?;
+            let mut rgb_ok = self.transform.SetOutputType(0, &out_type, 0).is_ok();
+
+            if !rgb_ok {
+                let fallback = MFCreateMediaType()?;
+                fallback.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+                fallback.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
+                fallback.SetUINT64(&MF_MT_FRAME_SIZE, ((width as u64) << 32) | (height as u64))?;
+                self.transform.SetOutputType(0, &fallback, 0)?;
+                rgb_ok = false;
+            }
+            self.is_rgb = rgb_ok;
+            crate::diag::log(&format!(
+                "decoder: {} output={}",
+                "HEVC",
+                if rgb_ok { "RGB32" } else { "NV12" }
+            ));
 
             let _ = self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
             let _ = self.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
@@ -157,13 +177,37 @@ impl HevcDecoder {
                                     ));
                                     if stride >= width as usize && need > width as usize * height as usize {
                                         let data = std::slice::from_raw_parts(p, need);
-                                        nv12_to_rgba_strided(
-                                            width as usize,
-                                            height as usize,
-                                            stride,
-                                            data,
-                                            &mut self.rgba_buffer,
-                                        );
+                                        if self.is_rgb {
+                                            // MF уже отдал BGRA: только переставить
+                                            // каналы, никакой YUV-арифметики.
+                                            let need_rgba =
+                                                width as usize * height as usize * 4;
+                                            if self.rgba_buffer.len() < need_rgba {
+                                                self.rgba_buffer = vec![0u8; need_rgba];
+                                            }
+                                            for y in 0..height as usize {
+                                                let src_row = y * stride;
+                                                let dst_row = y * width as usize * 4;
+                                                for x in 0..width as usize {
+                                                    let s4 = src_row + x * 4;
+                                                    let d4 = dst_row + x * 4;
+                                                    if s4 + 2 < data.len() {
+                                                        self.rgba_buffer[d4] = data[s4 + 2];
+                                                        self.rgba_buffer[d4 + 1] = data[s4 + 1];
+                                                        self.rgba_buffer[d4 + 2] = data[s4];
+                                                        self.rgba_buffer[d4 + 3] = 255;
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            nv12_to_rgba_strided(
+                                                width as usize,
+                                                height as usize,
+                                                stride,
+                                                data,
+                                                &mut self.rgba_buffer,
+                                            );
+                                        }
                                         res_frame =
                                             Some((width, height, self.rgba_buffer.clone()));
                                     }
@@ -212,6 +256,8 @@ impl HevcDecoder {
 pub struct H264Decoder {
     transform: IMFTransform,
     pub width: u32,
+    /// true — MF отдаёт BGRA (RGB32) и наша YUV-конвертация не нужна вовсе.
+    is_rgb: bool,
     pub height: u32,
     is_stream_started: bool,
     rgba_buffer: Vec<u8>,
@@ -232,6 +278,7 @@ impl H264Decoder {
                 transform,
                 width: 0,
                 height: 0,
+                is_rgb: false,
                 is_stream_started: false,
                 rgba_buffer: Vec::new(),
                 pts_hns: 0,
@@ -256,9 +303,26 @@ impl H264Decoder {
             // Задаем выходной формат NV12
             let out_type = MFCreateMediaType()?;
             out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-            out_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
+            // RGB32 просим первым: тогда конвертацию YUV→RGB делает Media
+            // Foundation, а не наш код, и любой баг разметки строк исчезает.
+            out_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)?;
             out_type.SetUINT64(&MF_MT_FRAME_SIZE, ((width as u64) << 32) | (height as u64))?;
-            self.transform.SetOutputType(0, &out_type, 0)?;
+            let mut rgb_ok = self.transform.SetOutputType(0, &out_type, 0).is_ok();
+
+            if !rgb_ok {
+                let fallback = MFCreateMediaType()?;
+                fallback.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+                fallback.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
+                fallback.SetUINT64(&MF_MT_FRAME_SIZE, ((width as u64) << 32) | (height as u64))?;
+                self.transform.SetOutputType(0, &fallback, 0)?;
+                rgb_ok = false;
+            }
+            self.is_rgb = rgb_ok;
+            crate::diag::log(&format!(
+                "decoder: {} output={}",
+                "H264",
+                if rgb_ok { "RGB32" } else { "NV12" }
+            ));
 
             let _ = self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
             let _ = self.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
@@ -345,13 +409,37 @@ impl H264Decoder {
                                     ));
                                     if stride >= width as usize && need > width as usize * height as usize {
                                         let data = std::slice::from_raw_parts(p, need);
-                                        nv12_to_rgba_strided(
-                                            width as usize,
-                                            height as usize,
-                                            stride,
-                                            data,
-                                            &mut self.rgba_buffer,
-                                        );
+                                        if self.is_rgb {
+                                            // MF уже отдал BGRA: только переставить
+                                            // каналы, никакой YUV-арифметики.
+                                            let need_rgba =
+                                                width as usize * height as usize * 4;
+                                            if self.rgba_buffer.len() < need_rgba {
+                                                self.rgba_buffer = vec![0u8; need_rgba];
+                                            }
+                                            for y in 0..height as usize {
+                                                let src_row = y * stride;
+                                                let dst_row = y * width as usize * 4;
+                                                for x in 0..width as usize {
+                                                    let s4 = src_row + x * 4;
+                                                    let d4 = dst_row + x * 4;
+                                                    if s4 + 2 < data.len() {
+                                                        self.rgba_buffer[d4] = data[s4 + 2];
+                                                        self.rgba_buffer[d4 + 1] = data[s4 + 1];
+                                                        self.rgba_buffer[d4 + 2] = data[s4];
+                                                        self.rgba_buffer[d4 + 3] = 255;
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            nv12_to_rgba_strided(
+                                                width as usize,
+                                                height as usize,
+                                                stride,
+                                                data,
+                                                &mut self.rgba_buffer,
+                                            );
+                                        }
                                         res_frame =
                                             Some((width, height, self.rgba_buffer.clone()));
                                     }
