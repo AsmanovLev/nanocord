@@ -141,20 +141,33 @@ impl HevcDecoder {
                         if let Ok(media_buf) = sample_res.ConvertToContiguousBuffer() {
                             let buf2d_res: Result<IMF2DBuffer> = media_buf.cast();
                             if let Ok(buf2d) = buf2d_res {
-                                let mut packed_nv12 = vec![0u8; (width * height * 3 / 2) as usize];
-                                if buf2d.ContiguousCopyTo(&mut packed_nv12).is_ok() {
-                                    nv12_to_rgba(width as usize, height as usize, &packed_nv12, &mut self.rgba_buffer);
-                                    let y_size = (width * height) as usize;
+                                let mut p: *mut u8 = null_mut();
+                                let mut pitch: i32 = 0;
+                                if buf2d.Lock2D(&mut p, &mut pitch).is_ok() {
+                                    // Читаем по настоящему pitch. Пересчёт из длины
+                                    // буфера давал неверный шаг, и картинка уезжала
+                                    // диагональными полосами.
+                                    let stride = pitch.max(0) as usize;
+                                    let cur_len = media_buf.GetCurrentLength().unwrap_or(0);
+                                    let need = (stride * height as usize * 3 / 2)
+                                        .min(cur_len as usize);
                                     crate::diag::log_once(&format!(
-                                        "decoder: first frame {}x{} len={} y0={} u0={} v0={}",
-                                        width,
-                                        height,
-                                        packed_nv12.len(),
-                                        packed_nv12.first().copied().unwrap_or(0),
-                                        packed_nv12.get(y_size).copied().unwrap_or(0),
-                                        packed_nv12.get(y_size + 1).copied().unwrap_or(0)
+                                        "decoder: pitch={} width={} height={} len={}",
+                                        stride, width, height, cur_len
                                     ));
-                                    res_frame = Some((width, height, self.rgba_buffer.clone()));
+                                    if stride >= width as usize && need > width as usize * height as usize {
+                                        let data = std::slice::from_raw_parts(p, need);
+                                        nv12_to_rgba_strided(
+                                            width as usize,
+                                            height as usize,
+                                            stride,
+                                            data,
+                                            &mut self.rgba_buffer,
+                                        );
+                                        res_frame =
+                                            Some((width, height, self.rgba_buffer.clone()));
+                                    }
+                                    buf2d.Unlock2D();
                                 }
                             } else {
                                 let mut p_nv12: *mut u8 = null_mut();
@@ -316,20 +329,33 @@ impl H264Decoder {
                         if let Ok(media_buf) = sample_res.ConvertToContiguousBuffer() {
                             let buf2d_res: Result<IMF2DBuffer> = media_buf.cast();
                             if let Ok(buf2d) = buf2d_res {
-                                let mut packed_nv12 = vec![0u8; (width * height * 3 / 2) as usize];
-                                if buf2d.ContiguousCopyTo(&mut packed_nv12).is_ok() {
-                                    nv12_to_rgba(width as usize, height as usize, &packed_nv12, &mut self.rgba_buffer);
-                                    let y_size = (width * height) as usize;
+                                let mut p: *mut u8 = null_mut();
+                                let mut pitch: i32 = 0;
+                                if buf2d.Lock2D(&mut p, &mut pitch).is_ok() {
+                                    // Читаем по настоящему pitch. Пересчёт из длины
+                                    // буфера давал неверный шаг, и картинка уезжала
+                                    // диагональными полосами.
+                                    let stride = pitch.max(0) as usize;
+                                    let cur_len = media_buf.GetCurrentLength().unwrap_or(0);
+                                    let need = (stride * height as usize * 3 / 2)
+                                        .min(cur_len as usize);
                                     crate::diag::log_once(&format!(
-                                        "decoder: first frame {}x{} len={} y0={} u0={} v0={}",
-                                        width,
-                                        height,
-                                        packed_nv12.len(),
-                                        packed_nv12.first().copied().unwrap_or(0),
-                                        packed_nv12.get(y_size).copied().unwrap_or(0),
-                                        packed_nv12.get(y_size + 1).copied().unwrap_or(0)
+                                        "decoder: pitch={} width={} height={} len={}",
+                                        stride, width, height, cur_len
                                     ));
-                                    res_frame = Some((width, height, self.rgba_buffer.clone()));
+                                    if stride >= width as usize && need > width as usize * height as usize {
+                                        let data = std::slice::from_raw_parts(p, need);
+                                        nv12_to_rgba_strided(
+                                            width as usize,
+                                            height as usize,
+                                            stride,
+                                            data,
+                                            &mut self.rgba_buffer,
+                                        );
+                                        res_frame =
+                                            Some((width, height, self.rgba_buffer.clone()));
+                                    }
+                                    buf2d.Unlock2D();
                                 }
                             } else {
                                 let mut p_nv12: *mut u8 = null_mut();
