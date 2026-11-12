@@ -487,11 +487,18 @@ impl NvencEncoder {
                 MiscFlags: 0,
             };
             let mut st = None;
-            nvidia_device.CreateTexture2D(&staging_desc, None, Some(&mut st))?;
-            let staging_tex = st.ok_or_else(|| {
-                windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259))
-            })?;
-            crate::diag::log("nvenc: staging texture created");
+            match nvidia_device.CreateTexture2D(&staging_desc, None, Some(&mut st)) {
+                Ok(()) => {}
+                Err(e) => crate::diag::log(&format!(
+                    "nvenc: staging create failed {:#010X}",
+                    e.code().0
+                )),
+            }
+            let staging_tex = st;
+            crate::diag::log(&format!(
+                "nvenc: staging texture ready={}",
+                staging_tex.is_some()
+            ));
 
             let nv_desc = D3D11_TEXTURE2D_DESC {
                 Width: width,
@@ -506,10 +513,22 @@ impl NvencEncoder {
                 MiscFlags: 0,
             };
             let mut nt = None;
-            nvidia_device.CreateTexture2D(&nv_desc, None, Some(&mut nt))?;
-            let opt_nv_tex = nt.ok_or_else(|| {
-                windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259))
+            nvidia_device.CreateTexture2D(&nv_desc, None, Some(&mut nt)).map_err(|e| {
+                crate::diag::log(&format!(
+                    "nvenc: input texture create failed {:#010X}",
+                    e.code().0
+                ));
+                e
             })?;
+            let opt_nv_tex = match nt {
+                Some(t) => t,
+                None => {
+                    crate::diag::log("nvenc: input texture is null");
+                    return Err(windows::core::Error::from_hresult(
+                        windows::core::HRESULT(-2147467259),
+                    ));
+                }
+            };
             crate::diag::log("nvenc: encoder input texture created (DEFAULT)");
 
             let dll_name: Vec<u16> = "nvEncodeAPI64.dll\0".encode_utf16().collect();
@@ -628,7 +647,7 @@ impl NvencEncoder {
                 frame_count: 0,
                 nvidia_device,
                 nvidia_context,
-                opt_staging_tex: Some(staging_tex),
+                opt_staging_tex: staging_tex,
                 opt_nv_tex: Some(opt_nv_tex),
                 is_cross_adapter: true,
             })
@@ -863,11 +882,18 @@ impl NvencEncoder {
                 MiscFlags: 0,
             };
             let mut st = None;
-            nvidia_device.CreateTexture2D(&staging_desc, None, Some(&mut st))?;
-            let staging_tex = st.ok_or_else(|| {
-                windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259))
-            })?;
-            crate::diag::log("nvenc: staging texture created");
+            match nvidia_device.CreateTexture2D(&staging_desc, None, Some(&mut st)) {
+                Ok(()) => {}
+                Err(e) => crate::diag::log(&format!(
+                    "nvenc: staging create failed {:#010X}",
+                    e.code().0
+                )),
+            }
+            let staging_tex = st;
+            crate::diag::log(&format!(
+                "nvenc: staging texture ready={}",
+                staging_tex.is_some()
+            ));
 
             let nv_desc = D3D11_TEXTURE2D_DESC {
                 Width: width,
@@ -903,7 +929,7 @@ impl NvencEncoder {
                 return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }
             registered_resource = reg_res.registeredResource;
-            opt_staging_tex = Some(staging_tex);
+            opt_staging_tex = staging_tex;
             opt_nv_tex = Some(nt);
 
             println!(
@@ -1051,32 +1077,31 @@ impl NvencEncoder {
                 None => return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259))),
             };
 
-            let staging = match self.opt_staging_tex.as_ref() {
-                Some(t) => t,
-                None => return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259))),
-            };
-
-            let mut mapped_dst = D3D11_MAPPED_SUBRESOURCE::default();
-            self.nvidia_context.Map(staging, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped_dst))?;
-
+            // Кадр собирается в системной памяти и заливается в DEFAULT-текстуру.
+            // Map в зарегистрированный ресурс NVENC не принимает (E_FAIL), а
+            // staging-текстура на этом железе не создаётся.
             let row_bytes = self.width as usize * 4;
-            if rgba.len() >= row_bytes * self.height as usize {
-                for dy in 0..self.height as usize {
-                    let src_offset = dy * row_bytes;
-                    let dst_ptr = (mapped_dst.pData as *mut u8).add(dy * mapped_dst.RowPitch as usize);
-                    for dx in 0..self.width as usize {
-                        let s = src_offset + dx * 4;
-                        let d = dx * 4;
-                        *dst_ptr.add(d) = rgba[s + 2];     // B
-                        *dst_ptr.add(d + 1) = rgba[s + 1]; // G
-                        *dst_ptr.add(d + 2) = rgba[s];     // R
-                        *dst_ptr.add(d + 3) = 255;         // A
-                    }
-                }
+            let needed = row_bytes * self.height as usize;
+            if rgba.len() < needed {
+                return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }
-            self.nvidia_context.Unmap(staging, 0);
-            // Пиксели теперь в DEFAULT-текстуре — именно её ждёт NVENC.
-            self.nvidia_context.CopyResource(nv_tex, staging);
+
+            let mut bgra = vec![0u8; needed];
+            for (src, dst) in rgba.chunks_exact(4).zip(bgra.chunks_exact_mut(4)) {
+                dst[0] = src[2];
+                dst[1] = src[1];
+                dst[2] = src[0];
+                dst[3] = 255;
+            }
+
+            self.nvidia_context.UpdateSubresource(
+                nv_tex,
+                0,
+                None,
+                bgra.as_ptr() as *const c_void,
+                row_bytes as u32,
+                0,
+            );
 
             let mut map_res: NvEncMapInputResource = zeroed();
             map_res.version = NV_ENC_MAP_INPUT_RESOURCE_VER;

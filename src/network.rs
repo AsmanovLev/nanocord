@@ -1379,7 +1379,17 @@ fn run_p2p_socket_session(
                     ).map(|e| (e, 3u8));
                 }
 
-                nv_encoder = enc.ok();
+                nv_encoder = match enc {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        crate::diag::log(&format!(
+                            "encoder: init failed {:#010X} {}",
+                            e.code().0,
+                            e.message()
+                        ));
+                        None
+                    }
+                };
                 cur_enc_config = needed_config;
                 crate::diag::log(&format!(
                     "encoder: {} {}x{} cq={} max={}Mbps",
