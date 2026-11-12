@@ -233,6 +233,7 @@ impl DxgiCapture {
             let staging = staging.expect("Failed to create staging texture");
 
             println!("DXGI Screen Capture initialized: {}x{}", width, height);
+            crate::diag::log(&format!("capture: DXGI duplication {}x{}", width, height));
 
             Ok(Self {
                 device,
@@ -566,6 +567,11 @@ pub fn start_desktop_preview_worker(
                     }
                     Err(e) => {
                         stats.note_error(&e);
+                        crate::diag::log(&format!(
+                            "capture: create failed {:#010X} {}",
+                            e.code().0,
+                            e.message()
+                        ));
                         next_attempt = Instant::now() + backoff;
                         backoff = (backoff * 2).min(Duration::from_secs(2));
                     }
@@ -581,6 +587,11 @@ pub fn start_desktop_preview_worker(
                     Ok(None) => {}
                     Err(e) => {
                         stats.note_error(&e);
+                        crate::diag::log(&format!(
+                            "capture: grab failed {:#010X} {}",
+                            e.code().0,
+                            e.message()
+                        ));
                         // ACCESS_LOST is routine (UAC, mode change, exclusive
                         // fullscreen). Rebuild with a backoff; the UI keeps the
                         // last texture, so no black frame is shown meanwhile.
