@@ -338,6 +338,8 @@ pub struct NvencEncoder {
     opt_staging_tex: Option<ID3D11Texture2D>,
     opt_nv_tex: Option<ID3D11Texture2D>,
     is_cross_adapter: bool,
+    /// Событие, которым ждём окончания загрузки кадра в текстуру.
+    sync_query: Option<ID3D11Query>,
 }
 
 impl NvencEncoder {
@@ -639,6 +641,19 @@ impl NvencEncoder {
                 return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }
 
+            // Загрузка в текстуру — операция GPU. Без ожидания NVENC читает
+            // ресурс, пока в него ещё пишется кадр, и получает рвань.
+            let mut query: Option<ID3D11Query> = None;
+            let mut qdesc = D3D11_QUERY_DESC::default();
+            qdesc.Query = D3D11_QUERY_EVENT;
+            if nvidia_device
+                .CreateQuery(&qdesc, None, Some(&mut query))
+                .is_err()
+            {
+                crate::diag::log("nvenc: query create failed");
+                query = None;
+            }
+
             Ok(Self {
                 api,
                 encoder,
@@ -652,6 +667,7 @@ impl NvencEncoder {
                 opt_staging_tex: staging_tex,
                 opt_nv_tex: Some(opt_nv_tex),
                 is_cross_adapter: true,
+                sync_query: query,
             })
         }
     }
@@ -952,6 +968,7 @@ impl NvencEncoder {
                 opt_staging_tex,
                 opt_nv_tex,
                 is_cross_adapter,
+                sync_query: None,
             })
         }
     }
@@ -1104,6 +1121,27 @@ impl NvencEncoder {
                 row_bytes as u32,
                 0,
             );
+
+            // Ждём, пока копия реально доедет до видеопамяти: NVENC — отдельный
+            // движок и без этого читает недописанный кадр.
+            if let Some(query) = self.sync_query.as_ref() {
+                self.nvidia_context.End(query);
+                let mut data: u32 = 0;
+                let mut spins = 0u32;
+                loop {
+                    let hr = self.nvidia_context.GetData(
+                        query,
+                        Some(&mut data as *mut u32 as *mut c_void),
+                        std::mem::size_of::<u32>() as u32,
+                        0,
+                    );
+                    if hr.is_ok() || spins > 100_000 {
+                        break;
+                    }
+                    spins += 1;
+                    std::hint::spin_loop();
+                }
+            }
 
             let mut map_res: NvEncMapInputResource = zeroed();
             map_res.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
