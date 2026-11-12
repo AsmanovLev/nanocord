@@ -887,6 +887,11 @@ fn run_wasapi_capture_loop(
             match proc_res {
                 Ok((client, fmt)) => (client, fmt),
                 Err(_) => {
+                    // Device loopback hears everything, including our own
+                    // playback: the peer's voice goes back to the peer (echo).
+                    crate::diag::log_once(
+                        "loopback: process loopback unavailable, using device loopback (echo risk)",
+                    );
                     let device: IMMDevice = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
                     let client = device.Activate::<IAudioClient>(CLSCTX_ALL, None)?;
                     let fmt = client.GetMixFormat()?;

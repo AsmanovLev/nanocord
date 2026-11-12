@@ -1117,6 +1117,24 @@ fn run_p2p_socket_session(
     while is_running.load(Ordering::Relaxed) && is_connected.load(Ordering::Relaxed) {
         let mut sent_any = false;
 
+        while let Ok(audio) = out_aud_rx.try_recv() {
+            let payload = audio.to_bytes();
+            let mut pkt = Vec::with_capacity(12 + payload.len());
+            pkt.extend_from_slice(&0x4E43u16.to_le_bytes());
+            pkt.push(3); // Audio
+            pkt.push(0); // flags
+            pkt.extend_from_slice(&0u16.to_le_bytes());
+            pkt.extend_from_slice(&0u16.to_le_bytes());
+            pkt.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            pkt.extend_from_slice(&payload);
+
+            if writer.write_all(&pkt).is_err() {
+                break;
+            }
+            total_bytes_sent += pkt.len() as u64;
+            sent_any = true;
+        }
+
         if let Some(frame) = outbox_desktop.take() {
             let (cq, max_br, preset_idx) = if let Ok(cfg) = encoder_config.read() {
                 (cfg.cq_quality, cfg.max_bitrate_mbps, cfg.preset_index)
@@ -1156,6 +1174,18 @@ fn run_p2p_socket_session(
 
                 nv_encoder = enc.ok();
                 cur_enc_config = needed_config;
+                crate::diag::log(&format!(
+                    "encoder: {} {}x{} cq={} max={}Mbps",
+                    match nv_encoder.as_ref() {
+                        Some((_, 3)) => "HEVC(NVENC)",
+                        Some((_, 2)) => "H264(NVENC)",
+                        _ => "JPEG(CPU)",
+                    },
+                    frame.width,
+                    frame.height,
+                    cq,
+                    max_br
+                ));
             }
 
             let force_idr = frame_idr_counter % 120 == 0;
@@ -1222,23 +1252,9 @@ fn run_p2p_socket_session(
             sent_any = true;
         }
 
-        while let Ok(audio) = out_aud_rx.try_recv() {
-            let payload = audio.to_bytes();
-            let mut pkt = Vec::with_capacity(12 + payload.len());
-            pkt.extend_from_slice(&0x4E43u16.to_le_bytes());
-            pkt.push(3); // Audio
-            pkt.push(0); // flags
-            pkt.extend_from_slice(&0u16.to_le_bytes());
-            pkt.extend_from_slice(&0u16.to_le_bytes());
-            pkt.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-            pkt.extend_from_slice(&payload);
-
-            if writer.write_all(&pkt).is_err() {
-                break;
-            }
-            total_bytes_sent += pkt.len() as u64;
-            sent_any = true;
-        }
+        // Audio is drained at the top of the loop, before any frame is encoded:
+        // encoding a 1080p frame takes long enough to starve the audio and make
+        // playback crackle.
 
         // A still desktop produces no frames at all. This keeps the peer's
         // liveness timer alive without shipping a picture it already has.
