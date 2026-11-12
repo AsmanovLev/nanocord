@@ -26,7 +26,9 @@ opus-pure = "0.2.2"
 opt-level = "s"
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+# A panic in a worker thread must not take the whole call down. With `abort`
+# one failed DXGI/VENC/audio call kills the process mid-conversation.
+panic = "unwind"
 strip = true
 
 [profile.compact]

@@ -63,6 +63,7 @@ impl HevcDecoder {
         }
 
         unsafe {
+            crate::diag::log(&format!("decoder: HEVC configure {}x{}", width, height));
             let in_type = MFCreateMediaType()?;
             in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
             in_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_HEVC)?;
@@ -143,6 +144,16 @@ impl HevcDecoder {
                                 let mut packed_nv12 = vec![0u8; (width * height * 3 / 2) as usize];
                                 if buf2d.ContiguousCopyTo(&mut packed_nv12).is_ok() {
                                     nv12_to_rgba(width as usize, height as usize, &packed_nv12, &mut self.rgba_buffer);
+                                    let y_size = (width * height) as usize;
+                                    crate::diag::log_once(&format!(
+                                        "decoder: first frame {}x{} len={} y0={} u0={} v0={}",
+                                        width,
+                                        height,
+                                        packed_nv12.len(),
+                                        packed_nv12.first().copied().unwrap_or(0),
+                                        packed_nv12.get(y_size).copied().unwrap_or(0),
+                                        packed_nv12.get(y_size + 1).copied().unwrap_or(0)
+                                    ));
                                     res_frame = Some((width, height, self.rgba_buffer.clone()));
                                 }
                             } else {
@@ -222,6 +233,7 @@ impl H264Decoder {
         }
 
         unsafe {
+            crate::diag::log(&format!("decoder: H264 configure {}x{}", width, height));
             let in_type = MFCreateMediaType()?;
             in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
             in_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
@@ -307,6 +319,16 @@ impl H264Decoder {
                                 let mut packed_nv12 = vec![0u8; (width * height * 3 / 2) as usize];
                                 if buf2d.ContiguousCopyTo(&mut packed_nv12).is_ok() {
                                     nv12_to_rgba(width as usize, height as usize, &packed_nv12, &mut self.rgba_buffer);
+                                    let y_size = (width * height) as usize;
+                                    crate::diag::log_once(&format!(
+                                        "decoder: first frame {}x{} len={} y0={} u0={} v0={}",
+                                        width,
+                                        height,
+                                        packed_nv12.len(),
+                                        packed_nv12.first().copied().unwrap_or(0),
+                                        packed_nv12.get(y_size).copied().unwrap_or(0),
+                                        packed_nv12.get(y_size + 1).copied().unwrap_or(0)
+                                    ));
                                     res_frame = Some((width, height, self.rgba_buffer.clone()));
                                 }
                             } else {

@@ -289,6 +289,12 @@ impl DxgiCapture {
         }
 
         let pitch = mapped.RowPitch as usize;
+        if mapped.pData.is_null() {
+            unsafe {
+                self.context.Unmap(&self.staging, 0);
+            }
+            return Ok(None);
+        }
         let row_bytes = self.width as usize * 4;
         let mut bgra = vec![0u8; row_bytes * self.height as usize];
         unsafe {
@@ -529,6 +535,7 @@ pub fn start_desktop_preview_worker(
         let mut next_attempt = Instant::now();
         let mut backoff = Duration::from_millis(250);
         let mut seq = 0u64;
+        let mut last_source = FrameSource::Dxgi;
         let mut next_tick = Instant::now();
         let mut fps_window_start = Instant::now();
         let mut fps_window_frames = 0u32;
@@ -596,6 +603,10 @@ pub fn start_desktop_preview_worker(
                 seq += 1;
                 stats.frames.fetch_add(1, Ordering::Relaxed);
                 stats.source.store(source.as_u32(), Ordering::Relaxed);
+                if source != last_source {
+                    crate::diag::log(&format!("capture source: {}", source.label()));
+                    last_source = source;
+                }
 
                 slot.put(PreviewFrame {
                     width: target_w,

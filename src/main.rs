@@ -17,6 +17,7 @@ fn main() -> eframe::Result<()> {
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("{:#?}\n", info);
         let _ = std::fs::write("panic.txt", &msg);
+        nanocord::diag::log(&format!("PANIC: {}", msg));
         if let Ok(mut exe) = std::env::current_exe() {
             exe.pop();
             exe.push("panic.txt");
