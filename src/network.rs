@@ -1236,6 +1236,7 @@ fn run_p2p_socket_session(
     struct PendingOutgoingFile {
         file: std::fs::File,
         name: String,
+        path: String,
         sent: u64,
     }
     let mut pending_file: Option<PendingOutgoingFile> = None;
@@ -1243,6 +1244,7 @@ fn run_p2p_socket_session(
     let mut nv_encoder: Option<(crate::nvenc::NvencEncoder, u8)> = None;
     let mut cur_enc_config = (0u8, 0u32, 0u32, 0u32, 0usize);
     let mut frame_idr_counter = 0u32;
+    let mut encode_errors = 0u32;
 
     while is_running.load(Ordering::Relaxed) && is_connected.load(Ordering::Relaxed) {
         let mut sent_any = false;
@@ -1296,6 +1298,7 @@ fn run_p2p_socket_session(
                                 pending_file = Some(PendingOutgoingFile {
                                     file,
                                     name,
+                                    path: path.display().to_string(),
                                     sent: 0,
                                 });
                                 break;
@@ -1319,7 +1322,7 @@ fn run_p2p_socket_session(
                     let _ = send_packet(&mut writer, 9, 0, &1u32.to_le_bytes());
                     let _ = chat_evt_tx.try_send(ChatEvent::File {
                         name: pf.name.clone(),
-                        path: String::new(),
+                        path: pf.path.clone(),
                         incoming: false,
                     });
                     pending_file = None;
@@ -1399,11 +1402,17 @@ fn run_p2p_socket_session(
                 Some((enc, codec_flag)) => match enc.encode_rgba_bytes(&frame.rgba, force_idr) {
                     Ok(nal) => (*codec_flag, nal),
                     Err(e) => {
-                        crate::diag::log(&format!(
-                            "encode: failed {:#010X} {}",
-                            e.code().0,
-                            e.message()
-                        ));
+                        encode_errors += 1;
+                        // One line per thirty failures: a broken encoder
+                        // otherwise writes thousands of identical lines.
+                        if encode_errors % 30 == 1 {
+                            crate::diag::log(&format!(
+                                "encode: failed {:#010X} {} (count={})",
+                                e.code().0,
+                                e.message(),
+                                encode_errors
+                            ));
+                        }
                         (0u8, Vec::new())
                     }
                 },

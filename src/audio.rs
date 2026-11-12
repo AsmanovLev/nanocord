@@ -720,7 +720,10 @@ fn run_wasapi_playback_loop(
         ));
 
         let mut sample_queue: VecDeque<f32> = VecDeque::with_capacity(48000);
-        let target_prebuffer = (sample_rate as f32 * 0.030) as usize; // 30ms стартовая подушка
+        // 60 ms, not 30: video frames share the TCP socket, so audio chunks
+        // arrive in bursts of tens of milliseconds. A thinner cushion turns
+        // that jitter into audible crackle.
+        let target_prebuffer = (sample_rate as f32 * 0.060) as usize;
         let max_buffer = (sample_rate as f32 * 0.600) as usize; // 600ms
         let mut is_prebuffering = true;
         let mut last_sample = 0.0f32;
