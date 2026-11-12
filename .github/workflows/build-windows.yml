@@ -2,7 +2,7 @@ name: build-windows
 
 on:
   push:
-    branches: ["feat/stage-a"]
+    branches: ["master", "feat/**"]
   workflow_dispatch:
 
 jobs:

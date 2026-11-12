@@ -769,116 +769,88 @@ impl P2PNetworkClient {
         let enc_config_clone = encoder_config.clone();
 
         thread::spawn(move || {
-            let resolve_target = if host_clone.starts_with('[') && host_clone.ends_with(']') {
-                format!("{}:{}", host_clone, port)
-            } else if host_clone.contains(':') && !host_clone.contains('.') {
-                format!("[{}]:{}", host_clone, port)
-            } else {
-                format!("{}:{}", host_clone, port)
-            };
+            let mut attempt: u32 = 0;
 
-            let addrs_res = resolve_target.to_socket_addrs();
-            let addrs: Vec<SocketAddr> = match addrs_res {
-                Ok(iter) => iter.collect(),
-                Err(e) => {
-                    if let Ok(mut st) = status_clone.write() {
-                        *st = format!("Ошибка адреса: {}", e);
-                    }
-                    return;
-                }
-            };
-
-            if addrs.is_empty() {
-                if let Ok(mut st) = status_clone.write() {
-                    *st = format!("Не удалось разрешить адрес {}", resolve_target);
-                }
-                return;
-            }
-
-            let mut connected_stream = None;
-            for sa in &addrs {
-                if let Ok(s) = TcpStream::connect_timeout(sa, Duration::from_secs(3)) {
-                    connected_stream = Some(s);
+            loop {
+                if !running_clone.load(Ordering::Relaxed) {
                     break;
                 }
-            }
 
-            let mut stream = match connected_stream {
-                Some(s) => s,
-                None => {
-                    if let Ok(mut st) = status_clone.write() {
-                        *st = format!("Сервер {}:{} недоступен", host_clone, port);
+                if let Ok(mut s) = state_clone.write() {
+                    *s = if attempt == 0 {
+                        SessionState::Connecting
+                    } else {
+                        SessionState::Reconnecting
+                    };
+                }
+
+                match client_connect_once(
+                    &host_clone,
+                    port,
+                    &code_to_send,
+                    &status_clone,
+                    &telem_clone,
+                ) {
+                    Ok(stream) => {
+                        attempt = 0;
+                        connected_clone.store(true, Ordering::Relaxed);
+                        if let Ok(mut s) = state_clone.write() {
+                            *s = SessionState::Connected;
+                        }
+
+                        run_p2p_socket_session(
+                            stream,
+                            running_clone.clone(),
+                            connected_clone.clone(),
+                            in_dt_tx.clone(),
+                            in_cam_tx.clone(),
+                            in_aud_tx.clone(),
+                            outbox_desktop_bg.clone(),
+                            outbox_camera_bg.clone(),
+                            &out_aud_rx,
+                            telem_clone.clone(),
+                            enc_config_clone.clone(),
+                        );
+
+                        connected_clone.store(false, Ordering::Relaxed);
+                        if let Ok(mut t) = telem_clone.write() {
+                            t.is_connected = false;
+                        }
                     }
-                    return;
+                    Err(message) => {
+                        if let Ok(mut st) = status_clone.write() {
+                            *st = message;
+                        }
+                    }
                 }
-            };
 
-            let _ = stream.set_nodelay(true);
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(3000)));
+                if !running_clone.load(Ordering::Relaxed) {
+                    break;
+                }
 
-            // Отправка рукопожатия
-            let code_bytes = code_to_send.as_bytes();
-            let mut hs_packet = Vec::with_capacity(5 + code_bytes.len());
-            hs_packet.extend_from_slice(b"NC02");
-            hs_packet.push(code_bytes.len() as u8);
-            hs_packet.extend_from_slice(code_bytes);
+                attempt = attempt.saturating_add(1);
+                if attempt > MAX_RECONNECT_ATTEMPTS {
+                    if let Ok(mut s) = state_clone.write() {
+                        *s = SessionState::Failed;
+                    }
+                    if let Ok(mut st) = status_clone.write() {
+                        *st = "Не удалось подключиться. Проверь адрес и код комнаты.".to_string();
+                    }
+                    break;
+                }
 
-            if stream.write_all(&hs_packet).is_err() || stream.flush().is_err() {
+                let delay = reconnect_delay(attempt);
+                if let Ok(mut s) = state_clone.write() {
+                    *s = SessionState::Reconnecting;
+                }
                 if let Ok(mut st) = status_clone.write() {
-                    *st = "Сбой отправки данных".to_string();
+                    *st = format!(
+                        "Связь потеряна. Переподключение через {:.1} с (попытка {})",
+                        delay.as_secs_f32(),
+                        attempt
+                    );
                 }
-                return;
-            }
-
-            let mut reply = [0u8; 4];
-            if stream.read_exact(&mut reply).is_err() {
-                if let Ok(mut st) = status_clone.write() {
-                    *st = "Сервер разорвал соединение".to_string();
-                }
-                return;
-            }
-
-            if &reply == b"NCOK" {
-                connected_clone.store(true, Ordering::Relaxed);
-                if let Ok(mut st) = status_clone.write() {
-                    *st = "Успешно подключено к серверу!".to_string();
-                }
-                if let Ok(mut t) = telem_clone.write() {
-                    t.is_connected = true;
-                    t.peer_addr = resolve_target.clone();
-                }
-
-                run_p2p_socket_session(
-                    stream,
-                    running_clone.clone(),
-                    connected_clone.clone(),
-                    in_dt_tx.clone(),
-                    in_cam_tx.clone(),
-                    in_aud_tx.clone(),
-                    outbox_desktop_bg.clone(),
-                    outbox_camera_bg.clone(),
-                    &out_aud_rx,
-                    telem_clone.clone(),
-                    enc_config_clone.clone(),
-                );
-
-                connected_clone.store(false, Ordering::Relaxed);
-                if let Ok(mut st) = status_clone.write() {
-                    *st = "Отключено от сервера".to_string();
-                }
-                if let Ok(mut t) = telem_clone.write() {
-                    t.is_connected = false;
-                }
-            } else if &reply == b"NCER" {
-                connected_clone.store(false, Ordering::Relaxed);
-                if let Ok(mut st) = status_clone.write() {
-                    *st = "Ошибка: неверный код доступа комнаты!".to_string();
-                }
-            } else {
-                connected_clone.store(false, Ordering::Relaxed);
-                if let Ok(mut st) = status_clone.write() {
-                    *st = "Сервер вернул некорректный ответ".to_string();
-                }
+                thread::sleep(delay);
             }
         });
 
@@ -903,6 +875,84 @@ impl P2PNetworkClient {
     pub fn stop(&self) {
         self.is_running.store(false, Ordering::Relaxed);
         self.is_connected.store(false, Ordering::Relaxed);
+    }
+}
+
+const MAX_RECONNECT_ATTEMPTS: u32 = 8;
+
+fn reconnect_delay(attempt: u32) -> Duration {
+    let step = attempt.saturating_sub(1).min(6) as i32;
+    Duration::from_secs_f32((0.5f32 * 2f32.powi(step)).clamp(0.5, 10.0))
+}
+
+/// Resolve, connect and perform the room-code handshake, once.
+fn client_connect_once(
+    host: &str,
+    port: u16,
+    room_code: &str,
+    status: &Arc<RwLock<String>>,
+    telemetry: &Arc<RwLock<P2PTelemetry>>,
+) -> std::result::Result<TcpStream, String> {
+    let resolve_target = if host.starts_with('[') && host.ends_with(']') {
+        format!("{}:{}", host, port)
+    } else if host.contains(':') && !host.contains('.') {
+        format!("[{}]:{}", host, port)
+    } else {
+        format!("{}:{}", host, port)
+    };
+
+    let addrs: Vec<SocketAddr> = match resolve_target.to_socket_addrs() {
+        Ok(iter) => iter.collect(),
+        Err(e) => return Err(format!("Ошибка адреса: {}", e)),
+    };
+    if addrs.is_empty() {
+        return Err(format!("Не удалось разрешить адрес {}", resolve_target));
+    }
+
+    let mut connected_stream = None;
+    for sa in &addrs {
+        if let Ok(s) = TcpStream::connect_timeout(sa, Duration::from_secs(3)) {
+            connected_stream = Some(s);
+            break;
+        }
+    }
+
+    let mut stream = match connected_stream {
+        Some(s) => s,
+        None => return Err(format!("Сервер {}:{} недоступен", host, port)),
+    };
+
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(3000)));
+
+    let code_bytes = room_code.as_bytes();
+    let mut hs_packet = Vec::with_capacity(5 + code_bytes.len());
+    hs_packet.extend_from_slice(b"NC02");
+    hs_packet.push(code_bytes.len() as u8);
+    hs_packet.extend_from_slice(code_bytes);
+
+    if stream.write_all(&hs_packet).is_err() || stream.flush().is_err() {
+        return Err("Сбой отправки данных".to_string());
+    }
+
+    let mut reply = [0u8; 4];
+    if stream.read_exact(&mut reply).is_err() {
+        return Err("Сервер разорвал соединение".to_string());
+    }
+
+    match &reply {
+        b"NCOK" => {
+            if let Ok(mut st) = status.write() {
+                *st = "Успешно подключено к серверу!".to_string();
+            }
+            if let Ok(mut t) = telemetry.write() {
+                t.is_connected = true;
+                t.peer_addr = resolve_target.clone();
+            }
+            Ok(stream)
+        }
+        b"NCER" => Err("Ошибка: неверный код доступа комнаты!".to_string()),
+        _ => Err("Сервер вернул некорректный ответ".to_string()),
     }
 }
 
