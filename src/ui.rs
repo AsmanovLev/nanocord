@@ -302,6 +302,7 @@ pub struct NanocordApp {
     // Воспроизведение звука и устройства
     pub audio_player: Arc<crate::audio::WasapiAudioPlayer>,
     pub listen_to_mic_sidetone: bool,
+    pub mic_agc: crate::audio::AutoGain,
     pub input_devices: Vec<crate::audio::AudioDevice>,
     pub output_devices: Vec<crate::audio::AudioDevice>,
     pub selected_input_device_idx: usize,
@@ -393,7 +394,7 @@ impl Default for NanocordApp {
 
         // 1. Запуск настоящего фонового захвата экрана в полном нативном разрешении (30 FPS при стриме, 1 FPS в режиме паузы)
         let capture_stats = Arc::new(CaptureStats::default());
-        let target_fps_shared = Arc::new(AtomicU32::new(60));
+        let target_fps_shared = Arc::new(AtomicU32::new(30));
         let rx_desktop = start_desktop_preview_worker(
             native_w,
             native_h,
@@ -471,6 +472,7 @@ impl Default for NanocordApp {
 
             audio_player: Arc::new(crate::audio::WasapiAudioPlayer::new()),
             listen_to_mic_sidetone: false,
+            mic_agc: crate::audio::AutoGain::default(),
             input_devices: in_devs,
             output_devices: out_devs,
             selected_input_device_idx: 0,
@@ -484,7 +486,7 @@ impl Default for NanocordApp {
             available_resolutions: available,
             selected_res_idx: default_res_idx,
 
-            target_fps: 60,
+            target_fps: 30,
             preset_mode: PresetMode::AutoSmart,
             manual_preset: 3,
             cq_quality: 22,
@@ -1813,6 +1815,12 @@ impl eframe::App for NanocordApp {
                 // Самопрослушивание своего микрофона (Sidetone test)
                 if self.listen_to_mic_sidetone && !self.is_mic_muted {
                     self.audio_player.play_samples(processed_pcm.clone());
+                }
+
+                // Автоматическая нормализация громкости: тихий микрофон
+                // подтягивается к комфортному уровню, громкий — приглушается.
+                if !self.is_mic_muted {
+                    self.mic_agc.apply(&mut processed_pcm);
                 }
 
                 // Кодирование и отправка звука микрофона в P2P через Opus (VoIP VBR 64 kbps + FEC + DTX)

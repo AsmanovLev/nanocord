@@ -817,6 +817,60 @@ fn run_wasapi_playback_loop(
     Ok(())
 }
 
+/// Simple automatic gain control for the microphone.
+///
+/// Quiet headsets sit 12-18 dB below a comfortable level, so the peer has to
+/// ride the volume slider. This raises speech toward a target RMS and backs off
+/// on loud input. The envelope is smoothed, otherwise the gain pumps audibly on
+/// every 20 ms Opus frame.
+pub struct AutoGain {
+    gain: f32,
+    envelope: f32,
+}
+
+impl Default for AutoGain {
+    fn default() -> Self {
+        Self {
+            gain: 1.0,
+            envelope: 0.0,
+        }
+    }
+}
+
+impl AutoGain {
+    pub fn gain(&self) -> f32 {
+        self.gain
+    }
+
+    pub fn apply(&mut self, samples: &mut [i16]) {
+        if samples.is_empty() {
+            return;
+        }
+
+        let mut sum_sq = 0.0f64;
+        for &s in samples.iter() {
+            let v = s as f32 / 32768.0;
+            sum_sq += (v * v) as f64;
+        }
+        let rms = (sum_sq / samples.len() as f64).sqrt() as f32;
+
+        self.envelope = self.envelope * 0.9 + rms * 0.1;
+
+        let target = 0.12; // about -18 dBFS, a comfortable speech level
+        if self.envelope > 1e-4 {
+            let desired = (target / self.envelope).clamp(0.6, 6.0);
+            // Fast down, slow up: avoids pumping and never clips a loud word.
+            let rate = if desired < self.gain { 0.25 } else { 0.05 };
+            self.gain += (desired - self.gain) * rate;
+        }
+        self.gain = self.gain.clamp(0.6, 6.0);
+
+        for s in samples.iter_mut() {
+            *s = ((*s as f32) * self.gain).clamp(-32768.0, 32767.0) as i16;
+        }
+    }
+}
+
 /// Запускает фоновый захват реального звука через Windows WASAPI
 /// is_loopback = true  -> Звук системы/игры (WASAPI Loopback Capture с колонок/наушников)
 /// is_loopback = false -> Микрофон (Default Audio Capture Endpoint либо указанный ID устройства)
