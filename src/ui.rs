@@ -1012,8 +1012,9 @@ pub struct ChatLine {
 fn reveal_in_explorer(path: &str) {
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         let _ = std::process::Command::new("explorer.exe")
-            .arg(format!("/select,\"{}\"", path))
+            .raw_arg(format!("/select,\"{}\"", path))
             .spawn();
     }
     #[cfg(not(windows))]
@@ -1747,7 +1748,7 @@ impl NanocordApp {
         None
     }
 
-    fn draw_chat(&mut self, ctx: &egui::Context) {
+    fn render_chat_panel(&mut self, ui: &mut egui::Ui) {
         use crate::network::ChatOutgoing;
 
         let connected = self
@@ -1761,15 +1762,20 @@ impl NanocordApp {
                 .map(|c| c.is_connected.load(Ordering::Relaxed))
                 .unwrap_or(false);
 
-        let mut open = self.chat_open;
         let mut send_text: Option<String> = None;
         let mut send_file = false;
 
-        egui::Window::new("Чат")
-            .open(&mut open)
-            .default_size([340.0, 300.0])
-            .default_pos([60.0, 420.0])
-            .show(ctx, |ui| {
+        ui.horizontal(|ui| {
+            ui.heading("Чат");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("✕").clicked() {
+                    self.chat_open = false;
+                }
+            });
+        });
+        ui.separator();
+
+        {
                 egui::ScrollArea::vertical()
                     .max_height(190.0)
                     .stick_to_bottom(true)
@@ -1810,9 +1816,7 @@ impl NanocordApp {
                 if !connected {
                     ui.label(egui::RichText::new("Нет соединения").size(11.0).weak());
                 }
-            });
-
-        self.chat_open = open;
+        }
 
         if let Some(text) = send_text {
             if let Some(tx) = self.chat_sender() {
@@ -1844,7 +1848,6 @@ impl eframe::App for NanocordApp {
         }
 
         self.poll_chat();
-        self.draw_chat(ctx);
 
         if self.last_diag.elapsed() >= Duration::from_secs(5) {
             self.last_diag = Instant::now();
@@ -2301,9 +2304,26 @@ impl eframe::App for NanocordApp {
                         Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::BenchmarkMatrix, tab_bench_title, &th);
                         Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::AudioAndSpectrum, tab_audio_title, &th);
                         Self::render_nav_tab_pill(ui, &mut self.active_tab, Tab::EncoderSettings, tab_nvenc_title, &th);
+                        ui.add_space(8.0);
+                        if ui.selectable_label(self.chat_open, "Чат").clicked() {
+                            self.chat_open = !self.chat_open;
+                        }
                     });
                 });
             });
+
+        // Чат отдельной панелью справа: границу можно тянуть, сцена и чат
+        // делят ширину окна, как в Discord.
+        if self.chat_open && self.active_tab == Tab::CallAndStream {
+            egui::SidePanel::right("chat_panel")
+                .resizable(true)
+                .default_width(330.0)
+                .width_range(240.0..=700.0)
+                .show(ctx, |ui| {
+                    ui.add_space(6.0);
+                    self.render_chat_panel(ui);
+                });
+        }
 
         // ЦЕНТРАЛЬНАЯ РАБОЧАЯ ОБЛАСТЬ
         egui::CentralPanel::default()
