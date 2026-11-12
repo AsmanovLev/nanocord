@@ -13,3 +13,4 @@ pub mod nvenc;
 pub mod ui;
 
 pub mod update;
+pub mod selftest;
