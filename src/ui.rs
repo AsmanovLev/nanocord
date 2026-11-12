@@ -2283,7 +2283,10 @@ impl eframe::App for NanocordApp {
                     // Слева направо: логотип и вкладки
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         ui.label(egui::RichText::new("NANOCORD").strong().size(17.0).color(Color32::from_rgb(88, 101, 242)));
-                        ui.label(egui::RichText::new(format!("v{} • P2P Ultra-Low Latency", env!("CARGO_PKG_VERSION"))).weak().size(11.5).color(th.text_sub));
+                        ui.label(egui::RichText::new(format!("v{} • P2P Ultra-Low Latency • обновление: {}", env!("CARGO_PKG_VERSION"), crate::update::status())).weak().size(11.5).color(th.text_sub));
+                        if ui.small_button("⟳").on_hover_text("Проверить обновления").clicked() {
+                            crate::update::check_and_install();
+                        }
 
                         ui.add_space(14.0);
 

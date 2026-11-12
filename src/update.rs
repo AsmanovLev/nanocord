@@ -12,6 +12,27 @@ use std::time::Duration;
 
 const REPO: &str = "AsmanovLev/nanocord";
 
+/// Текущее состояние апдейтера — показывается в интерфейсе, чтобы не гадать
+/// по логам, работает ли он.
+fn status_slot() -> &'static std::sync::Mutex<String> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new("проверка…".to_string()))
+}
+
+pub fn status() -> String {
+    status_slot()
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default()
+}
+
+fn set_status(text: &str) {
+    if let Ok(mut s) = status_slot().lock() {
+        *s = text.to_string();
+    }
+    crate::diag::log(&format!("update: {}", text));
+}
+
 fn http_get(url: &str) -> Result<String, String> {
     let resp = ureq::get(url)
         .set("User-Agent", "nanocord")
@@ -43,7 +64,7 @@ pub fn check_and_install() {
         let body = match http_get(&url) {
             Ok(b) => b,
             Err(e) => {
-                crate::diag::log(&format!("update: {}", e));
+                set_status(&format!("ошибка: {}", e));
                 return;
             }
         };
@@ -64,13 +85,11 @@ pub fn check_and_install() {
         };
 
         let latest = tag.trim_start_matches('v').to_string();
-        crate::diag::log(&format!(
-            "update: текущая {} / последняя {}",
-            current, latest
-        ));
         if !is_newer(&latest, current) {
+            set_status(&format!("v{} — актуальная", current));
             return;
         }
+        set_status(&format!("скачиваю v{}…", latest));
 
         let exe = match std::env::current_exe() {
             Ok(p) => p,
@@ -100,7 +119,7 @@ pub fn check_and_install() {
             .spawn()
             .is_ok()
         {
-            crate::diag::log(&format!("update: v{} скачана, перезапуск", latest));
+            set_status(&format!("v{} скачана, перезапуск", latest));
             thread::sleep(Duration::from_millis(500));
             std::process::exit(0);
         }

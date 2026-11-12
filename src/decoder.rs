@@ -148,7 +148,7 @@ impl HevcDecoder {
 
             let out_sample = MFCreateSample()?;
             let nv12_size = (width * height * 3 / 2) as u32;
-            let out_media_buffer = MFCreateMemoryBuffer(nv12_size * 2)?;
+            let out_media_buffer = MFCreateMemoryBuffer(nv12_size)?;
             out_sample.AddBuffer(&out_media_buffer)?;
             out_buffer_desc.pSample = std::mem::ManuallyDrop::new(Some(out_sample));
 
@@ -218,7 +218,19 @@ impl HevcDecoder {
                                 let mut len = 0u32;
                                 if media_buf.Lock(&mut p_nv12, None, Some(&mut len)).is_ok() {
                                     let stride = if height > 0 && len >= width * height {
-                                        ((len as usize) * 2 / ((height as usize) * 3)).max(width as usize)
+                                        // Длина буфера может включать резерв, поэтому
+                                        // шаг ограничиваем рамками разумного.
+                                        let raw = (len as usize) * 2 / ((height as usize) * 3);
+                                        let stride_ok = if raw >= width as usize && raw <= width as usize * 2 {
+                                            raw
+                                        } else {
+                                            width as usize
+                                        };
+                                        crate::diag::log_once(&format!(
+                                            "decoder: fallback len={} stride={} width={}",
+                                            len, stride_ok, width
+                                        ));
+                                        stride_ok
                                     } else {
                                         width as usize
                                     };
@@ -380,7 +392,7 @@ impl H264Decoder {
 
             let out_sample = MFCreateSample()?;
             let nv12_size = (width * height * 3 / 2) as u32;
-            let out_media_buffer = MFCreateMemoryBuffer(nv12_size * 2)?;
+            let out_media_buffer = MFCreateMemoryBuffer(nv12_size)?;
             out_sample.AddBuffer(&out_media_buffer)?;
             out_buffer_desc.pSample = std::mem::ManuallyDrop::new(Some(out_sample));
 
@@ -450,7 +462,19 @@ impl H264Decoder {
                                 let mut len = 0u32;
                                 if media_buf.Lock(&mut p_nv12, None, Some(&mut len)).is_ok() {
                                     let stride = if height > 0 && len >= width * height {
-                                        ((len as usize) * 2 / ((height as usize) * 3)).max(width as usize)
+                                        // Длина буфера может включать резерв, поэтому
+                                        // шаг ограничиваем рамками разумного.
+                                        let raw = (len as usize) * 2 / ((height as usize) * 3);
+                                        let stride_ok = if raw >= width as usize && raw <= width as usize * 2 {
+                                            raw
+                                        } else {
+                                            width as usize
+                                        };
+                                        crate::diag::log_once(&format!(
+                                            "decoder: fallback len={} stride={} width={}",
+                                            len, stride_ok, width
+                                        ));
+                                        stride_ok
                                     } else {
                                         width as usize
                                     };

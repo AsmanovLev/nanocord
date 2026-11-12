@@ -990,6 +990,48 @@ fn download_dir() -> std::path::PathBuf {
     dir
 }
 
+/// Проверяет, что энкодер выдал корректный поток: декодирует первый кадр
+/// обратно и сравнивает с исходником. Дамп `dump_self.bmp` — это то, что
+/// реально уходит в сеть, уже после кодера.
+fn verify_encoded(nal: &[u8], width: u32, height: u32, source: &[u8]) {
+    let mut dec = match crate::decoder::H264Decoder::new() {
+        Ok(d) => d,
+        Err(e) => {
+            crate::diag::log(&format!("selftest(tx): декодер init {:#010X}", e.code().0));
+            return;
+        }
+    };
+    for _ in 0..10 {
+        match dec.decode_packet(width, height, nal) {
+            Ok(Some((_, _, frame))) => {
+                crate::diag::dump_frame("dump_self", width, height, &frame);
+                let n = (width as usize * height as usize * 4)
+                    .min(frame.len())
+                    .min(source.len());
+                if n == 0 {
+                    return;
+                }
+                let mut sum = 0u64;
+                for i in 0..n {
+                    sum += (source[i] as i32 - frame[i] as i32).unsigned_abs() as u64;
+                }
+                crate::diag::log(&format!(
+                    "selftest(tx): avg_diff={:.2}/255 nal={} bytes",
+                    sum as f64 / n as f64,
+                    nal.len()
+                ));
+                return;
+            }
+            Ok(None) => continue,
+            Err(e) => {
+                crate::diag::log(&format!("selftest(tx): decode {:#010X}", e.code().0));
+                return;
+            }
+        }
+    }
+    crate::diag::log("selftest(tx): декодер не вернул кадр");
+}
+
 fn run_p2p_socket_session(
     stream: TcpStream,
     is_running: Arc<AtomicBool>,
@@ -1251,6 +1293,7 @@ fn run_p2p_socket_session(
     let mut frame_idr_counter = 0u32;
     let mut encode_errors = 0u32;
     let mut dumped_sent = false;
+    let mut dumped_self = false;
     let mut dumped_recv = false;
 
     while is_running.load(Ordering::Relaxed) && is_connected.load(Ordering::Relaxed) {
@@ -1422,7 +1465,13 @@ fn run_p2p_socket_session(
 
             let (flags, payload) = match nv_encoder.as_mut() {
                 Some((enc, codec_flag)) => match enc.encode_rgba_bytes(&frame.rgba, force_idr) {
-                    Ok(nal) => (*codec_flag, nal),
+                    Ok(nal) => {
+                        if !dumped_self && *codec_flag == 2 {
+                            dumped_self = true;
+                            verify_encoded(&nal, frame.width, frame.height, &frame.rgba);
+                        }
+                        (*codec_flag, nal)
+                    }
                     Err(e) => {
                         encode_errors += 1;
                         // One line per thirty failures: a broken encoder
