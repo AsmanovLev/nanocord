@@ -11,7 +11,10 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_CPU_ACCESS_WRITE, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
     D3D11_MAP_WRITE_DISCARD, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
     D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, D3D11_USAGE_STAGING,
-};
+    ID3D11Asynchronous,
+    ID3D11Query,
+    D3D11_QUERY_DESC,
+    D3D11_QUERY_EVENT};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1,
@@ -647,7 +650,7 @@ impl NvencEncoder {
             let mut qdesc = D3D11_QUERY_DESC::default();
             qdesc.Query = D3D11_QUERY_EVENT;
             if nvidia_device
-                .CreateQuery(&qdesc, None, Some(&mut query))
+                .CreateQuery(&qdesc, Some(&mut query))
                 .is_err()
             {
                 crate::diag::log("nvenc: query create failed");
@@ -1126,20 +1129,22 @@ impl NvencEncoder {
             // движок и без этого читает недописанный кадр.
             if let Some(query) = self.sync_query.as_ref() {
                 self.nvidia_context.End(query);
-                let mut data: u32 = 0;
-                let mut spins = 0u32;
-                loop {
-                    let hr = self.nvidia_context.GetData(
-                        query,
-                        Some(&mut data as *mut u32 as *mut c_void),
-                        std::mem::size_of::<u32>() as u32,
-                        0,
-                    );
-                    if hr.is_ok() || spins > 100_000 {
-                        break;
+                if let Ok(async_obj) = query.cast::<ID3D11Asynchronous>() {
+                    let mut data: u32 = 0;
+                    let mut spins = 0u32;
+                    loop {
+                        let done = self.nvidia_context.GetData(
+                            &async_obj,
+                            Some(&mut data as *mut u32 as *mut c_void),
+                            std::mem::size_of::<u32>() as u32,
+                            0,
+                        );
+                        if done.is_ok() || spins > 200_000 {
+                            break;
+                        }
+                        spins += 1;
+                        std::hint::spin_loop();
                     }
-                    spins += 1;
-                    std::hint::spin_loop();
                 }
             }
 
