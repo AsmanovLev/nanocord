@@ -323,8 +323,6 @@ pub struct NanocordApp {
     pub manual_preset: u8,
     pub cq_quality: u8,
     pub max_bitrate_mbps: u32,
-    /// Hardware (NVENC) encoding. Off = CPU JPEG fallback.
-    pub hardware_encoder: bool,
     last_diag: Instant,
     pub encoder_config: Arc<std::sync::RwLock<crate::network::VideoEncoderConfig>>,
 
@@ -494,9 +492,6 @@ impl Default for NanocordApp {
             manual_preset: 3,
             cq_quality: 22,
             max_bitrate_mbps: 30,
-            // Off by default: on some Maxwell cards the NVENC path crashes the
-            // process outright. JPEG is slower but keeps the call alive.
-            hardware_encoder: false,
             last_diag: Instant::now(),
             encoder_config,
 
@@ -3434,10 +3429,6 @@ impl NanocordApp {
                 ui.separator();
                 ui.add_space(14.0);
 
-                ui.checkbox(&mut self.hardware_encoder, "Аппаратное кодирование (NVENC / Media Foundation)");
-                ui.label(egui::RichText::new("Выключи, если трансляция падает или показывает мусор: пойдёт программный JPEG.").size(11.0).color(th.text_sub));
-                ui.add_space(14.0);
-
                 ui.label(egui::RichText::new(format!("{} {}", self.t("nvenc_cq_title"), self.cq_quality)).strong().size(13.0).color(th.text_main));
                 ui.label(egui::RichText::new(self.t("nvenc_cq_desc")).size(11.0).color(th.text_sub));
                 ui.add_space(4.0);
@@ -3458,7 +3449,6 @@ impl NanocordApp {
                 }
 
                 if let Ok(mut cfg) = self.encoder_config.write() {
-                    cfg.hardware = self.hardware_encoder;
                     cfg.cq_quality = self.cq_quality;
                     cfg.max_bitrate_mbps = self.max_bitrate_mbps;
                     cfg.preset_index = match self.preset_mode {
