@@ -1,6 +1,6 @@
 [package]
 name = "nanocord"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 
 [lib]
@@ -22,6 +22,8 @@ image = "0.25"
 nokhwa = { version = "0.10.11", features = ["input-native"] }
 opus-pure = "0.2.2"
 rfd = "0.15"
+# HTTPS внутри приложения: native-tls на Windows — это schannel, без curl и без C-сборки.
+ureq = { version = "2.10", default-features = false, features = ["native-tls", "gzip"] }
 
 [profile.release]
 opt-level = "s"
