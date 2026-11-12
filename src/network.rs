@@ -7,11 +7,60 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
+
+use crate::latest::LatestSlot;
+
+/// Visible session state: one source of truth instead of a handful of flags
+/// that can disagree with each other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionState {
+    Idle,
+    Listening,
+    Connecting,
+    Connected,
+    Reconnecting,
+    Failed,
+}
+
+impl SessionState {
+    pub fn label(self) -> &'static str {
+        match self {
+            SessionState::Idle => "idle",
+            SessionState::Listening => "listening",
+            SessionState::Connecting => "connecting",
+            SessionState::Connected => "connected",
+            SessionState::Reconnecting => "reconnecting",
+            SessionState::Failed => "failed",
+        }
+    }
+}
+
+/// A frame on its way out. RGBA, shared by `Arc` so queueing costs nothing.
+#[derive(Clone)]
+pub struct OutgoingFrame {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Arc<Vec<u8>>,
+}
+
 #[derive(Clone)]
 pub struct NetworkPeerFrame {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    /// No pixels: "the stream is alive, the desktop simply did not change".
+    pub keepalive: bool,
+}
+
+impl NetworkPeerFrame {
+    pub fn keepalive() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            rgba: Vec::new(),
+            keepalive: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -186,6 +235,11 @@ pub struct P2PTelemetry {
     pub current_track: String,
     pub total_frames: u64,
     pub total_bytes: u64,
+    pub frames_sent: u64,
+    pub frames_dropped: u64,
+    pub quality: u8,
+    pub encode_errors: u64,
+    pub state: &'static str,
 }
 
 // =========================================================================
@@ -497,11 +551,12 @@ pub struct P2PNetworkServer {
     pub desktop_rx: Receiver<NetworkPeerFrame>,
     pub camera_rx: Receiver<NetworkPeerFrame>,
     pub audio_rx: Receiver<NetworkAudioPacket>,
-    pub outgoing_desktop_tx: SyncSender<NetworkPeerFrame>,
-    pub outgoing_camera_tx: SyncSender<NetworkPeerFrame>,
+    pub outbox_desktop: Arc<LatestSlot<OutgoingFrame>>,
+    pub outbox_camera: Arc<LatestSlot<OutgoingFrame>>,
     pub outgoing_audio_tx: SyncSender<NetworkAudioPacket>,
     pub telemetry: Arc<RwLock<P2PTelemetry>>,
     pub encoder_config: Arc<RwLock<VideoEncoderConfig>>,
+    pub state: Arc<RwLock<SessionState>>,
 }
 
 impl P2PNetworkServer {
@@ -512,6 +567,7 @@ impl P2PNetworkServer {
     pub fn start_with_config(port: u16, room_code: String, encoder_config: Arc<RwLock<VideoEncoderConfig>>) -> Self {
         let is_running = Arc::new(AtomicBool::new(true));
         let is_connected = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(RwLock::new(SessionState::Idle));
         let peer_addr = Arc::new(RwLock::new(String::new()));
         let status = Arc::new(RwLock::new("Запуск сервера...".to_string()));
         let telemetry = Arc::new(RwLock::new(P2PTelemetry::default()));
@@ -519,12 +575,15 @@ impl P2PNetworkServer {
         let (in_dt_tx, in_dt_rx) = sync_channel(4);
         let (in_cam_tx, in_cam_rx) = sync_channel(4);
         let (in_aud_tx, in_aud_rx) = sync_channel(16);
-        let (out_dt_tx, out_dt_rx) = sync_channel(4);
-        let (out_cam_tx, out_cam_rx) = sync_channel(4);
+        let outbox_desktop: Arc<LatestSlot<OutgoingFrame>> = Arc::new(LatestSlot::new());
+        let outbox_camera: Arc<LatestSlot<OutgoingFrame>> = Arc::new(LatestSlot::new());
+        let outbox_desktop_bg = outbox_desktop.clone();
+        let outbox_camera_bg = outbox_camera.clone();
         let (out_aud_tx, out_aud_rx) = sync_channel(16);
 
         let running_clone = is_running.clone();
         let connected_clone = is_connected.clone();
+        let state_clone = state.clone();
         let peer_addr_clone = peer_addr.clone();
         let status_clone = status.clone();
         let telem_clone = telemetry.clone();
@@ -609,8 +668,8 @@ impl P2PNetworkServer {
                             in_dt_tx.clone(),
                             in_cam_tx.clone(),
                             in_aud_tx.clone(),
-                            &out_dt_rx,
-                            &out_cam_rx,
+                            outbox_desktop_bg.clone(),
+                            outbox_camera_bg.clone(),
                             &out_aud_rx,
                             telem_clone.clone(),
                             enc_config_clone.clone(),
@@ -646,11 +705,12 @@ impl P2PNetworkServer {
             desktop_rx: in_dt_rx,
             camera_rx: in_cam_rx,
             audio_rx: in_aud_rx,
-            outgoing_desktop_tx: out_dt_tx,
-            outgoing_camera_tx: out_cam_tx,
+            outbox_desktop,
+            outbox_camera,
             outgoing_audio_tx: out_aud_tx,
             telemetry,
             encoder_config,
+            state,
         }
     }
 
@@ -670,11 +730,12 @@ pub struct P2PNetworkClient {
     pub desktop_rx: Receiver<NetworkPeerFrame>,
     pub camera_rx: Receiver<NetworkPeerFrame>,
     pub audio_rx: Receiver<NetworkAudioPacket>,
-    pub outgoing_desktop_tx: SyncSender<NetworkPeerFrame>,
-    pub outgoing_camera_tx: SyncSender<NetworkPeerFrame>,
+    pub outbox_desktop: Arc<LatestSlot<OutgoingFrame>>,
+    pub outbox_camera: Arc<LatestSlot<OutgoingFrame>>,
     pub outgoing_audio_tx: SyncSender<NetworkAudioPacket>,
     pub telemetry: Arc<RwLock<P2PTelemetry>>,
     pub encoder_config: Arc<RwLock<VideoEncoderConfig>>,
+    pub state: Arc<RwLock<SessionState>>,
 }
 
 impl P2PNetworkClient {
@@ -685,18 +746,22 @@ impl P2PNetworkClient {
     pub fn connect_with_config(target_host: String, port: u16, room_code: String, encoder_config: Arc<RwLock<VideoEncoderConfig>>) -> Self {
         let is_running = Arc::new(AtomicBool::new(true));
         let is_connected = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(RwLock::new(SessionState::Idle));
         let status = Arc::new(RwLock::new(format!("Подключение к {}:{}...", target_host, port)));
         let telemetry = Arc::new(RwLock::new(P2PTelemetry::default()));
 
         let (in_dt_tx, in_dt_rx) = sync_channel(4);
         let (in_cam_tx, in_cam_rx) = sync_channel(4);
         let (in_aud_tx, in_aud_rx) = sync_channel(16);
-        let (out_dt_tx, out_dt_rx) = sync_channel(4);
-        let (out_cam_tx, out_cam_rx) = sync_channel(4);
+        let outbox_desktop: Arc<LatestSlot<OutgoingFrame>> = Arc::new(LatestSlot::new());
+        let outbox_camera: Arc<LatestSlot<OutgoingFrame>> = Arc::new(LatestSlot::new());
+        let outbox_desktop_bg = outbox_desktop.clone();
+        let outbox_camera_bg = outbox_camera.clone();
         let (out_aud_tx, out_aud_rx) = sync_channel(16);
 
         let running_clone = is_running.clone();
         let connected_clone = is_connected.clone();
+        let state_clone = state.clone();
         let status_clone = status.clone();
         let telem_clone = telemetry.clone();
         let code_to_send = room_code.clone();
@@ -790,8 +855,8 @@ impl P2PNetworkClient {
                     in_dt_tx.clone(),
                     in_cam_tx.clone(),
                     in_aud_tx.clone(),
-                    &out_dt_rx,
-                    &out_cam_rx,
+                    outbox_desktop_bg.clone(),
+                    outbox_camera_bg.clone(),
                     &out_aud_rx,
                     telem_clone.clone(),
                     enc_config_clone.clone(),
@@ -826,11 +891,12 @@ impl P2PNetworkClient {
             desktop_rx: in_dt_rx,
             camera_rx: in_cam_rx,
             audio_rx: in_aud_rx,
-            outgoing_desktop_tx: out_dt_tx,
-            outgoing_camera_tx: out_cam_tx,
+            outbox_desktop,
+            outbox_camera,
             outgoing_audio_tx: out_aud_tx,
             telemetry,
             encoder_config,
+            state,
         }
     }
 
@@ -848,8 +914,8 @@ fn run_p2p_socket_session(
     in_dt_tx: SyncSender<NetworkPeerFrame>,
     in_cam_tx: SyncSender<NetworkPeerFrame>,
     in_aud_tx: SyncSender<NetworkAudioPacket>,
-    out_dt_rx: &Receiver<NetworkPeerFrame>,
-    out_cam_rx: &Receiver<NetworkPeerFrame>,
+    outbox_desktop: Arc<LatestSlot<OutgoingFrame>>,
+    outbox_camera: Arc<LatestSlot<OutgoingFrame>>,
     out_aud_rx: &Receiver<NetworkAudioPacket>,
     telemetry: Arc<RwLock<P2PTelemetry>>,
     encoder_config: Arc<RwLock<VideoEncoderConfig>>,
@@ -868,6 +934,7 @@ fn run_p2p_socket_session(
     let read_handle = thread::spawn(move || {
         let _ = reader.set_read_timeout(Some(Duration::from_millis(1500)));
         let mut header = [0u8; 12];
+        let mut last_rx = Instant::now();
         let mut hevc_decoder = crate::decoder::HevcDecoder::new().ok();
         let mut h264_decoder = crate::decoder::H264Decoder::new().ok();
 
@@ -892,6 +959,7 @@ fn run_p2p_socket_session(
                     if reader.read_exact(&mut payload).is_err() {
                         break;
                     }
+                    last_rx = Instant::now();
 
                     if msg_type == 1 {
                         let rgba_opt = if flags == 3 {
@@ -919,18 +987,44 @@ fn run_p2p_socket_session(
                         };
 
                         if let Some(rgba) = rgba_opt {
-                            let _ = in_dt_tx.try_send(NetworkPeerFrame { width, height, rgba });
+                            let _ = in_dt_tx.try_send(NetworkPeerFrame {
+                                width,
+                                height,
+                                rgba,
+                                keepalive: false,
+                            });
                         }
                     } else if msg_type == 2 {
-                        let rgba = if flags == 1 {
-                            decode_frame_from_jpeg(&payload).map(|(_, _, d)| d).unwrap_or(payload)
+                        // A decode failure must drop the frame: rendering the
+                        // compressed bytes as pixels paints a frame of noise.
+                        let Some(rgba) = (if flags == 1 {
+                            decode_frame_from_jpeg(&payload).map(|(_, _, d)| d)
                         } else {
-                            payload
+                            Some(payload)
+                        }) else {
+                            if let Ok(mut t) = r_telem.write() {
+                                t.encode_errors = t.encode_errors.saturating_add(1);
+                            }
+                            continue;
                         };
-                        let _ = in_cam_tx.try_send(NetworkPeerFrame { width, height, rgba });
+                        let _ = in_cam_tx.try_send(NetworkPeerFrame {
+                            width,
+                            height,
+                            rgba,
+                            keepalive: false,
+                        });
                     } else if msg_type == 3 {
                         if let Some(audio_pkt) = NetworkAudioPacket::from_bytes(&payload) {
                             let _ = in_aud_tx.try_send(audio_pkt);
+                        }
+                    } else if msg_type == 5 {
+                        // "Still here, desktop unchanged": no pixels to show.
+                        let stream_id = payload.first().copied().unwrap_or(1);
+                        let frame = NetworkPeerFrame::keepalive();
+                        if stream_id == 2 {
+                            let _ = in_cam_tx.try_send(frame);
+                        } else {
+                            let _ = in_dt_tx.try_send(frame);
                         }
                     } else if msg_type == 4 {
                         if payload.len() == 8 {
@@ -944,6 +1038,11 @@ fn run_p2p_socket_session(
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut || e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // The peer pings once a second, so five seconds of silence
+                    // means the link is dead even if TCP has not noticed yet.
+                    if last_rx.elapsed() > Duration::from_secs(5) {
+                        break;
+                    }
                     continue;
                 }
                 Err(_) => {
@@ -956,6 +1055,7 @@ fn run_p2p_socket_session(
 
     // Цикл отправки исходящих пакетов
     let mut last_ping = Instant::now();
+    let mut last_keepalive = Instant::now();
     let mut fps_counter = 0u32;
     let mut fps_timer = Instant::now();
     let mut total_bytes_sent = 0u64;
@@ -967,7 +1067,7 @@ fn run_p2p_socket_session(
     while is_running.load(Ordering::Relaxed) && is_connected.load(Ordering::Relaxed) {
         let mut sent_any = false;
 
-        if let Ok(frame) = out_dt_rx.try_recv() {
+        if let Some(frame) = outbox_desktop.take() {
             let (cq, max_br, preset_idx) = if let Ok(cfg) = encoder_config.read() {
                 (cfg.cq_quality, cfg.max_bitrate_mbps, cfg.preset_index)
             } else {
@@ -1019,7 +1119,7 @@ fn run_p2p_socket_session(
                         if let Some(jpeg) = encode_frame_to_jpeg_with_quality(frame.width, frame.height, &frame.rgba, jpeg_quality) {
                             (1u8, jpeg)
                         } else {
-                            (0u8, frame.rgba)
+                            (0u8, (*frame.rgba).clone())
                         }
                     }
                 }
@@ -1028,7 +1128,7 @@ fn run_p2p_socket_session(
                 if let Some(jpeg) = encode_frame_to_jpeg_with_quality(frame.width, frame.height, &frame.rgba, jpeg_quality) {
                     (1u8, jpeg)
                 } else {
-                    (0u8, frame.rgba)
+                    (0u8, (*frame.rgba).clone())
                 }
             };
 
@@ -1049,11 +1149,11 @@ fn run_p2p_socket_session(
             sent_any = true;
         }
 
-        if let Ok(frame) = out_cam_rx.try_recv() {
+        if let Some(frame) = outbox_camera.take() {
             let (flags, payload) = if let Some(jpeg) = encode_frame_to_jpeg(frame.width, frame.height, &frame.rgba) {
                 (1u8, jpeg)
             } else {
-                (0u8, frame.rgba)
+                (0u8, (*frame.rgba).clone())
             };
 
             let mut pkt = Vec::with_capacity(12 + payload.len());
@@ -1090,6 +1190,25 @@ fn run_p2p_socket_session(
             sent_any = true;
         }
 
+        // A still desktop produces no frames at all. This keeps the peer's
+        // liveness timer alive without shipping a picture it already has.
+        if last_keepalive.elapsed() >= Duration::from_secs(1) {
+            last_keepalive = Instant::now();
+            for stream_id in [1u8, 2u8] {
+                let mut pkt = Vec::with_capacity(13);
+                pkt.extend_from_slice(&0x4E43u16.to_le_bytes());
+                pkt.push(5); // Video keepalive
+                pkt.push(0);
+                pkt.extend_from_slice(&0u16.to_le_bytes());
+                pkt.extend_from_slice(&0u16.to_le_bytes());
+                pkt.extend_from_slice(&1u32.to_le_bytes());
+                pkt.push(stream_id);
+                if writer.write_all(&pkt).is_err() {
+                    break;
+                }
+            }
+        }
+
         if last_ping.elapsed() >= Duration::from_secs(1) {
             last_ping = Instant::now();
             let now_ns = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
@@ -1113,6 +1232,12 @@ fn run_p2p_socket_session(
             if let Ok(mut t) = telemetry.write() {
                 t.fps = cur_fps;
                 t.bitrate_mbps = mbps;
+                t.frames_sent = fps_counter as u64;
+                t.frames_dropped = outbox_desktop.overwritten() + outbox_camera.overwritten();
+                t.quality = encoder_config
+                    .read()
+                    .map(|c| c.cq_quality)
+                    .unwrap_or(0);
             }
             fps_counter = 0;
             total_bytes_sent = 0;
