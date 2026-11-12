@@ -1,39 +1,57 @@
 //! Автообновление с GitHub Releases.
 //!
-//! Windows-бинарник нельзя перезаписать, пока он запущен, поэтому скачанный
-//! файл ложится рядом как `nanocord.new.exe`, а батник подменяет exe после
-//! выхода процесса и перезапускает приложение.
+//! HTTP живёт внутри процесса (ureq + schannel), без curl и без внешних
+//! утилит. Windows-бинарник нельзя перезаписать, пока он запущен, поэтому
+//! скачанный файл ложится рядом как `nanocord.new.exe`, а батник подменяет
+//! exe после выхода процесса и перезапускает приложение.
 
-use std::process::Command;
+use std::io::Write;
+use std::path::Path;
 use std::thread;
+use std::time::Duration;
 
 const REPO: &str = "AsmanovLev/nanocord";
+
+fn http_get(url: &str) -> Result<String, String> {
+    let resp = ureq::get(url)
+        .set("User-Agent", "nanocord")
+        .timeout(Duration::from_secs(20))
+        .call()
+        .map_err(|e| format!("запрос: {}", e))?;
+    resp.into_string().map_err(|e| format!("чтение: {}", e))
+}
+
+fn http_download(url: &str, path: &Path) -> Result<(), String> {
+    let resp = ureq::get(url)
+        .set("User-Agent", "nanocord")
+        .timeout(Duration::from_secs(120))
+        .call()
+        .map_err(|e| format!("запрос: {}", e))?;
+
+    let mut reader = resp.into_reader();
+    let mut file = std::fs::File::create(path).map_err(|e| format!("файл: {}", e))?;
+    std::io::copy(&mut reader, &mut file).map_err(|e| format!("запись: {}", e))?;
+    let _ = file.flush();
+    Ok(())
+}
 
 pub fn check_and_install() {
     thread::spawn(|| {
         let current = env!("CARGO_PKG_VERSION");
         let url = format!("https://api.github.com/repos/{}/releases/latest", REPO);
 
-        let out = match Command::new("curl")
-            .args(["-sL", "--max-time", "20", "-H", "User-Agent: nanocord", &url])
-            .output()
-        {
-            Ok(o) => o,
-            Err(_) => {
-                crate::diag::log("update: curl не найден, проверка пропущена");
+        let body = match http_get(&url) {
+            Ok(b) => b,
+            Err(e) => {
+                crate::diag::log(&format!("update: {}", e));
                 return;
             }
         };
-        if !out.status.success() {
-            crate::diag::log("update: запрос к GitHub не удался");
-            return;
-        }
 
-        let body = String::from_utf8_lossy(&out.stdout).to_string();
         let tag = match extract(&body, "\"tag_name\":\"") {
             Some(t) => t,
             None => {
-                crate::diag::log("update: релизов нет");
+                crate::diag::log("update: в ответе нет tag_name (нет релизов?)");
                 return;
             }
         };
@@ -61,17 +79,9 @@ pub fn check_and_install() {
         let dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         let new_exe = dir.join("nanocord.new.exe");
 
-        let fetched = Command::new("curl")
-            .args(["-sL", "--max-time", "120", "-o"])
-            .arg(&new_exe)
-            .arg(&download)
-            .status();
-        match fetched {
-            Ok(s) if s.success() => {}
-            _ => {
-                crate::diag::log("update: скачать не удалось");
-                return;
-            }
+        if let Err(e) = http_download(&download, &new_exe) {
+            crate::diag::log(&format!("update: скачать не удалось ({})", e));
+            return;
         }
 
         let bat = dir.join("nanocord_update.bat");
@@ -84,9 +94,14 @@ pub fn check_and_install() {
             "del \"%~dp0nanocord.old.exe\"\r\n"
         );
         let _ = std::fs::write(&bat, script);
-        if Command::new("cmd").arg("/c").arg(&bat).spawn().is_ok() {
+        if std::process::Command::new("cmd")
+            .arg("/c")
+            .arg(&bat)
+            .spawn()
+            .is_ok()
+        {
             crate::diag::log(&format!("update: v{} скачана, перезапуск", latest));
-            thread::sleep(std::time::Duration::from_millis(500));
+            thread::sleep(Duration::from_millis(500));
             std::process::exit(0);
         }
     });
