@@ -21,6 +21,7 @@ glutin-winit = { version = "0.5", features = ["wgl"] }
 image = "0.25"
 nokhwa = { version = "0.10.11", features = ["input-native"] }
 opus-pure = "0.2.2"
+rfd = "0.15"
 
 [profile.release]
 opt-level = "s"

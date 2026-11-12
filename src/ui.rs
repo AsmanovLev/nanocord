@@ -339,6 +339,9 @@ pub struct NanocordApp {
     // Сетевой P2P сервер и клиент (IPv6 + IPv4)
     pub p2p_server: Option<crate::network::P2PNetworkServer>,
     pub p2p_client: Option<crate::network::P2PNetworkClient>,
+    pub chat_open: bool,
+    pub chat_log: Vec<String>,
+    pub chat_input: String,
     pub remote_desktop_texture: Option<egui::TextureHandle>,
     pub remote_camera_texture: Option<egui::TextureHandle>,
     pub last_remote_desktop_time: Option<Instant>,
@@ -506,6 +509,9 @@ impl Default for NanocordApp {
 
             p2p_server: None,
             p2p_client: None,
+            chat_open: true,
+            chat_log: Vec::new(),
+            chat_input: String::new(),
             remote_desktop_texture: None,
             remote_camera_texture: None,
             last_remote_desktop_time: None,
@@ -1664,6 +1670,131 @@ impl NanocordApp {
     }
 }
 
+impl NanocordApp {
+    /// Забирает всё, что пришло по чату, из активной сессии.
+    fn poll_chat(&mut self) {
+        use crate::network::ChatEvent;
+        let mut events = Vec::new();
+        if let Some(c) = &self.p2p_client {
+            while let Ok(e) = c.chat_rx.try_recv() {
+                events.push(e);
+            }
+        }
+        if let Some(s) = &self.p2p_server {
+            while let Ok(e) = s.chat_rx.try_recv() {
+                events.push(e);
+            }
+        }
+        for e in events {
+            match e {
+                ChatEvent::Text { from_peer, text } => self.chat_log.push(if from_peer {
+                    format!("Он: {}", text)
+                } else {
+                    format!("Вы: {}", text)
+                }),
+                ChatEvent::File {
+                    name,
+                    path,
+                    incoming,
+                } => self.chat_log.push(if incoming {
+                    format!("📄 Принят: {} → {}", name, path)
+                } else {
+                    format!("📄 Отправлен: {}", name)
+                }),
+                ChatEvent::Error(msg) => self.chat_log.push(format!("⚠ {}", msg)),
+            }
+            while self.chat_log.len() > 500 {
+                self.chat_log.remove(0);
+            }
+        }
+    }
+
+    fn chat_sender(&self) -> Option<std::sync::mpsc::SyncSender<crate::network::ChatOutgoing>> {
+        if let Some(c) = &self.p2p_client {
+            return Some(c.chat_tx.clone());
+        }
+        if let Some(s) = &self.p2p_server {
+            return Some(s.chat_tx.clone());
+        }
+        None
+    }
+
+    fn draw_chat(&mut self, ctx: &egui::Context) {
+        use crate::network::ChatOutgoing;
+
+        let connected = self
+            .p2p_server
+            .as_ref()
+            .map(|s| s.is_connected.load(Ordering::Relaxed))
+            .unwrap_or(false)
+            || self
+                .p2p_client
+                .as_ref()
+                .map(|c| c.is_connected.load(Ordering::Relaxed))
+                .unwrap_or(false);
+
+        let mut open = self.chat_open;
+        let mut send_text: Option<String> = None;
+        let mut send_file = false;
+
+        egui::Window::new("Чат")
+            .open(&mut open)
+            .default_size([340.0, 300.0])
+            .default_pos([60.0, 420.0])
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(190.0)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for line in &self.chat_log {
+                            ui.label(line);
+                        }
+                    });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.chat_input)
+                            .hint_text("Сообщение...")
+                            .desired_width(210.0),
+                    );
+                    let entered =
+                        resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if (ui.button("➤").clicked() || entered) && !self.chat_input.trim().is_empty()
+                    {
+                        send_text = Some(self.chat_input.trim().to_string());
+                        self.chat_input.clear();
+                    }
+                    if ui.button("📎").clicked() {
+                        send_file = true;
+                    }
+                });
+
+                if !connected {
+                    ui.label(egui::RichText::new("Нет соединения").size(11.0).weak());
+                }
+            });
+
+        self.chat_open = open;
+
+        if let Some(text) = send_text {
+            if let Some(tx) = self.chat_sender() {
+                if tx.try_send(ChatOutgoing::Text(text.clone())).is_ok() {
+                    self.chat_log.push(format!("Вы: {}", text));
+                }
+            }
+        }
+
+        if send_file {
+            if let Some(path) = rfd::FileDialog::new().pick_file() {
+                if let Some(tx) = self.chat_sender() {
+                    let _ = tx.try_send(ChatOutgoing::File(path));
+                }
+            }
+        }
+    }
+}
+
 impl eframe::App for NanocordApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Гарантированная синхронизация темы оформления
@@ -1671,6 +1802,9 @@ impl eframe::App for NanocordApp {
             apply_theme_mode(ctx, self.app_theme);
             self.applied_theme = Some(self.app_theme);
         }
+
+        self.poll_chat();
+        self.draw_chat(ctx);
 
         if self.last_diag.elapsed() >= Duration::from_secs(5) {
             self.last_diag = Instant::now();
