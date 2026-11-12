@@ -438,3 +438,45 @@ pub fn nv12_to_rgba_strided(width: usize, height: usize, stride: usize, nv12: &[
 pub fn nv12_to_rgba(width: usize, height: usize, nv12: &[u8], rgba: &mut [u8]) {
     nv12_to_rgba_strided(width, height, width, nv12, rgba);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::nv12_to_rgba_strided;
+
+    /// Строки приходят с выравниванием (1920 → 2048). Если читать их как
+    /// плотные, каждая строка уезжает на разницу pitch − width, и картинка
+    /// превращается в диагональные полосы.
+    #[test]
+    fn padded_rows_do_not_shear() {
+        let (w, h, stride) = (8usize, 8usize, 16usize);
+        let mut nv12 = vec![0u8; stride * h * 3 / 2];
+
+        for y in 0..h {
+            for x in 0..w {
+                nv12[y * stride + x] = 76;
+            }
+            for x in w..stride {
+                nv12[y * stride + x] = 0;
+            }
+        }
+        let uv0 = stride * h;
+        for y in 0..(h / 2) {
+            for i in 0..(stride / 2) {
+                nv12[uv0 + y * stride + i * 2] = 85;
+                nv12[uv0 + y * stride + i * 2 + 1] = 255;
+            }
+        }
+
+        let mut rgba = vec![0u8; w * h * 4];
+        nv12_to_rgba_strided(w, h, stride, &nv12, &mut rgba);
+
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                assert!(rgba[i] > 200, "R at {x},{y} = {}", rgba[i]);
+                assert!(rgba[i + 1] < 60, "G at {x},{y} = {}", rgba[i + 1]);
+                assert!(rgba[i + 2] < 60, "B at {x},{y} = {}", rgba[i + 2]);
+            }
+        }
+    }
+}

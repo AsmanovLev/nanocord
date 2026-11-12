@@ -11,3 +11,5 @@ pub mod latest;
 pub mod network;
 pub mod nvenc;
 pub mod ui;
+
+pub mod update;
