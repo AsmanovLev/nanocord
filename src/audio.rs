@@ -714,6 +714,10 @@ fn run_wasapi_playback_loop(
         let buffer_frame_count = audio_client.GetBufferSize()?;
         let render_client: IAudioRenderClient = audio_client.GetService::<IAudioRenderClient>()?;
         audio_client.Start()?;
+        crate::diag::log(&format!(
+            "audio out: {} Hz, {} ch, {} bit, buffer {} frames",
+            sample_rate, channels, bits_per_sample, buffer_frame_count
+        ));
 
         let mut sample_queue: VecDeque<f32> = VecDeque::with_capacity(48000);
         let target_prebuffer = (sample_rate as f32 * 0.030) as usize; // 30ms стартовая подушка
@@ -760,6 +764,7 @@ fn run_wasapi_playback_loop(
                                         consecutive_empty += 1;
                                         if consecutive_empty > empty_freeze_threshold {
                                             is_prebuffering = true;
+                                            crate::diag::log("audio out: underrun, re-prebuffering");
                                         }
                                         last_sample *= 0.96; // Мягкая экстраполяция без блокировки на 40мс
                                         last_sample
@@ -784,6 +789,7 @@ fn run_wasapi_playback_loop(
                                         consecutive_empty += 1;
                                         if consecutive_empty > empty_freeze_threshold {
                                             is_prebuffering = true;
+                                            crate::diag::log("audio out: underrun, re-prebuffering");
                                         }
                                         last_sample *= 0.96;
                                         (last_sample.clamp(-1.0, 1.0) * 32767.0) as i16
@@ -887,23 +893,15 @@ fn run_wasapi_capture_loop(
             match proc_res {
                 Ok((client, fmt)) => (client, fmt),
                 Err(_) => {
-                    // Device loopback hears everything, including our own
-                    // playback: the peer's voice goes back to the peer (echo).
+                    // Device loopback hears everything, including the peer's
+                    // voice we are playing right now, and sends it straight
+                    // back: that is the echo users hear. Refuse instead.
                     crate::diag::log_once(
-                        "loopback: process loopback unavailable, using device loopback (echo risk)",
+                        "loopback: process loopback unavailable, system audio disabled (would echo)",
                     );
-                    let device: IMMDevice = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
-                    let client = device.Activate::<IAudioClient>(CLSCTX_ALL, None)?;
-                    let fmt = client.GetMixFormat()?;
-                    client.Initialize(
-                        AUDCLNT_SHAREMODE_SHARED,
-                        AUDCLNT_STREAMFLAGS_LOOPBACK,
-                        1_000_000,
-                        0,
-                        fmt,
-                        None,
-                    )?;
-                    (client, fmt)
+                    return Err(windows::core::Error::from_hresult(
+                        windows::core::HRESULT(-2147467259),
+                    ));
                 }
             }
         } else {

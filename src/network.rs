@@ -985,6 +985,8 @@ fn run_p2p_socket_session(
         let _ = reader.set_read_timeout(Some(Duration::from_millis(1500)));
         let mut header = [0u8; 12];
         let mut last_rx = Instant::now();
+        let mut rx_frames = 0u32;
+        let mut rx_log = Instant::now();
         let mut hevc_decoder = crate::decoder::HevcDecoder::new().ok();
         let mut h264_decoder = crate::decoder::H264Decoder::new().ok();
 
@@ -1037,6 +1039,18 @@ fn run_p2p_socket_session(
                         };
 
                         if let Some(rgba) = rgba_opt {
+                            rx_frames += 1;
+                            if rx_log.elapsed() >= Duration::from_secs(5) {
+                                rx_log = Instant::now();
+                                crate::diag::log(&format!(
+                                    "rx: codec={} {}x{} frames={}",
+                                    flags,
+                                    width,
+                                    height,
+                                    rx_frames
+                                ));
+                                rx_frames = 0;
+                            }
                             let _ = in_dt_tx.try_send(NetworkPeerFrame {
                                 width,
                                 height,
@@ -1109,6 +1123,7 @@ fn run_p2p_socket_session(
     let mut fps_counter = 0u32;
     let mut fps_timer = Instant::now();
     let mut total_bytes_sent = 0u64;
+    let mut log_tick = 0u32;
 
     let mut nv_encoder: Option<(crate::nvenc::NvencEncoder, u8)> = None;
     let mut cur_enc_config = (0u8, 0u32, 0u32, 0u32, 0usize);
@@ -1151,25 +1166,27 @@ fn run_p2p_socket_session(
                     _ => crate::nvenc::NV_ENC_PRESET_P1_GUID,
                 };
 
-                // Приоритет: аппаратный HEVC (H.265, flags = 3) -> аппаратный H.264 (flags = 2)
-                let mut enc = crate::nvenc::NvencEncoder::new_standalone_hevc(
+                // H.264 first: it is supported by every NVENC generation and
+                // decodes everywhere. HEVC is opt-in, because a stream the GPU
+                // cannot really encode arrives as a green picture.
+                let mut enc = crate::nvenc::NvencEncoder::new_standalone_h264(
                     frame.width,
                     frame.height,
                     cq,
                     max_br,
                     60,
                     preset_guid,
-                ).map(|e| (e, 3u8));
+                ).map(|e| (e, 2u8));
 
                 if enc.is_err() {
-                    enc = crate::nvenc::NvencEncoder::new_standalone_h264(
+                    enc = crate::nvenc::NvencEncoder::new_standalone_hevc(
                         frame.width,
                         frame.height,
                         cq,
                         max_br,
                         60,
                         preset_guid,
-                    ).map(|e| (e, 2u8));
+                    ).map(|e| (e, 3u8));
                 }
 
                 nv_encoder = enc.ok();
@@ -1304,6 +1321,23 @@ fn run_p2p_socket_session(
                     .read()
                     .map(|c| c.cq_quality)
                     .unwrap_or(0);
+            }
+
+            log_tick += 1;
+            if log_tick % 5 == 0 {
+                let drops = outbox_desktop.overwritten() + outbox_camera.overwritten();
+                let errs = telemetry
+                    .read()
+                    .map(|t| t.encode_errors)
+                    .unwrap_or(0);
+                crate::diag::log(&format!(
+                    "tx: fps={:.0} mbps={:.1} drops={} enc_err={} cq={}",
+                    cur_fps,
+                    mbps,
+                    drops,
+                    errs,
+                    encoder_config.read().map(|c| c.cq_quality).unwrap_or(0)
+                ));
             }
             fps_counter = 0;
             total_bytes_sent = 0;
@@ -1461,11 +1495,11 @@ mod tests {
         };
 
         // Send via client outgoing desktop queue
-        client.outgoing_desktop_tx.send(NetworkPeerFrame {
+        client.outbox_desktop.put(OutgoingFrame {
             width: w,
             height: h,
-            rgba: rgba.clone(),
-        }).expect("send failed");
+            rgba: Arc::new(rgba.clone()),
+        });
 
         // Server receives and decodes JPEG frame
         let start = Instant::now();
@@ -1645,14 +1679,14 @@ mod tests {
 
         // Client sends desktop video + audio to Server
         let dummy_dt = vec![120u8; 320 * 240 * 4];
-        client.outgoing_desktop_tx.send(NetworkPeerFrame { width: 320, height: 240, rgba: dummy_dt }).unwrap();
+        client.outbox_desktop.put(OutgoingFrame { width: 320, height: 240, rgba: Arc::new(dummy_dt) });
         let mut enc_cli = crate::audio::NanocordOpusEncoder::new();
         let cli_opus = enc_cli.encode_chunk(&vec![1234; 960]);
         client.outgoing_audio_tx.send(NetworkAudioPacket::with_opus(-10.0, -0.5, 0.5, 0.3, [0.2; 20], cli_opus[0].clone())).unwrap();
 
         // Server sends camera video + audio to Client
         let dummy_cam = vec![200u8; 160 * 120 * 4];
-        server.outgoing_camera_tx.send(NetworkPeerFrame { width: 160, height: 120, rgba: dummy_cam }).unwrap();
+        server.outbox_camera.put(OutgoingFrame { width: 160, height: 120, rgba: Arc::new(dummy_cam) });
         let mut enc_srv = crate::audio::NanocordOpusEncoder::new();
         let srv_opus = enc_srv.encode_chunk(&vec![5678; 960]);
         server.outgoing_audio_tx.send(NetworkAudioPacket::with_opus(-8.0, -0.4, 0.6, 0.35, [0.4; 20], srv_opus[0].clone())).unwrap();
@@ -2015,5 +2049,50 @@ mod tests {
         let (intact_sim_a, _) = compute_aligned_similarity(&intact_orig, &intact_recv);
         println!("Stream A (intact frames): similarity = {:.2}%", intact_sim_a * 100.0);
         assert!(intact_sim_a >= 0.95, "Intact frames similarity must be >95%, got {:.2}%", intact_sim_a * 100.0);
+    }
+
+    #[test]
+    fn test_nv12_conversion_red() {
+        // BT.601 limited range: pure red is Y=76, Cb=85, Cr=255.
+        let (w, h) = (4usize, 4usize);
+        let mut nv12 = vec![0u8; w * h * 3 / 2];
+        for y in 0..h {
+            for x in 0..w {
+                nv12[y * w + x] = 76;
+            }
+        }
+        let uv = w * h;
+        for i in 0..(w * h / 2) {
+            nv12[uv + i] = if i % 2 == 0 { 85 } else { 255 };
+        }
+
+        let mut rgba = vec![0u8; w * h * 4];
+        crate::decoder::nv12_to_rgba(w, h, &nv12, &mut rgba);
+
+        assert!(rgba[0] > 200, "red channel is {}", rgba[0]);
+        assert!(rgba[1] < 60, "green channel is {}", rgba[1]);
+        assert!(rgba[2] < 60, "blue channel is {}", rgba[2]);
+    }
+
+    #[test]
+    fn test_jpeg_roundtrip_keeps_color() {
+        let (w, h) = (64u32, 64u32);
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        for p in rgba.chunks_exact_mut(4) {
+            p[0] = 220;
+            p[1] = 20;
+            p[2] = 30;
+            p[3] = 255;
+        }
+
+        let jpeg = encode_frame_to_jpeg(w, h, &rgba).expect("encode failed");
+        let (_, _, out) = decode_frame_from_jpeg(&jpeg).expect("decode failed");
+
+        // A green frame here would mean the colour path is broken end to end.
+        assert!(
+            out[0] > 150 && out[1] < 90 && out[2] < 90,
+            "rgb after roundtrip: {:?}",
+            &out[..3]
+        );
     }
 }

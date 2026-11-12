@@ -24,6 +24,11 @@ jobs:
           # Visual C++ Redistributable.
           RUSTFLAGS: -C target-feature=+crt-static
 
+      - name: Test
+        run: cargo test --release -- --test-threads=1
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+
       - name: Collect binary
         shell: pwsh
         run: |
