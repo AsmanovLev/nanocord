@@ -462,8 +462,14 @@ impl NvencEncoder {
                 Some(&mut feature_level),
                 Some(&mut ctx_nv),
             )?;
-            let nvidia_device = dev_nv.unwrap();
-            let nvidia_context = ctx_nv.unwrap();
+            crate::diag::log("nvenc: D3D11 device created on NVIDIA adapter");
+            let (nvidia_device, nvidia_context) = match (dev_nv, ctx_nv) {
+                (Some(d), Some(c)) => (d, c),
+                _ => {
+                    crate::diag::log("nvenc: D3D11 device creation returned empty");
+                    return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
+                }
+            };
 
             let nv_desc = D3D11_TEXTURE2D_DESC {
                 Width: width,
@@ -492,11 +498,13 @@ impl NvencEncoder {
 
             let create_instance: NvEncodeAPICreateInstanceFn = std::mem::transmute(create_instance_proc);
 
+            crate::diag::log("nvenc: dll loaded, creating API instance");
             let mut api_uninit = MaybeUninit::<NvEncApiFunctionList>::zeroed();
             let api_ptr = api_uninit.as_mut_ptr();
             (*api_ptr).version = NV_ENCODE_API_FUNCTION_LIST_VER;
 
             let status = create_instance(api_ptr);
+            crate::diag::log(&format!("nvenc: CreateInstance status={}", status));
             if status != NV_ENC_SUCCESS {
                 return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }
@@ -556,6 +564,7 @@ impl NvencEncoder {
             init_params.encodeConfig = encode_config.as_mut().map(|c| c as *mut _).unwrap_or(std::ptr::null_mut());
 
             let status = (api.nvEncInitializeEncoder)(encoder, &mut init_params);
+            crate::diag::log(&format!("nvenc: InitializeEncoder status={}", status));
             if status != NV_ENC_SUCCESS {
                 return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }
@@ -649,7 +658,14 @@ impl NvencEncoder {
                 }
             }
 
-            let nvidia_adapter = nvidia_adapter.expect("NVIDIA GPU adapter not found on this system");
+            crate::diag::log("nvenc: adapter search done");
+            let nvidia_adapter = match nvidia_adapter {
+                Some(a) => a,
+                None => {
+                    crate::diag::log("nvenc: no NVIDIA adapter");
+                    return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
+                }
+            };
 
             // Проверяем, на каком адаптере работает захват
             let capture_dxgi: IDXGIDevice = capture_device.cast()?;
@@ -681,8 +697,14 @@ impl NvencEncoder {
                 Some(&mut ctx_nv),
             )?;
 
-            let nvidia_device = dev_nv.unwrap();
-            let nvidia_context = ctx_nv.unwrap();
+            crate::diag::log("nvenc: D3D11 device created on NVIDIA adapter");
+            let (nvidia_device, nvidia_context) = match (dev_nv, ctx_nv) {
+                (Some(d), Some(c)) => (d, c),
+                _ => {
+                    crate::diag::log("nvenc: D3D11 device creation returned empty");
+                    return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
+                }
+            };
 
             let dxgi_dev: IDXGIDevice = nvidia_device.cast()?;
             let actual_adapter = dxgi_dev.GetAdapter()?;
@@ -706,11 +728,13 @@ impl NvencEncoder {
 
             let create_instance: NvEncodeAPICreateInstanceFn = std::mem::transmute(create_instance_proc);
 
+            crate::diag::log("nvenc: dll loaded, creating API instance");
             let mut api_uninit = MaybeUninit::<NvEncApiFunctionList>::zeroed();
             let api_ptr = api_uninit.as_mut_ptr();
             (*api_ptr).version = NV_ENCODE_API_FUNCTION_LIST_VER;
 
             let status = create_instance(api_ptr);
+            crate::diag::log(&format!("nvenc: CreateInstance status={}", status));
             if status != NV_ENC_SUCCESS {
                 return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }
@@ -724,7 +748,9 @@ impl NvencEncoder {
             session_params.apiVersion = NVENCAPI_VERSION;
 
             let mut encoder: *mut c_void = std::ptr::null_mut();
+            crate::diag::log(&format!("nvenc: OpenSessionEx device={:?} size={}", session_params.device, std::mem::size_of::<NvEncOpenEncodeSessionExParams>()));
             let status = (api.nvEncOpenEncodeSessionEx)(&mut session_params, &mut encoder);
+            crate::diag::log(&format!("nvenc: OpenSessionEx status={} handle={:?}", status, encoder));
             if status != NV_ENC_SUCCESS {
                 return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }
@@ -773,6 +799,7 @@ impl NvencEncoder {
             init_params.encodeConfig = encode_config.as_mut().map(|c| c as *mut _).unwrap_or(std::ptr::null_mut());
 
             let status = (api.nvEncInitializeEncoder)(encoder, &mut init_params);
+            crate::diag::log(&format!("nvenc: InitializeEncoder status={}", status));
             if status != NV_ENC_SUCCESS {
                 return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }

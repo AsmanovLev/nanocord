@@ -512,6 +512,8 @@ pub struct VideoEncoderConfig {
     pub cq_quality: u8,
     pub max_bitrate_mbps: u32,
     pub preset_index: usize,
+    /// Hardware (NVENC) encoding. Turning it off falls back to CPU JPEG.
+    pub hardware: bool,
 }
 
 impl Default for VideoEncoderConfig {
@@ -520,6 +522,7 @@ impl Default for VideoEncoderConfig {
             cq_quality: 22,
             max_bitrate_mbps: 30,
             preset_index: 1,
+            hardware: true,
         }
     }
 }
@@ -1157,6 +1160,10 @@ fn run_p2p_socket_session(
                 (22, 30, 0)
             };
 
+            let hardware = encoder_config
+                .read()
+                .map(|c| c.hardware)
+                .unwrap_or(true);
             let needed_config = (cq, max_br, frame.width, frame.height, preset_idx);
             if cur_enc_config != needed_config {
                 let preset_guid = match preset_idx {
@@ -1189,7 +1196,12 @@ fn run_p2p_socket_session(
                     ).map(|e| (e, 3u8));
                 }
 
-                nv_encoder = enc.ok();
+                nv_encoder = if hardware {
+                    enc.ok()
+                } else {
+                    crate::diag::log("encoder: hardware disabled, using JPEG");
+                    None
+                };
                 cur_enc_config = needed_config;
                 crate::diag::log(&format!(
                     "encoder: {} {}x{} cq={} max={}Mbps",
