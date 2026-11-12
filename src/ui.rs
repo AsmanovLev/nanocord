@@ -3,10 +3,11 @@
 use crate::audio::{start_wasapi_audio_worker, AudioSpectrumPacket, AUDIO_SPECTROGRAM_BINS};
 use crate::benchmark::{build_benchmark_matrix, run_full_benchmark, BenchmarkResult, MatrixCell, MatrixRow};
 use crate::camera::{start_camera_worker, CameraFrame};
-use crate::capture::{capture_desktop_gdi, get_screen_resolution, start_desktop_preview_worker, PreviewFrame};
+use crate::capture::{capture_desktop_gdi, get_screen_resolution, start_desktop_preview_worker, CaptureStats, PreviewFrame};
+use crate::latest::LatestSlot;
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, Stroke, Vec2};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -284,7 +285,9 @@ pub struct NanocordApp {
 
     // Реальный захват рабочего стола (DXGI + GDI)
     pub desktop_texture: Option<egui::TextureHandle>,
-    preview_rx: Option<Receiver<PreviewFrame>>,
+    preview_rx: Option<Arc<LatestSlot<PreviewFrame>>>,
+    preview_stats: Arc<CaptureStats>,
+    target_fps_shared: Arc<AtomicU32>,
 
     // Реальный захват веб-камеры (Media Foundation / nokhwa)
     pub camera_texture: Option<egui::TextureHandle>,
@@ -389,7 +392,15 @@ impl Default for NanocordApp {
         let encoder_config = Arc::new(std::sync::RwLock::new(crate::network::VideoEncoderConfig::default()));
 
         // 1. Запуск настоящего фонового захвата экрана в полном нативном разрешении (30 FPS при стриме, 1 FPS в режиме паузы)
-        let rx_desktop = start_desktop_preview_worker(native_w, native_h, is_streaming.clone());
+        let capture_stats = Arc::new(CaptureStats::default());
+        let target_fps_shared = Arc::new(AtomicU32::new(60));
+        let rx_desktop = start_desktop_preview_worker(
+            native_w,
+            native_h,
+            target_fps_shared.clone(),
+            is_streaming.clone(),
+            capture_stats.clone(),
+        );
 
         // 2. Запуск настоящего фонового захвата веб-камеры (спит с 0% CPU/GPU, пока камера выключена)
         let rx_camera = start_camera_worker(is_camera_on_flag.clone());
@@ -447,6 +458,8 @@ impl Default for NanocordApp {
 
             desktop_texture: None,
             preview_rx: Some(rx_desktop),
+            preview_stats: capture_stats,
+            target_fps_shared,
 
             camera_texture: None,
             camera_rx: Some(rx_camera),
@@ -1601,6 +1614,21 @@ impl NanocordApp {
     }
 
     pub fn estimate_latency_ms(&self) -> f32 {
+        // Measured RTT beats a table; the matrix below is a pre-connect estimate.
+        let measured = self
+            .p2p_server
+            .as_ref()
+            .and_then(|s| s.telemetry.read().ok().map(|t| t.latency_ms))
+            .or_else(|| {
+                self.p2p_client
+                    .as_ref()
+                    .and_then(|c| c.telemetry.read().ok().map(|t| t.latency_ms))
+            })
+            .unwrap_or(0.0);
+        if measured > 0.0 {
+            return measured;
+        }
+
         let (p_id, _) = self.get_effective_preset();
         let (w, _, _) = self.available_resolutions[self.selected_res_idx];
         if let Some(results) = &self.benchmark_results {
@@ -1639,6 +1667,10 @@ impl eframe::App for NanocordApp {
             apply_theme_mode(ctx, self.app_theme);
             self.applied_theme = Some(self.app_theme);
         }
+
+        // Ползунок fps управляет захватом напрямую, без перезапуска.
+        self.target_fps_shared
+            .store(self.target_fps.clamp(1, 120), Ordering::Relaxed);
 
         // Проверяем статус P2P подключения
         let is_srv_connected = self.p2p_server.as_ref().map(|s| s.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
@@ -1691,20 +1723,20 @@ impl eframe::App for NanocordApp {
         }
 
         // 1. Приём настоящих кадров захвата экрана
-        if let Some(ref rx) = self.preview_rx {
-            while let Ok(frame) = rx.try_recv() {
+        if let Some(ref slot) = self.preview_rx {
+            while let Some(frame) = slot.take() {
                 // Если собеседник подключен и стрим включен, отправляем захваченный кадр экрана в P2P
                 if is_peer_connected && self.is_streaming.load(Ordering::Relaxed) {
-                    let net_frame = crate::network::NetworkPeerFrame {
+                    let net_frame = crate::network::OutgoingFrame {
                         width: frame.width,
                         height: frame.height,
-                        rgba: frame.rgba.clone(),
+                        rgba: std::sync::Arc::new(frame.rgba.clone()),
                     };
                     if let Some(ref srv) = self.p2p_server {
-                        let _ = srv.outgoing_desktop_tx.try_send(net_frame.clone());
+                        srv.outbox_desktop.put(net_frame.clone());
                     }
                     if let Some(ref cli) = self.p2p_client {
-                        let _ = cli.outgoing_desktop_tx.try_send(net_frame);
+                        cli.outbox_desktop.put(net_frame);
                     }
                 }
 
@@ -1733,16 +1765,16 @@ impl eframe::App for NanocordApp {
                 }
                 // Если собеседник подключен и камера включена, отправляем кадр веб-камеры
                 if is_peer_connected {
-                    let net_frame = crate::network::NetworkPeerFrame {
+                    let net_frame = crate::network::OutgoingFrame {
                         width: frame.width,
                         height: frame.height,
-                        rgba: frame.rgba.clone(),
+                        rgba: std::sync::Arc::new(frame.rgba.clone()),
                     };
                     if let Some(ref srv) = self.p2p_server {
-                        let _ = srv.outgoing_camera_tx.try_send(net_frame.clone());
+                        srv.outbox_camera.put(net_frame.clone());
                     }
                     if let Some(ref cli) = self.p2p_client {
-                        let _ = cli.outgoing_camera_tx.try_send(net_frame);
+                        cli.outbox_camera.put(net_frame);
                     }
                 }
 
@@ -1852,10 +1884,18 @@ impl eframe::App for NanocordApp {
 
         if let Some(ref srv) = self.p2p_server {
             while let Ok(frame) = srv.desktop_rx.try_recv() {
-                latest_remote_dt = Some(frame);
+                if frame.keepalive {
+                    self.last_remote_desktop_time = Some(Instant::now());
+                } else {
+                    latest_remote_dt = Some(frame);
+                }
             }
             while let Ok(frame) = srv.camera_rx.try_recv() {
-                latest_remote_cam = Some(frame);
+                if frame.keepalive {
+                    self.last_remote_camera_time = Some(Instant::now());
+                } else {
+                    latest_remote_cam = Some(frame);
+                }
             }
             while let Ok(audio) = srv.audio_rx.try_recv() {
                 if !self.is_deafened {
@@ -1878,10 +1918,18 @@ impl eframe::App for NanocordApp {
         }
         if let Some(ref cli) = self.p2p_client {
             while let Ok(frame) = cli.desktop_rx.try_recv() {
-                latest_remote_dt = Some(frame);
+                if frame.keepalive {
+                    self.last_remote_desktop_time = Some(Instant::now());
+                } else {
+                    latest_remote_dt = Some(frame);
+                }
             }
             while let Ok(frame) = cli.camera_rx.try_recv() {
-                latest_remote_cam = Some(frame);
+                if frame.keepalive {
+                    self.last_remote_camera_time = Some(Instant::now());
+                } else {
+                    latest_remote_cam = Some(frame);
+                }
             }
             while let Ok(audio) = cli.audio_rx.try_recv() {
                 if !self.is_deafened {
@@ -2312,7 +2360,38 @@ impl NanocordApp {
 
             let (w, h, res_name) = self.available_resolutions[self.selected_res_idx];
             let (_, p_name) = self.get_effective_preset();
-            ui.label(egui::RichText::new(format!("• {} • {} FPS • HEVC {} • {:.1} ms", res_name, self.target_fps, p_name, self.estimate_latency_ms()))
+            let live = self
+                .p2p_server
+                .as_ref()
+                .and_then(|s| s.telemetry.read().ok().map(|t| t.clone()))
+                .or_else(|| {
+                    self.p2p_client
+                        .as_ref()
+                        .and_then(|c| c.telemetry.read().ok().map(|t| t.clone()))
+                });
+
+            // Numbers below are measured, not configured: a still screen honestly
+            // reports 0 fps instead of the value chosen in settings.
+            let status_text = match live {
+                Some(t) if t.is_connected => format!(
+                    "• {} • {:.0} fps • {:.1} Mbps • cq{} • {:.0} ms • {} {:.0}fps",
+                    res_name,
+                    t.fps,
+                    t.bitrate_mbps,
+                    t.quality,
+                    t.latency_ms,
+                    self.preview_stats.source().label(),
+                    self.preview_stats.fps()
+                ),
+                _ => format!(
+                    "• {} • до {} FPS • {} • {:.1} ms",
+                    res_name,
+                    self.target_fps,
+                    p_name,
+                    self.estimate_latency_ms()
+                ),
+            };
+            ui.label(egui::RichText::new(status_text)
                 .color(Color32::from_rgb(140, 185, 255))
                 .size(11.5));
 

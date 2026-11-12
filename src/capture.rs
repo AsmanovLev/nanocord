@@ -16,6 +16,132 @@ use windows::Win32::Graphics::Gdi::{
     ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HDC, HGDIOBJ, SRCCOPY,
 };
 
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use crate::latest::LatestSlot;
+
+/// `DXGI_ERROR_WAIT_TIMEOUT` = 0x887A0027 — "the desktop did not change".
+/// Written as hex so it cannot drift into a value that never matches: treating
+/// a still desktop as an error is what pushes capture into the GDI fallback.
+const DXGI_ERROR_WAIT_TIMEOUT: i32 = 0x887A0027u32 as i32;
+
+/// Where a frame came from, carried on every frame so "periodic flicker" stops
+/// being a guess: the moment the source flips to GDI, capture is degrading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameSource {
+    Dxgi,
+    Gdi,
+}
+
+impl FrameSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            FrameSource::Dxgi => "DXGI",
+            FrameSource::Gdi => "GDI",
+        }
+    }
+
+    pub fn as_u32(self) -> u32 {
+        match self {
+            FrameSource::Dxgi => 0,
+            FrameSource::Gdi => 1,
+        }
+    }
+}
+
+/// Live capture counters for the diagnostics line.
+#[derive(Default)]
+pub struct CaptureStats {
+    pub frames: AtomicU64,
+    pub gdi_frames: AtomicU64,
+    pub errors: AtomicU64,
+    pub fps_x10: AtomicU32,
+    pub source: AtomicU32,
+    last_error: Mutex<String>,
+}
+
+impl CaptureStats {
+    pub fn fps(&self) -> f32 {
+        self.fps_x10.load(Ordering::Relaxed) as f32 / 10.0
+    }
+
+    pub fn source(&self) -> FrameSource {
+        match self.source.load(Ordering::Relaxed) {
+            1 => FrameSource::Gdi,
+            _ => FrameSource::Dxgi,
+        }
+    }
+
+    pub fn note_error(&self, error: &windows::core::Error) {
+        self.errors.fetch_add(1, Ordering::Relaxed);
+        let mut guard = self.last_error.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = format!("{:#010X} {}", error.code().0, error.message());
+    }
+}
+
+/// An acquired frame that releases itself.
+///
+/// DXGI allows exactly one outstanding frame per duplication object. Any early
+/// return that skipped `ReleaseFrame` made the next acquire fail with
+/// `DXGI_ERROR_INVALID_CALL` and poisoned capture until it was rebuilt.
+struct AcquiredFrame {
+    duplication: IDXGIOutputDuplication,
+    resource: IDXGIResource,
+}
+
+impl AcquiredFrame {
+    fn texture(&self) -> Result<ID3D11Texture2D> {
+        self.resource.cast()
+    }
+}
+
+impl Drop for AcquiredFrame {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = self.duplication.ReleaseFrame();
+        }
+    }
+}
+
+/// Converts packed BGRA to RGBA while scaling with nearest neighbour.
+fn scale_bgra_to_rgba(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let (sw, sh) = (sw.max(1) as usize, sh.max(1) as usize);
+    let (dw, dh) = (dw.max(1) as usize, dh.max(1) as usize);
+    let mut out = vec![0u8; dw * dh * 4];
+    if src.len() < sw * sh * 4 {
+        return out;
+    }
+
+    if sw == dw && sh == dh {
+        for i in 0..dw * dh {
+            let s = i * 4;
+            out[s] = src[s + 2];
+            out[s + 1] = src[s + 1];
+            out[s + 2] = src[s];
+            out[s + 3] = 255;
+        }
+        return out;
+    }
+
+    for dy in 0..dh {
+        let sy = dy * sh / dh;
+        let src_row = sy * sw * 4;
+        let dst_row = dy * dw * 4;
+        for dx in 0..dw {
+            let sx = dx * sw / dw;
+            let s = src_row + sx * 4;
+            let d = dst_row + dx * 4;
+            out[d] = src[s + 2];
+            out[d + 1] = src[s + 1];
+            out[d + 2] = src[s];
+            out[d + 3] = 255;
+        }
+    }
+    out
+}
+
 #[allow(dead_code)]
 pub struct DxgiCapture {
     pub device: ID3D11Device,
@@ -119,102 +245,79 @@ impl DxgiCapture {
         }
     }
 
+    /// Acquires one frame, or `None` when the desktop has not changed.
+    fn acquire(&self, timeout_ms: u32) -> Result<Option<AcquiredFrame>> {
+        unsafe {
+            let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+            let mut resource: Option<IDXGIResource> = None;
+
+            match self
+                .duplication
+                .AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource)
+            {
+                Ok(()) => match resource {
+                    None => Ok(None),
+                    Some(resource) => Ok(Some(AcquiredFrame {
+                        duplication: self.duplication.clone(),
+                        resource,
+                    })),
+                },
+                Err(e) if e.code().0 == DXGI_ERROR_WAIT_TIMEOUT => Ok(None),
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    /// Copies the current desktop into a packed BGRA buffer.
+    ///
+    /// `Ok(None)` means "nothing changed" — the normal state of a still desktop.
+    pub fn grab(&mut self) -> Result<Option<Vec<u8>>> {
+        let Some(frame) = self.acquire(16)? else {
+            return Ok(None);
+        };
+
+        // `frame` releases itself on drop, including on every error path below.
+        let texture = frame.texture()?;
+        unsafe {
+            self.context.CopyResource(&self.staging, &texture);
+        }
+
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe {
+            self.context
+                .Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+        }
+
+        let pitch = mapped.RowPitch as usize;
+        let row_bytes = self.width as usize * 4;
+        let mut bgra = vec![0u8; row_bytes * self.height as usize];
+        unsafe {
+            for y in 0..self.height as usize {
+                let src = (mapped.pData as *const u8).add(y * pitch);
+                let dst = bgra.as_mut_ptr().add(y * row_bytes);
+                std::ptr::copy_nonoverlapping(src, dst, row_bytes);
+            }
+            self.context.Unmap(&self.staging, 0);
+        }
+
+        Ok(Some(bgra))
+    }
+
     /// Захватывает реальный кадр рабочего стола и конвертирует его в RGBA буфер нужного размера
     pub fn capture_preview_rgba(
         &mut self,
         target_w: u32,
         target_h: u32,
     ) -> Result<Option<Vec<u8>>> {
-        unsafe {
-            let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
-            let mut resource: Option<IDXGIResource> = None;
-
-            let hr = self.duplication.AcquireNextFrame(
-                16,
-                &mut frame_info,
-                &mut resource,
-            );
-
-            if let Err(e) = hr {
-                const DXGI_ERROR_WAIT_TIMEOUT: i32 = -2003292419; // 0x887A0027
-                if e.code().0 == DXGI_ERROR_WAIT_TIMEOUT {
-                    return Ok(None);
-                }
-                return Err(e);
-            }
-
-            let resource = match resource {
-                Some(r) => r,
-                None => return Ok(None),
-            };
-            let texture: ID3D11Texture2D = resource.cast()?;
-
-            // Копируем захваченный кадр в staging-текстуру для чтения CPU
-            self.context.CopyResource(&self.staging, &texture);
-
-            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            self.context.Map(
-                &self.staging,
-                0,
-                D3D11_MAP_READ,
-                0,
-                Some(&mut mapped),
-            )?;
-
-            let pitch = mapped.RowPitch as usize;
-            let data_ptr = mapped.pData as *const u8;
-
-            let src_w = self.width as usize;
-            let src_h = self.height as usize;
-            let dst_w = target_w as usize;
-            let dst_h = target_h as usize;
-
-            let mut out_rgba = vec![0u8; dst_w * dst_h * 4];
-
-            // Быстрый 1:1 или билинейный пересчёт BGRA -> RGBA (максимальная резкость)
-            if src_w == dst_w && src_h == dst_h {
-                for dy in 0..dst_h {
-                    let src_row = data_ptr.add(dy * pitch);
-                    let dst_offset = dy * dst_w * 4;
-                    for dx in 0..dst_w {
-                        let px = src_row.add(dx * 4);
-                        let b = *px;
-                        let g = *px.add(1);
-                        let r = *px.add(2);
-
-                        let o = dst_offset + dx * 4;
-                        out_rgba[o] = r;
-                        out_rgba[o + 1] = g;
-                        out_rgba[o + 2] = b;
-                        out_rgba[o + 3] = 255;
-                    }
-                }
-            } else {
-                for dy in 0..dst_h {
-                    let sy = (dy * src_h) / dst_h;
-                    let src_row = data_ptr.add(sy * pitch);
-                    let dst_offset = dy * dst_w * 4;
-
-                    for dx in 0..dst_w {
-                        let sx = (dx * src_w) / dst_w;
-                        let px = src_row.add(sx * 4);
-                        let b = *px;
-                        let g = *px.add(1);
-                        let r = *px.add(2);
-
-                        let o = dst_offset + dx * 4;
-                        out_rgba[o] = r;
-                        out_rgba[o + 1] = g;
-                        out_rgba[o + 2] = b;
-                        out_rgba[o + 3] = 255;
-                    }
-                }
-            }
-
-            self.context.Unmap(&self.staging, 0);
-            self.duplication.ReleaseFrame()?;
-
-            Ok(Some(out_rgba))
+        match self.grab()? {
+            Some(bgra) => Ok(Some(scale_bgra_to_rgba(
+                &bgra,
+                self.width,
+                self.height,
+                target_w,
+                target_h,
+            ))),
+            None => Ok(None),
         }
     }
 
@@ -234,7 +337,10 @@ impl DxgiCapture {
             );
 
             if let Err(e) = hr {
-                const DXGI_ERROR_WAIT_TIMEOUT: i32 = -2003292419; // 0x887A0027
+                // `DXGI_ERROR_WAIT_TIMEOUT` = 0x887A0027. Derived from hex so the
+                // comparison cannot drift: "nothing changed" must not be treated
+                // as a broken capture, or every still desktop falls back to GDI.
+                const DXGI_ERROR_WAIT_TIMEOUT: i32 = 0x887A0027u32 as i32;
                 if e.code().0 == DXGI_ERROR_WAIT_TIMEOUT {
                     return Ok(None);
                 }
@@ -305,6 +411,8 @@ pub struct PreviewFrame {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    pub source: FrameSource,
+    pub seq: u64,
 }
 
 /// Надёжный захват рабочего стола через Windows GDI (работает на любом железе без таймаутов)
@@ -401,79 +509,115 @@ pub fn capture_desktop_gdi(target_w: u32, target_h: u32) -> Option<Vec<u8>> {
     }
 }
 
-/// Запускает фоновый поток захвата настоящего экрана для превью в UI:
-/// 30 FPS во время активной трансляции, 1 FPS в режиме паузы для нулевой нагрузки на CPU/GPU
+/// Запускает фоновый поток захвата рабочего стола.
+///
+/// `fps` общий с UI — ползунок действует без перезапуска. Кадр отдаётся только
+/// когда рабочий стол изменился; GDI применяется лишь для холодного старта,
+/// потому что под DWM он отдаёт чёрные и рваные кадры.
 pub fn start_desktop_preview_worker(
     target_w: u32,
     target_h: u32,
-    is_streaming: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> std::sync::mpsc::Receiver<PreviewFrame> {
-    let (tx, rx) = std::sync::mpsc::sync_channel(2);
+    fps: Arc<AtomicU32>,
+    is_streaming: Arc<std::sync::atomic::AtomicBool>,
+    stats: Arc<CaptureStats>,
+) -> Arc<LatestSlot<PreviewFrame>> {
+    let slot = Arc::new(LatestSlot::new());
+    let out = slot.clone();
+
     std::thread::spawn(move || {
-        let mut capture = DxgiCapture::new().ok();
-        let mut retry_counter = 0usize;
-        let mut last_frame: Option<Vec<u8>> = None;
-        let mut was_streaming = false;
+        let mut capture: Option<DxgiCapture> = None;
+        let mut next_attempt = Instant::now();
+        let mut backoff = Duration::from_millis(250);
+        let mut seq = 0u64;
+        let mut next_tick = Instant::now();
+        let mut fps_window_start = Instant::now();
+        let mut fps_window_frames = 0u32;
 
         loop {
-            let streaming = is_streaming.load(std::sync::atomic::Ordering::Relaxed);
-            if streaming {
-                std::thread::sleep(std::time::Duration::from_millis(33)); // ~30 FPS при активном стриме
+            let streaming = is_streaming.load(Ordering::Relaxed);
+            // 1 FPS in idle keeps the cost near zero without faking frames.
+            let target_fps = if streaming {
+                fps.load(Ordering::Relaxed).clamp(1, 120)
             } else {
-                std::thread::sleep(std::time::Duration::from_millis(1000)); // 1 FPS при паузе (0% CPU/GPU)
-            }
-            let mut new_rgba = None;
+                1
+            };
+            let period = Duration::from_nanos(1_000_000_000 / target_fps as u64);
 
-            // Периодическая попытка подключить DXGI, если он был потерян
-            if capture.is_none() {
-                retry_counter += 1;
-                if retry_counter % 30 == 0 {
-                    capture = DxgiCapture::new().ok();
+            // Deadline pacing: sleeping `period` *before* the work yields
+            // 1/(period + work), so the configured fps is never reached.
+            next_tick += period;
+            match next_tick.checked_duration_since(Instant::now()) {
+                Some(wait) if !wait.is_zero() => std::thread::sleep(wait),
+                _ => next_tick = Instant::now() + period,
+            }
+
+            if capture.is_none() && Instant::now() >= next_attempt {
+                match DxgiCapture::new() {
+                    Ok(c) => {
+                        capture = Some(c);
+                        backoff = Duration::from_millis(250);
+                    }
+                    Err(e) => {
+                        stats.note_error(&e);
+                        next_attempt = Instant::now() + backoff;
+                        backoff = (backoff * 2).min(Duration::from_secs(2));
+                    }
                 }
             }
 
-            if let Some(ref mut cap) = capture {
+            let mut fresh: Option<(Vec<u8>, FrameSource)> = None;
+
+            if let Some(cap) = capture.as_mut() {
                 match cap.capture_preview_rgba(target_w, target_h) {
-                    Ok(Some(rgba)) => {
-                        new_rgba = Some(rgba);
-                    }
-                    Ok(None) => {
-                        // Экран статичен (DXGI timeout) — если вообще не было кадра, берем разовый GDI
-                        if last_frame.is_none() {
-                            new_rgba = capture_desktop_gdi(target_w, target_h);
-                        }
-                    }
-                    Err(_) => {
+                    Ok(Some(rgba)) => fresh = Some((rgba, FrameSource::Dxgi)),
+                    // Still desktop: nothing to send, nothing to repaint.
+                    Ok(None) => {}
+                    Err(e) => {
+                        stats.note_error(&e);
+                        // ACCESS_LOST is routine (UAC, mode change, exclusive
+                        // fullscreen). Rebuild with a backoff; the UI keeps the
+                        // last texture, so no black frame is shown meanwhile.
                         capture = None;
+                        next_attempt = Instant::now() + backoff;
+                        backoff = (backoff * 2).min(Duration::from_secs(2));
                     }
-                }
-            } else {
-                // Если DXGI недоступен, захватываем через быстрый GDI только при старте или при стриме
-                if last_frame.is_none() || streaming {
-                    new_rgba = capture_desktop_gdi(target_w, target_h);
                 }
             }
 
-            // Отправляем кадр только если пиксели действительно изменились (Dirty detection)
-            if let Some(rgba) = new_rgba {
-                last_frame = Some(rgba.clone());
-                let _ = tx.try_send(PreviewFrame {
+            // GDI only while there is nothing on screen at all (cold start).
+            if fresh.is_none() && slot.is_empty() && capture.is_none() {
+                if let Some(rgba) = capture_desktop_gdi(target_w, target_h) {
+                    stats.gdi_frames.fetch_add(1, Ordering::Relaxed);
+                    fresh = Some((rgba, FrameSource::Gdi));
+                }
+            }
+
+            if let Some((rgba, source)) = fresh {
+                seq += 1;
+                stats.frames.fetch_add(1, Ordering::Relaxed);
+                stats.source.store(source.as_u32(), Ordering::Relaxed);
+
+                slot.put(PreviewFrame {
                     width: target_w,
                     height: target_h,
                     rgba,
+                    source,
+                    seq,
                 });
-            } else if streaming && !was_streaming {
-                // При включении стрима отправляем последний сохраненный кадр для мгновенной инициализации
-                if let Some(ref rgba) = last_frame {
-                    let _ = tx.try_send(PreviewFrame {
-                        width: target_w,
-                        height: target_h,
-                        rgba: rgba.clone(),
-                    });
+
+                fps_window_frames += 1;
+                if fps_window_start.elapsed() >= Duration::from_secs(1) {
+                    let seconds = fps_window_start.elapsed().as_secs_f32().max(0.001);
+                    let measured = fps_window_frames as f32 / seconds;
+                    stats
+                        .fps_x10
+                        .store((measured * 10.0) as u32, Ordering::Relaxed);
+                    fps_window_frames = 0;
+                    fps_window_start = Instant::now();
                 }
             }
-            was_streaming = streaming;
         }
     });
-    rx
+
+    out
 }

@@ -1,0 +1,39 @@
+name: build-windows
+
+on:
+  push:
+    branches: ["feat/stage-a"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+        env:
+          # Static CRT: the exe must run on a clean Windows without the
+          # Visual C++ Redistributable.
+          RUSTFLAGS: -C target-feature=+crt-static
+
+      - name: Collect binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/nanocord.exe dist/
+          Get-Item dist/nanocord.exe | Select-Object Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nanocord-windows
+          path: dist/nanocord.exe
+          if-no-files-found: error
+          retention-days: 14
