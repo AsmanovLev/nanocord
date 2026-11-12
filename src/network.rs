@@ -482,38 +482,11 @@ pub fn set_clipboard_text(text: &str) {
     }
 }
 
-/// Быстрое сжатие RGBA кадра в JPEG с заданным качеством (CQ-VBR адаптация)
-pub fn encode_frame_to_jpeg_with_quality(w: u32, h: u32, rgba: &[u8], quality: u8) -> Option<Vec<u8>> {
-    if rgba.len() < (w * h * 4) as usize {
-        return None;
-    }
-    let mut rgb = Vec::with_capacity((w * h * 3) as usize);
-    for chunk in rgba.chunks_exact(4) {
-        rgb.push(chunk[0]);
-        rgb.push(chunk[1]);
-        rgb.push(chunk[2]);
-    }
-    let mut out = Vec::new();
-    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality.clamp(10, 100));
-    if encoder.encode(&rgb, w, h, image::ExtendedColorType::Rgb8).is_ok() {
-        Some(out)
-    } else {
-        None
-    }
-}
-
-/// Быстрое сжатие RGBA кадра в JPEG для сетевой передачи (~40 KB)
-pub fn encode_frame_to_jpeg(w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
-    encode_frame_to_jpeg_with_quality(w, h, rgba, 65)
-}
-
 #[derive(Clone, Debug)]
 pub struct VideoEncoderConfig {
     pub cq_quality: u8,
     pub max_bitrate_mbps: u32,
     pub preset_index: usize,
-    /// Hardware (NVENC) encoding. Turning it off falls back to CPU JPEG.
-    pub hardware: bool,
 }
 
 impl Default for VideoEncoderConfig {
@@ -522,24 +495,7 @@ impl Default for VideoEncoderConfig {
             cq_quality: 22,
             max_bitrate_mbps: 30,
             preset_index: 1,
-            hardware: true,
         }
-    }
-}
-
-pub fn cq_to_jpeg_quality(cq: u8) -> u8 {
-    let q = 100.0 - (cq.clamp(16, 32) as f32 - 16.0) * 2.2;
-    q.clamp(50.0, 95.0) as u8
-}
-
-/// Распаковка JPEG в RGBA
-pub fn decode_frame_from_jpeg(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
-    if let Ok(img) = image::load_from_memory_with_format(data, image::ImageFormat::Jpeg) {
-        let rgba = img.to_rgba8();
-        let (w, h) = (rgba.width(), rgba.height());
-        Some((w, h, rgba.into_raw()))
-    } else {
-        None
     }
 }
 
@@ -1035,8 +991,6 @@ fn run_p2p_socket_session(
                             } else {
                                 None
                             }
-                        } else if flags == 1 {
-                            decode_frame_from_jpeg(&payload).map(|(_, _, d)| d)
                         } else {
                             Some(payload)
                         };
@@ -1064,11 +1018,7 @@ fn run_p2p_socket_session(
                     } else if msg_type == 2 {
                         // A decode failure must drop the frame: rendering the
                         // compressed bytes as pixels paints a frame of noise.
-                        let Some(rgba) = (if flags == 1 {
-                            decode_frame_from_jpeg(&payload).map(|(_, _, d)| d)
-                        } else {
-                            Some(payload)
-                        }) else {
+                        let Some(rgba) = Some(payload).filter(|p| !p.is_empty()) else {
                             if let Ok(mut t) = r_telem.write() {
                                 t.encode_errors = t.encode_errors.saturating_add(1);
                             }
@@ -1160,10 +1110,6 @@ fn run_p2p_socket_session(
                 (22, 30, 0)
             };
 
-            let hardware = encoder_config
-                .read()
-                .map(|c| c.hardware)
-                .unwrap_or(true);
             let needed_config = (cq, max_br, frame.width, frame.height, preset_idx);
             if cur_enc_config != needed_config {
                 let preset_guid = match preset_idx {
@@ -1196,19 +1142,14 @@ fn run_p2p_socket_session(
                     ).map(|e| (e, 3u8));
                 }
 
-                nv_encoder = if hardware {
-                    enc.ok()
-                } else {
-                    crate::diag::log("encoder: hardware disabled, using JPEG");
-                    None
-                };
+                nv_encoder = enc.ok();
                 cur_enc_config = needed_config;
                 crate::diag::log(&format!(
                     "encoder: {} {}x{} cq={} max={}Mbps",
                     match nv_encoder.as_ref() {
                         Some((_, 3)) => "HEVC(NVENC)",
                         Some((_, 2)) => "H264(NVENC)",
-                        _ => "JPEG(CPU)",
+                        _ => "none",
                     },
                     frame.width,
                     frame.height,
@@ -1220,26 +1161,27 @@ fn run_p2p_socket_session(
             let force_idr = frame_idr_counter % 120 == 0;
             frame_idr_counter = frame_idr_counter.wrapping_add(1);
 
-            let (flags, payload) = if let Some((ref mut enc, codec_flag)) = nv_encoder {
-                match enc.encode_rgba_bytes(&frame.rgba, force_idr) {
-                    Ok(nal) => (codec_flag, nal),
-                    Err(_) => {
-                        let jpeg_quality = cq_to_jpeg_quality(cq);
-                        if let Some(jpeg) = encode_frame_to_jpeg_with_quality(frame.width, frame.height, &frame.rgba, jpeg_quality) {
-                            (1u8, jpeg)
-                        } else {
-                            (0u8, (*frame.rgba).clone())
-                        }
+            let (flags, payload) = match nv_encoder.as_mut() {
+                Some((enc, codec_flag)) => match enc.encode_rgba_bytes(&frame.rgba, force_idr) {
+                    Ok(nal) => (*codec_flag, nal),
+                    Err(e) => {
+                        crate::diag::log(&format!(
+                            "encode: failed {:#010X} {}",
+                            e.code().0,
+                            e.message()
+                        ));
+                        (0u8, Vec::new())
                     }
-                }
-            } else {
-                let jpeg_quality = cq_to_jpeg_quality(cq);
-                if let Some(jpeg) = encode_frame_to_jpeg_with_quality(frame.width, frame.height, &frame.rgba, jpeg_quality) {
-                    (1u8, jpeg)
-                } else {
-                    (0u8, (*frame.rgba).clone())
+                },
+                None => {
+                    crate::diag::log_once("encode: no NVENC encoder, desktop frames are dropped");
+                    (0u8, Vec::new())
                 }
             };
+
+            if payload.is_empty() {
+                continue;
+            }
 
             let mut pkt = Vec::with_capacity(12 + payload.len());
             pkt.extend_from_slice(&0x4E43u16.to_le_bytes());
@@ -1259,11 +1201,9 @@ fn run_p2p_socket_session(
         }
 
         if let Some(frame) = outbox_camera.take() {
-            let (flags, payload) = if let Some(jpeg) = encode_frame_to_jpeg(frame.width, frame.height, &frame.rgba) {
-                (1u8, jpeg)
-            } else {
-                (0u8, (*frame.rgba).clone())
-            };
+            // Camera goes raw: it is small, and a second NVENC instance is not
+            // worth the complexity for a two-person call.
+            let (flags, payload) = (0u8, (*frame.rgba).clone());
 
             let mut pkt = Vec::with_capacity(12 + payload.len());
             pkt.extend_from_slice(&0x4E43u16.to_le_bytes());
@@ -1456,28 +1396,7 @@ mod tests {
         assert_eq!(legacy_decoded.opus_data, opus_data);
     }
 
-    #[test]
-    fn test_jpeg_encode_decode_fidelity() {
-        let (w, h) = (320u32, 240u32);
-        let mut rgba = vec![0u8; (w * h * 4) as usize];
-        for (i, p) in rgba.chunks_exact_mut(4).enumerate() {
-            p[0] = ((i * 3) % 256) as u8;
-            p[1] = ((i * 7) % 256) as u8;
-            p[2] = ((i * 11) % 256) as u8;
-            p[3] = 255;
-        }
-        let jpeg = encode_frame_to_jpeg(w, h, &rgba).expect("encode failed");
-        assert!(!jpeg.is_empty());
-        assert!(jpeg.len() < rgba.len()); // compression effective
-
-        let (dw, dh, decoded_rgba) = decode_frame_from_jpeg(&jpeg).expect("decode failed");
-        assert_eq!(dw, w);
-        assert_eq!(dh, h);
-        assert_eq!(decoded_rgba.len(), rgba.len());
-        let non_zero = decoded_rgba.iter().filter(|&&b| b > 0).count();
-        assert!(non_zero > (decoded_rgba.len() / 2));
-    }
-
+    
     #[test]
     fn test_e2e_video_capture_network_decode() {
         let port = 49160;
@@ -2086,25 +2005,4 @@ mod tests {
         assert!(rgba[2] < 60, "blue channel is {}", rgba[2]);
     }
 
-    #[test]
-    fn test_jpeg_roundtrip_keeps_color() {
-        let (w, h) = (64u32, 64u32);
-        let mut rgba = vec![0u8; (w * h * 4) as usize];
-        for p in rgba.chunks_exact_mut(4) {
-            p[0] = 220;
-            p[1] = 20;
-            p[2] = 30;
-            p[3] = 255;
-        }
-
-        let jpeg = encode_frame_to_jpeg(w, h, &rgba).expect("encode failed");
-        let (_, _, out) = decode_frame_from_jpeg(&jpeg).expect("decode failed");
-
-        // A green frame here would mean the colour path is broken end to end.
-        assert!(
-            out[0] > 150 && out[1] < 90 && out[2] < 90,
-            "rgb after roundtrip: {:?}",
-            &out[..3]
-        );
     }
-}

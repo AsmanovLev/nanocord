@@ -7,10 +7,10 @@ use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-    D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ,
     D3D11_CPU_ACCESS_WRITE, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
     D3D11_MAP_WRITE_DISCARD, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_DYNAMIC, D3D11_USAGE_STAGING,
+    D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{
@@ -814,61 +814,71 @@ impl NvencEncoder {
                 return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }
 
-            // 8. Если разные адаптеры, подготавливаем staging-текстуру на capture GPU и dynamic-текстуру на NVIDIA GPU
+            // 8. Путь загрузки кадров.
+            // NVENC читает обычную DEFAULT-текстуру. Если писать прямо в
+            // зарегистрированный ресурс (USAGE_DYNAMIC), часть драйверов
+            // отдаёт устаревшую или недописанную память — на экране это
+            // выглядит рваными полосами. Поэтому пишем в dynamic staging и
+            // копируем в текстуру, которую реально кодирует NVENC.
             let mut opt_staging_tex = None;
             let mut opt_nv_tex = None;
             let mut registered_resource: *mut c_void = std::ptr::null_mut();
 
-            if is_cross_adapter {
-                let staging_desc = D3D11_TEXTURE2D_DESC {
-                    Width: width,
-                    Height: height,
-                    MipLevels: 1,
-                    ArraySize: 1,
-                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                    Usage: D3D11_USAGE_STAGING,
-                    BindFlags: 0,
-                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-                    MiscFlags: 0,
-                };
-                let mut st = None;
-                capture_device.CreateTexture2D(&staging_desc, None, Some(&mut st))?;
-                opt_staging_tex = st;
+            let staging_desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_DYNAMIC,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+                MiscFlags: 0,
+            };
+            let mut st = None;
+            nvidia_device.CreateTexture2D(&staging_desc, None, Some(&mut st))?;
+            let staging_tex = st.ok_or_else(|| {
+                windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259))
+            })?;
+            crate::diag::log("nvenc: staging texture created");
 
-                let nv_desc = D3D11_TEXTURE2D_DESC {
-                    Width: width,
-                    Height: height,
-                    MipLevels: 1,
-                    ArraySize: 1,
-                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                    Usage: D3D11_USAGE_DYNAMIC,
-                    BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
-                    CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
-                    MiscFlags: 0,
-                };
-                let mut nt = None;
-                nvidia_device.CreateTexture2D(&nv_desc, None, Some(&mut nt))?;
-                let nt = nt.unwrap();
+            let nv_desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let mut nt = None;
+            nvidia_device.CreateTexture2D(&nv_desc, None, Some(&mut nt))?;
+            let nt = nt.ok_or_else(|| {
+                windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259))
+            })?;
+            crate::diag::log("nvenc: encoder input texture created (DEFAULT)");
 
-                // Регистрируем текстуру в NVENC заранее 1 раз!
-                let mut reg_res: NvEncRegisterResource = zeroed();
-                reg_res.version = NV_ENC_REGISTER_RESOURCE_VER;
-                reg_res.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
-                reg_res.width = width;
-                reg_res.height = height;
-                reg_res.resourceToRegister = nt.as_raw() as *mut c_void;
-                reg_res.bufferFormat = NV_ENC_BUFFER_FORMAT_ARGB;
-                reg_res.bufferUsage = NV_ENC_BUFFER_USAGE_INPUT_IMAGE;
+            let mut reg_res: NvEncRegisterResource = zeroed();
+            reg_res.version = NV_ENC_REGISTER_RESOURCE_VER;
+            reg_res.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
+            reg_res.width = width;
+            reg_res.height = height;
+            reg_res.resourceToRegister = nt.as_raw() as *mut c_void;
+            reg_res.bufferFormat = NV_ENC_BUFFER_FORMAT_ARGB;
+            reg_res.bufferUsage = NV_ENC_BUFFER_USAGE_INPUT_IMAGE;
 
-                let status = (api.nvEncRegisterResource)(encoder, &mut reg_res);
-                if status != NV_ENC_SUCCESS {
-                    return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
-                }
-                registered_resource = reg_res.registeredResource;
-                opt_nv_tex = Some(nt);
+            let status = (api.nvEncRegisterResource)(encoder, &mut reg_res);
+            crate::diag::log(&format!("nvenc: RegisterResource status={}", status));
+            if status != NV_ENC_SUCCESS {
+                return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }
+            registered_resource = reg_res.registeredResource;
+            opt_staging_tex = Some(staging_tex);
+            opt_nv_tex = Some(nt);
 
             println!(
                 "NVENC H.265 (HEVC) Encoder initialized! {}x{} @ {} FPS, CQ: {}, Max: {} Mbps",
@@ -1015,8 +1025,13 @@ impl NvencEncoder {
                 None => return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259))),
             };
 
+            let staging = match self.opt_staging_tex.as_ref() {
+                Some(t) => t,
+                None => return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259))),
+            };
+
             let mut mapped_dst = D3D11_MAPPED_SUBRESOURCE::default();
-            self.nvidia_context.Map(nv_tex, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped_dst))?;
+            self.nvidia_context.Map(staging, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped_dst))?;
 
             let row_bytes = self.width as usize * 4;
             if rgba.len() >= row_bytes * self.height as usize {
@@ -1033,7 +1048,9 @@ impl NvencEncoder {
                     }
                 }
             }
-            self.nvidia_context.Unmap(nv_tex, 0);
+            self.nvidia_context.Unmap(staging, 0);
+            // Пиксели теперь в DEFAULT-текстуре — именно её ждёт NVENC.
+            self.nvidia_context.CopyResource(nv_tex, staging);
 
             let mut map_res: NvEncMapInputResource = zeroed();
             map_res.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
