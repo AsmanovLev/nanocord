@@ -586,7 +586,9 @@ impl NvencEncoder {
                 cfg.rcParams.averageBitRate = max_bitrate_mbps * 1_000_000;
                 cfg.rcParams.vbvBufferSize = (max_bitrate_mbps * 1_000_000) / fps.max(1);
                 cfg.rcParams.flags |= 1 << 9; // zeroReorderDelay
-                cfg.gopLength = 0xFFFFFFFF;
+                // IDR раз в секунду: битый опорный кадр лечится сам, а не тянется
+                // до конца потока (раньше было 0xFFFFFFFF — бесконечный GOP).
+                cfg.gopLength = 30;
                 cfg.frameIntervalP = 1;
                 Some(cfg)
             } else {
@@ -822,7 +824,7 @@ impl NvencEncoder {
                 cfg.rcParams.averageBitRate = max_bitrate_mbps * 1_000_000;
                 cfg.rcParams.vbvBufferSize = (max_bitrate_mbps * 1_000_000) / fps.max(1);
                 cfg.rcParams.flags |= 1 << 9; // zeroReorderDelay
-                cfg.gopLength = 0xFFFFFFFF; // infinite GOP (I-frames on demand)
+                cfg.gopLength = 30;
                 cfg.frameIntervalP = 1;     // no B-frames
                 Some(cfg)
             } else {
