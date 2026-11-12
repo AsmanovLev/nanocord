@@ -3623,6 +3623,20 @@ impl NanocordApp {
                 ui.separator();
                 ui.add_space(14.0);
 
+                if ui
+                    .button("Проверить видео-тракт (E2E без сети)")
+                    .on_hover_text(
+                        "Захват → NVENC → декодер и сравнение с исходником. Результат в nanocord.log.",
+                    )
+                    .clicked()
+                {
+                    std::thread::spawn(|| match crate::selftest::run_video_roundtrip() {
+                        Ok(msg) => crate::diag::log(&format!("selftest: {}", msg)),
+                        Err(e) => crate::diag::log(&format!("selftest: FAIL {}", e)),
+                    });
+                }
+                ui.add_space(14.0);
+
                 ui.label(egui::RichText::new(format!("{} {}", self.t("nvenc_cq_title"), self.cq_quality)).strong().size(13.0).color(th.text_main));
                 ui.label(egui::RichText::new(self.t("nvenc_cq_desc")).size(11.0).color(th.text_sub));
                 ui.add_space(4.0);
