@@ -14,6 +14,8 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 
 fn main() -> eframe::Result<()> {
+    nanocord::update::check_and_install();
+
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("{:#?}\n", info);
         let _ = std::fs::write("panic.txt", &msg);

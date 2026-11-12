@@ -1018,6 +1018,7 @@ fn run_p2p_socket_session(
     // Поток чтения входящих пакетов
     let chat_evt_reader = chat_evt_tx.clone();
     let read_handle = thread::spawn(move || {
+        let mut dumped_recv = false;
         // Входящий файл собирается кусками; имя приходит в стартовом пакете.
         struct IncomingFile {
             file: std::fs::File,
@@ -1150,6 +1151,10 @@ fn run_p2p_socket_session(
                         };
 
                         if let Some(rgba) = rgba_opt {
+                            if !dumped_recv {
+                                dumped_recv = true;
+                                crate::diag::dump_frame("dump_recv", width, height, &rgba);
+                            }
                             rx_frames += 1;
                             if rx_log.elapsed() >= Duration::from_secs(5) {
                                 rx_log = Instant::now();
@@ -1245,6 +1250,8 @@ fn run_p2p_socket_session(
     let mut cur_enc_config = (0u8, 0u32, 0u32, 0u32, 0usize);
     let mut frame_idr_counter = 0u32;
     let mut encode_errors = 0u32;
+    let mut dumped_sent = false;
+    let mut dumped_recv = false;
 
     while is_running.load(Ordering::Relaxed) && is_connected.load(Ordering::Relaxed) {
         let mut sent_any = false;
@@ -1403,6 +1410,11 @@ fn run_p2p_socket_session(
                     cq,
                     max_br
                 ));
+            }
+
+            if !dumped_sent {
+                dumped_sent = true;
+                crate::diag::dump_frame("dump_sent", frame.width, frame.height, &frame.rgba);
             }
 
             let force_idr = frame_idr_counter % 120 == 0;
