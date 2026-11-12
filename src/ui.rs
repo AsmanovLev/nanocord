@@ -340,7 +340,7 @@ pub struct NanocordApp {
     pub p2p_server: Option<crate::network::P2PNetworkServer>,
     pub p2p_client: Option<crate::network::P2PNetworkClient>,
     pub chat_open: bool,
-    pub chat_log: Vec<String>,
+    pub chat_log: Vec<ChatLine>,
     pub chat_input: String,
     pub remote_desktop_texture: Option<egui::TextureHandle>,
     pub remote_camera_texture: Option<egui::TextureHandle>,
@@ -1000,6 +1000,24 @@ fn draw_vector_avatar(painter: &egui::Painter, center: Pos2, radius: f32, bg_col
     );
     painter.with_clip_rect(Rect::from_center_size(center, Vec2::splat(radius * 1.95)))
         .rect_filled(shoulder_rect, CornerRadius::same(head_r as u8), figure_col);
+}
+
+/// Строка чата. У файлов есть путь: по клику открывается проводник с выделением.
+pub struct ChatLine {
+    pub text: String,
+    pub path: Option<String>,
+}
+
+/// Открывает проводник с выделенным файлом.
+fn reveal_in_explorer(path: &str) {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("explorer.exe")
+            .arg(format!("/select,\"{}\"", path))
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    let _ = path;
 }
 
 impl NanocordApp {
@@ -1686,23 +1704,33 @@ impl NanocordApp {
             }
         }
         for e in events {
-            match e {
-                ChatEvent::Text { from_peer, text } => self.chat_log.push(if from_peer {
-                    format!("Он: {}", text)
-                } else {
-                    format!("Вы: {}", text)
-                }),
+            let line = match e {
+                ChatEvent::Text { from_peer, text } => ChatLine {
+                    text: if from_peer {
+                        format!("Он: {}", text)
+                    } else {
+                        format!("Вы: {}", text)
+                    },
+                    path: None,
+                },
                 ChatEvent::File {
                     name,
                     path,
                     incoming,
-                } => self.chat_log.push(if incoming {
-                    format!("📄 Принят: {} → {}", name, path)
-                } else {
-                    format!("📄 Отправлен: {}", name)
-                }),
-                ChatEvent::Error(msg) => self.chat_log.push(format!("⚠ {}", msg)),
-            }
+                } => ChatLine {
+                    text: if incoming {
+                        format!("📄 {} — нажми, чтобы открыть в папке", name)
+                    } else {
+                        format!("📄 Отправлен: {}", name)
+                    },
+                    path: if path.is_empty() { None } else { Some(path) },
+                },
+                ChatEvent::Error(msg) => ChatLine {
+                    text: format!("⚠ {}", msg),
+                    path: None,
+                },
+            };
+            self.chat_log.push(line);
             while self.chat_log.len() > 500 {
                 self.chat_log.remove(0);
             }
@@ -1747,7 +1775,16 @@ impl NanocordApp {
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
                         for line in &self.chat_log {
-                            ui.label(line);
+                            match &line.path {
+                                Some(path) => {
+                                    if ui.link(&line.text).clicked() {
+                                        reveal_in_explorer(path);
+                                    }
+                                }
+                                None => {
+                                    ui.label(&line.text);
+                                }
+                            }
                         }
                     });
 
@@ -1780,7 +1817,10 @@ impl NanocordApp {
         if let Some(text) = send_text {
             if let Some(tx) = self.chat_sender() {
                 if tx.try_send(ChatOutgoing::Text(text.clone())).is_ok() {
-                    self.chat_log.push(format!("Вы: {}", text));
+                    self.chat_log.push(ChatLine {
+                        text: format!("Вы: {}", text),
+                        path: None,
+                    });
                 }
             }
         }

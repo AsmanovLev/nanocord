@@ -471,7 +471,10 @@ impl NvencEncoder {
                 }
             };
 
-            let nv_desc = D3D11_TEXTURE2D_DESC {
+            // CPU пишет в dynamic staging, затем CopyResource в DEFAULT-текстуру.
+            // Прямой Map в зарегистрированный ресурс NVENC не принимает:
+            // Map возвращает E_FAIL, и кадр не кодируется вообще.
+            let staging_desc = D3D11_TEXTURE2D_DESC {
                 Width: width,
                 Height: height,
                 MipLevels: 1,
@@ -479,13 +482,35 @@ impl NvencEncoder {
                 Format: DXGI_FORMAT_B8G8R8A8_UNORM,
                 SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
                 Usage: D3D11_USAGE_DYNAMIC,
-                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                BindFlags: 0,
                 CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+                MiscFlags: 0,
+            };
+            let mut st = None;
+            nvidia_device.CreateTexture2D(&staging_desc, None, Some(&mut st))?;
+            let staging_tex = st.ok_or_else(|| {
+                windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259))
+            })?;
+            crate::diag::log("nvenc: staging texture created");
+
+            let nv_desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
+                CPUAccessFlags: 0,
                 MiscFlags: 0,
             };
             let mut nt = None;
             nvidia_device.CreateTexture2D(&nv_desc, None, Some(&mut nt))?;
-            let opt_nv_tex = nt;
+            let opt_nv_tex = nt.ok_or_else(|| {
+                windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259))
+            })?;
+            crate::diag::log("nvenc: encoder input texture created (DEFAULT)");
 
             let dll_name: Vec<u16> = "nvEncodeAPI64.dll\0".encode_utf16().collect();
             let h_module = LoadLibraryW(PCWSTR(dll_name.as_ptr()))?;
@@ -577,7 +602,7 @@ impl NvencEncoder {
                 return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }
 
-            let nt = opt_nv_tex.as_ref().unwrap();
+            let nt = &opt_nv_tex;
             let mut reg_res: NvEncRegisterResource = zeroed();
             reg_res.version = NV_ENC_REGISTER_RESOURCE_VER;
             reg_res.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
@@ -588,6 +613,7 @@ impl NvencEncoder {
             reg_res.bufferUsage = NV_ENC_BUFFER_USAGE_INPUT_IMAGE;
 
             let status = (api.nvEncRegisterResource)(encoder, &mut reg_res);
+            crate::diag::log(&format!("nvenc: RegisterResource status={}", status));
             if status != NV_ENC_SUCCESS {
                 return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
             }
@@ -602,8 +628,8 @@ impl NvencEncoder {
                 frame_count: 0,
                 nvidia_device,
                 nvidia_context,
-                opt_staging_tex: None,
-                opt_nv_tex,
+                opt_staging_tex: Some(staging_tex),
+                opt_nv_tex: Some(opt_nv_tex),
                 is_cross_adapter: true,
             })
         }
