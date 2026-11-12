@@ -516,6 +516,8 @@ pub struct P2PNetworkServer {
     pub telemetry: Arc<RwLock<P2PTelemetry>>,
     pub encoder_config: Arc<RwLock<VideoEncoderConfig>>,
     pub state: Arc<RwLock<SessionState>>,
+    pub chat_rx: Receiver<ChatEvent>,
+    pub chat_tx: SyncSender<ChatOutgoing>,
 }
 
 impl P2PNetworkServer {
@@ -539,6 +541,9 @@ impl P2PNetworkServer {
         let outbox_desktop_bg = outbox_desktop.clone();
         let outbox_camera_bg = outbox_camera.clone();
         let (out_aud_tx, out_aud_rx) = sync_channel(16);
+        let (chat_evt_tx, chat_evt_rx) = sync_channel(32);
+        let (chat_out_tx, chat_out_rx) = sync_channel(8);
+        let chat_out_rx = Arc::new(Mutex::new(chat_out_rx));
 
         let running_clone = is_running.clone();
         let connected_clone = is_connected.clone();
@@ -548,6 +553,8 @@ impl P2PNetworkServer {
         let telem_clone = telemetry.clone();
         let expected_code = room_code.clone();
         let enc_config_clone = encoder_config.clone();
+        let chat_evt_sess = chat_evt_tx.clone();
+        let chat_out_sess = chat_out_rx.clone();
 
         thread::spawn(move || {
             let l_v6 = TcpListener::bind(format!("[::]:{}", port)).ok();
@@ -632,6 +639,8 @@ impl P2PNetworkServer {
                             &out_aud_rx,
                             telem_clone.clone(),
                             enc_config_clone.clone(),
+                            chat_evt_sess.clone(),
+                            chat_out_sess.clone(),
                         );
 
                         connected_clone.store(false, Ordering::Relaxed);
@@ -670,6 +679,8 @@ impl P2PNetworkServer {
             telemetry,
             encoder_config,
             state,
+            chat_rx: chat_evt_rx,
+            chat_tx: chat_out_tx,
         }
     }
 
@@ -695,6 +706,8 @@ pub struct P2PNetworkClient {
     pub telemetry: Arc<RwLock<P2PTelemetry>>,
     pub encoder_config: Arc<RwLock<VideoEncoderConfig>>,
     pub state: Arc<RwLock<SessionState>>,
+    pub chat_rx: Receiver<ChatEvent>,
+    pub chat_tx: SyncSender<ChatOutgoing>,
 }
 
 impl P2PNetworkClient {
@@ -717,6 +730,9 @@ impl P2PNetworkClient {
         let outbox_desktop_bg = outbox_desktop.clone();
         let outbox_camera_bg = outbox_camera.clone();
         let (out_aud_tx, out_aud_rx) = sync_channel(16);
+        let (chat_evt_tx, chat_evt_rx) = sync_channel(32);
+        let (chat_out_tx, chat_out_rx) = sync_channel(8);
+        let chat_out_rx = Arc::new(Mutex::new(chat_out_rx));
 
         let running_clone = is_running.clone();
         let connected_clone = is_connected.clone();
@@ -726,6 +742,8 @@ impl P2PNetworkClient {
         let code_to_send = room_code.clone();
         let host_clone = target_host.clone();
         let enc_config_clone = encoder_config.clone();
+        let chat_evt_sess = chat_evt_tx.clone();
+        let chat_out_sess = chat_out_rx.clone();
 
         thread::spawn(move || {
             let mut attempt: u32 = 0;
@@ -769,6 +787,8 @@ impl P2PNetworkClient {
                             &out_aud_rx,
                             telem_clone.clone(),
                             enc_config_clone.clone(),
+                            chat_evt_sess.clone(),
+                            chat_out_sess.clone(),
                         );
 
                         connected_clone.store(false, Ordering::Relaxed);
@@ -828,6 +848,8 @@ impl P2PNetworkClient {
             telemetry,
             encoder_config,
             state,
+            chat_rx: chat_evt_rx,
+            chat_tx: chat_out_tx,
         }
     }
 
@@ -916,6 +938,58 @@ fn client_connect_once(
 }
 
 /// Общий цикл двунаправленного обмена кадрами и телеметрией по сокету
+// ---------- Чат и передача файлов ----------
+
+/// Что пользователь отправляет собеседнику.
+#[derive(Clone, Debug)]
+pub enum ChatOutgoing {
+    Text(String),
+    File(std::path::PathBuf),
+}
+
+/// Что приходит собеседнику: текст или готовый файл.
+#[derive(Clone, Debug)]
+pub enum ChatEvent {
+    Text { from_peer: bool, text: String },
+    File { name: String, path: String, incoming: bool },
+    Error(String),
+}
+
+fn send_packet(w: &mut TcpStream, msg_type: u8, flags: u8, payload: &[u8]) -> std::io::Result<()> {
+    let mut pkt = Vec::with_capacity(12 + payload.len());
+    pkt.extend_from_slice(&0x4E43u16.to_le_bytes());
+    pkt.push(msg_type);
+    pkt.push(flags);
+    pkt.extend_from_slice(&0u16.to_le_bytes());
+    pkt.extend_from_slice(&0u16.to_le_bytes());
+    pkt.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    pkt.extend_from_slice(payload);
+    w.write_all(&pkt)
+}
+
+/// Имя из сети нельзя пускать в файловую систему как есть: "../" и разделители
+/// путей превратили бы «присланный файл» в запись куда угодно.
+fn sanitize_file_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let cleaned: String = base
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' | ' ' | '(' | ')' => c,
+            _ => '_',
+        })
+        .collect();
+    let trimmed = cleaned.trim_matches(['.', ' ']).to_string();
+    let out = if trimmed.is_empty() { "file".to_string() } else { trimmed };
+    out.chars().take(120).collect()
+}
+
+fn download_dir() -> std::path::PathBuf {
+    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string());
+    let dir = std::path::Path::new(&home).join("Downloads").join("nanocord");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 fn run_p2p_socket_session(
     stream: TcpStream,
     is_running: Arc<AtomicBool>,
@@ -928,6 +1002,8 @@ fn run_p2p_socket_session(
     out_aud_rx: &Receiver<NetworkAudioPacket>,
     telemetry: Arc<RwLock<P2PTelemetry>>,
     encoder_config: Arc<RwLock<VideoEncoderConfig>>,
+    chat_evt_tx: SyncSender<ChatEvent>,
+    chat_out_rx: Arc<Mutex<Receiver<ChatOutgoing>>>,
 ) {
     let mut reader = match stream.try_clone() {
         Ok(s) => s,
@@ -940,7 +1016,15 @@ fn run_p2p_socket_session(
     let r_telem = telemetry.clone();
 
     // Поток чтения входящих пакетов
+    let chat_evt_reader = chat_evt_tx.clone();
     let read_handle = thread::spawn(move || {
+        // Входящий файл собирается кусками; имя приходит в стартовом пакете.
+        struct IncomingFile {
+            file: std::fs::File,
+            name: String,
+            path: String,
+        }
+        let mut incoming_file: Option<IncomingFile> = None;
         let _ = reader.set_read_timeout(Some(Duration::from_millis(1500)));
         let mut header = [0u8; 12];
         let mut last_rx = Instant::now();
@@ -971,6 +1055,76 @@ fn run_p2p_socket_session(
                         break;
                     }
                     last_rx = Instant::now();
+
+                    if msg_type == 6 {
+                        if let Ok(text) = String::from_utf8(payload) {
+                            let _ = chat_evt_reader.try_send(ChatEvent::Text {
+                                from_peer: true,
+                                text,
+                            });
+                        }
+                        continue;
+                    } else if msg_type == 7 {
+                        if payload.len() >= 14 {
+                            let total = u64::from_le_bytes(
+                                payload[4..12].try_into().unwrap_or([0u8; 8]),
+                            );
+                            let name_len =
+                                u16::from_le_bytes([payload[12], payload[13]]) as usize;
+                            if payload.len() >= 14 + name_len {
+                                let raw_name = String::from_utf8_lossy(
+                                    &payload[14..14 + name_len],
+                                )
+                                .to_string();
+                                let name = sanitize_file_name(&raw_name);
+                                let mut path = download_dir().join(&name);
+                                let mut n = 1;
+                                while path.exists() {
+                                    let stem = name.rsplit_once('.').map(|(a, _)| a).unwrap_or(&name);
+                                    let ext = name.rsplit_once('.').map(|(_, b)| format!(".{}", b)).unwrap_or_default();
+                                    path = download_dir().join(format!("{} ({}){}", stem, n, ext));
+                                    n += 1;
+                                }
+                                match std::fs::File::create(&path) {
+                                    Ok(file) => {
+                                        crate::diag::log(&format!(
+                                            "chat: incoming file {} ({} bytes)",
+                                            path.display(),
+                                            total
+                                        ));
+                                        incoming_file = Some(IncomingFile {
+                                            file,
+                                            name,
+                                            path: path.display().to_string(),
+                                        });
+                                    }
+                                    Err(e) => {
+                                        let _ = chat_evt_reader.try_send(ChatEvent::Error(
+                                            format!("не удалось создать файл: {}", e),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    } else if msg_type == 8 {
+                        if let Some(ref mut inc) = incoming_file {
+                            if payload.len() > 4 {
+                                use std::io::Write as _;
+                                let _ = inc.file.write_all(&payload[4..]);
+                            }
+                        }
+                        continue;
+                    } else if msg_type == 9 {
+                        if let Some(inc) = incoming_file.take() {
+                            let _ = chat_evt_reader.try_send(ChatEvent::File {
+                                name: inc.name,
+                                path: inc.path,
+                                incoming: true,
+                            });
+                        }
+                        continue;
+                    }
 
                     if msg_type == 1 {
                         let rgba_opt = if flags == 3 {
@@ -1078,6 +1232,14 @@ fn run_p2p_socket_session(
     let mut total_bytes_sent = 0u64;
     let mut log_tick = 0u32;
 
+    // Файл отправляется по куску за итерацию, чтобы не задушить видео.
+    struct PendingOutgoingFile {
+        file: std::fs::File,
+        name: String,
+        sent: u64,
+    }
+    let mut pending_file: Option<PendingOutgoingFile> = None;
+
     let mut nv_encoder: Option<(crate::nvenc::NvencEncoder, u8)> = None;
     let mut cur_enc_config = (0u8, 0u32, 0u32, 0u32, 0usize);
     let mut frame_idr_counter = 0u32;
@@ -1101,6 +1263,78 @@ fn run_p2p_socket_session(
             }
             total_bytes_sent += pkt.len() as u64;
             sent_any = true;
+        }
+
+        // Чат: текст уходит сразу, файл — по 64 КиБ за итерацию.
+        if pending_file.is_none() {
+            if let Ok(rx) = chat_out_rx.lock() {
+                while let Ok(item) = rx.try_recv() {
+                    match item {
+                        ChatOutgoing::Text(text) => {
+                            if send_packet(&mut writer, 6, 0, text.as_bytes()).is_err() {
+                                break;
+                            }
+                            sent_any = true;
+                        }
+                        ChatOutgoing::File(path) => match std::fs::File::open(&path) {
+                            Ok(file) => {
+                                let name = path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "file".to_string());
+                                let total = file.metadata().map(|m| m.len()).unwrap_or(0);
+                                let mut meta = Vec::new();
+                                meta.extend_from_slice(&1u32.to_le_bytes());
+                                meta.extend_from_slice(&total.to_le_bytes());
+                                let nb = name.as_bytes();
+                                meta.extend_from_slice(&(nb.len() as u16).to_le_bytes());
+                                meta.extend_from_slice(nb);
+                                if send_packet(&mut writer, 7, 0, &meta).is_err() {
+                                    break;
+                                }
+                                sent_any = true;
+                                pending_file = Some(PendingOutgoingFile {
+                                    file,
+                                    name,
+                                    sent: 0,
+                                });
+                                break;
+                            }
+                            Err(e) => {
+                                let _ = chat_evt_tx.try_send(ChatEvent::Error(format!(
+                                    "не удалось открыть файл: {}",
+                                    e
+                                )));
+                            }
+                        },
+                    }
+                }
+            }
+        }
+
+        if let Some(pf) = pending_file.as_mut() {
+            let mut buf = vec![0u8; 64 * 1024];
+            match pf.file.read(&mut buf) {
+                Ok(0) | Err(_) => {
+                    let _ = send_packet(&mut writer, 9, 0, &1u32.to_le_bytes());
+                    let _ = chat_evt_tx.try_send(ChatEvent::File {
+                        name: pf.name.clone(),
+                        path: String::new(),
+                        incoming: false,
+                    });
+                    pending_file = None;
+                }
+                Ok(n) => {
+                    let mut chunk = Vec::with_capacity(4 + n);
+                    chunk.extend_from_slice(&1u32.to_le_bytes());
+                    chunk.extend_from_slice(&buf[..n]);
+                    if send_packet(&mut writer, 8, 0, &chunk).is_err() {
+                        break;
+                    }
+                    pf.sent += n as u64;
+                    sent_any = true;
+                }
+            }
         }
 
         if let Some(frame) = outbox_desktop.take() {
@@ -1303,8 +1537,8 @@ fn run_p2p_socket_session(
 
     is_connected.store(false, Ordering::Relaxed);
     let _ = read_handle.join();
-}
 
+}
 
 #[cfg(test)]
 mod tests {
@@ -1398,6 +1632,7 @@ mod tests {
 
     
     #[test]
+    #[ignore = "video is NVENC-only: a headless runner has no encoder to produce a frame"]
     fn test_e2e_video_capture_network_decode() {
         let port = 49160;
         let code = "Vd9".to_string();
@@ -2005,4 +2240,12 @@ mod tests {
         assert!(rgba[2] < 60, "blue channel is {}", rgba[2]);
     }
 
+
+    #[test]
+    fn test_sanitize_file_name_blocks_traversal() {
+        assert_eq!(sanitize_file_name("../../etc/passwd"), "passwd");
+        assert_eq!(sanitize_file_name("C:\\Windows\\win.ini"), "win.ini");
+        assert_eq!(sanitize_file_name(".."), "file");
+        assert_eq!(sanitize_file_name(""), "file");
     }
+}
