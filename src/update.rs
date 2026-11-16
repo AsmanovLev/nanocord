@@ -56,80 +56,122 @@ fn http_download(url: &str, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Проверка при старте и дальше раз в полчаса: приложение может работать
+/// сутками, и «проверили один раз при запуске» означало, что обновление
+/// приходит только после ручного перезапуска.
 pub fn check_and_install() {
-    // Тестовая сборка не должна сама себя подменять релизом с GitHub:
-    // NANOCORD_NO_UPDATE=1 отключает проверку полностью.
     if std::env::var("NANOCORD_NO_UPDATE").is_ok() {
         crate::diag::log("update: disabled by NANOCORD_NO_UPDATE");
         return;
     }
-    thread::spawn(|| {
-        let current = env!("CARGO_PKG_VERSION");
-        let url = format!("https://api.github.com/repos/{}/releases/latest", REPO);
-
-        let body = match http_get(&url) {
-            Ok(b) => b,
-            Err(e) => {
-                set_status(&format!("ошибка: {}", e));
-                return;
-            }
-        };
-
-        let tag = match extract(&body, "\"tag_name\":\"") {
-            Some(t) => t,
-            None => {
-                crate::diag::log("update: в ответе нет tag_name (нет релизов?)");
-                return;
-            }
-        };
-        let download = match extract(&body, "\"browser_download_url\":\"") {
-            Some(u) => u,
-            None => {
-                crate::diag::log("update: в релизе нет файла");
-                return;
-            }
-        };
-
-        let latest = tag.trim_start_matches('v').to_string();
-        if !is_newer(&latest, current) {
-            set_status(&format!("v{} — актуальная", current));
-            return;
-        }
-        set_status(&format!("скачиваю v{}…", latest));
-
-        let exe = match std::env::current_exe() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        let dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-        let new_exe = dir.join("nanocord.new.exe");
-
-        if let Err(e) = http_download(&download, &new_exe) {
-            crate::diag::log(&format!("update: скачать не удалось ({})", e));
-            return;
-        }
-
-        let bat = dir.join("nanocord_update.bat");
-        let script = concat!(
-            "@echo off\r\n",
-            "timeout /t 2 /nobreak >nul\r\n",
-            "move /y \"%~dp0nanocord.exe\" \"%~dp0nanocord.old.exe\"\r\n",
-            "move /y \"%~dp0nanocord.new.exe\" \"%~dp0nanocord.exe\"\r\n",
-            "start \"\" \"%~dp0nanocord.exe\"\r\n",
-            "del \"%~dp0nanocord.old.exe\"\r\n"
-        );
-        let _ = std::fs::write(&bat, script);
-        if std::process::Command::new("cmd")
-            .arg("/c")
-            .arg(&bat)
-            .spawn()
-            .is_ok()
-        {
-            set_status(&format!("v{} скачана, перезапуск", latest));
-            thread::sleep(Duration::from_millis(500));
-            std::process::exit(0);
-        }
+    thread::spawn(|| loop {
+        run(true);
+        thread::sleep(Duration::from_secs(30 * 60));
     });
+}
+
+/// Принудительная проверка с установкой: `nanocord.exe --update`.
+pub fn force_update() -> String {
+    run(true);
+    status()
+}
+
+fn run(install: bool) {
+    let current = env!("CARGO_PKG_VERSION");
+    let url = format!("https://api.github.com/repos/{}/releases/latest", REPO);
+
+    let body = match http_get(&url) {
+        Ok(b) => b,
+        Err(e) => {
+            set_status(&format!("ошибка: {}", e));
+            return;
+        }
+    };
+
+    let tag = match extract(&body, "\"tag_name\":\"") {
+        Some(t) => t,
+        None => {
+            crate::diag::log("update: в ответе нет tag_name (нет релизов?)");
+            return;
+        }
+    };
+    // Берём именно exe, а не первый попавшийся ассет: к релизу может быть
+    // приложен и архив, и тогда обновление скачивало zip вместо программы.
+    let download = match pick_exe_asset(&body) {
+        Some(u) => u,
+        None => {
+            crate::diag::log("update: в релизе нет .exe");
+            return;
+        }
+    };
+
+    let latest = tag.trim_start_matches('v').to_string();
+    if !is_newer(&latest, current) {
+        set_status(&format!("v{} — актуальная", current));
+        return;
+    }
+    if !install {
+        set_status(&format!("доступна v{}", latest));
+        return;
+    }
+    set_status(&format!("скачиваю v{}…", latest));
+
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let new_exe = dir.join("nanocord.new.exe");
+
+    if let Err(e) = http_download(&download, &new_exe) {
+        crate::diag::log(&format!("update: скачать не удалось ({})", e));
+        return;
+    }
+    // Недокачанный или пустой файл подменять нельзя: приложение просто исчезнет.
+    let size = std::fs::metadata(&new_exe).map(|m| m.len()).unwrap_or(0);
+    if size < 1_000_000 {
+        crate::diag::log(&format!("update: файл подозрительно мал ({size} байт), отмена"));
+        let _ = std::fs::remove_file(&new_exe);
+        return;
+    }
+
+    let bat = dir.join("nanocord_update.bat");
+    let script = concat!(
+        "@echo off\r\n",
+        "timeout /t 2 /nobreak >nul\r\n",
+        "move /y \"%~dp0nanocord.exe\" \"%~dp0nanocord.old.exe\"\r\n",
+        "move /y \"%~dp0nanocord.new.exe\" \"%~dp0nanocord.exe\"\r\n",
+        "start \"\" \"%~dp0nanocord.exe\"\r\n",
+        "del \"%~dp0nanocord.old.exe\"\r\n"
+    );
+    let _ = std::fs::write(&bat, script);
+    if std::process::Command::new("cmd")
+        .arg("/c")
+        .arg(&bat)
+        .spawn()
+        .is_ok()
+    {
+        set_status(&format!("v{} скачана, перезапуск", latest));
+        thread::sleep(Duration::from_millis(500));
+        std::process::exit(0);
+    }
+}
+
+fn pick_exe_asset(body: &str) -> Option<String> {
+    let key = "\"browser_download_url\":\"";
+    let mut rest = body;
+    while let Some(start) = rest.find(key) {
+        let after = &rest[start + key.len()..];
+        if let Some(end) = after.find('"') {
+            let url = &after[..end];
+            if url.to_ascii_lowercase().ends_with(".exe") {
+                return Some(url.to_string());
+            }
+        }
+        rest = &after[..];
+    }
+    // Если имён с .exe нет — годится единственный ассет любого вида.
+    extract(body, key)
 }
 
 fn extract(body: &str, key: &str) -> Option<String> {

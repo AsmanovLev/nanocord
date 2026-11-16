@@ -38,6 +38,7 @@ fn main() -> eframe::Result<()> {
     let listen_arg = args.iter().position(|a| a == "--listen-test");
     let is_loopback_test = args.iter().any(|a| a == "--loopback-test");
     let is_shot_test = args.iter().any(|a| a == "--test-shot");
+    let is_update = args.iter().any(|a| a == "--update");
     let upnp_arg = args.iter().position(|a| a == "--upnp");
 
     if is_test_mode
@@ -51,6 +52,7 @@ fn main() -> eframe::Result<()> {
         || listen_arg.is_some()
         || is_loopback_test
         || is_shot_test
+        || is_update
         || upnp_arg.is_some()
     {
         attach_console_if_cli();
@@ -130,6 +132,20 @@ fn main() -> eframe::Result<()> {
 
     if is_shot_test {
         run_shot_test();
+        std::process::exit(0);
+    }
+
+    if is_update {
+        // Проверка и установка обновления без запуска интерфейса.
+        let status = nanocord::update::force_update();
+        println!("update: {status}");
+        let _ = std::fs::write(
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("update_report.txt")))
+                .unwrap_or_else(|| std::path::PathBuf::from("update_report.txt")),
+            format!("{status}\n"),
+        );
         std::process::exit(0);
     }
 
