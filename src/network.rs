@@ -559,26 +559,44 @@ impl P2PNetworkServer {
         let chat_out_sess = chat_out_rx.clone();
 
         thread::spawn(move || {
-            let l_v6 = TcpListener::bind(format!("[::]:{}", port)).ok();
-            if let Some(ref l) = l_v6 {
-                let _ = l.set_nonblocking(true);
-            }
-            let l_v4 = TcpListener::bind(format!("0.0.0.0:{}", port)).ok();
-            if let Some(ref l) = l_v4 {
-                let _ = l.set_nonblocking(true);
-            }
-            // Без этой строки в логе невозможно отличить «сервер не поднялся» от
-            // «никто не пришёл»: оба случая выглядят одинаково пустым логом.
+            // Ошибки bind раньше отбрасывались через .ok(): в логе оставалось
+            // «не поднялось», и нельзя было понять почему — занято, запрещено
+            // политикой или порт внутри зарезервированного Windows диапазона.
+            let (l_v6, err_v6) = match TcpListener::bind(format!("[::]:{}", port)) {
+                Ok(l) => {
+                    let _ = l.set_nonblocking(true);
+                    (Some(l), String::new())
+                }
+                Err(e) => (None, format!("{e}")),
+            };
+            let (l_v4, err_v4) = match TcpListener::bind(format!("0.0.0.0:{}", port)) {
+                Ok(l) => {
+                    let _ = l.set_nonblocking(true);
+                    (Some(l), String::new())
+                }
+                Err(e) => (None, format!("{e}")),
+            };
             crate::diag::log(&format!(
-                "net: server bind port={} v6={} v4={}",
+                "net: server bind port={} v6={}{} v4={}{}",
                 port,
-                if l_v6.is_some() { "ok" } else { "fail" },
-                if l_v4.is_some() { "ok" } else { "fail" }
+                if l_v6.is_some() { "ok" } else { "fail: " },
+                err_v6,
+                if l_v4.is_some() { "ok" } else { "fail: " },
+                err_v4
             ));
 
             if l_v6.is_none() && l_v4.is_none() {
+                // Частая причина на Windows — порт попал в зарезервированный
+                // диапазон (Hyper-V/WSL/Docker): netstat пуст, bind запрещён.
+                crate::diag::log(
+                    "net: hint — проверь `netsh int ipv4 show excludedportrange protocol=tcp` и выбери свободный порт",
+                );
                 if let Ok(mut st) = status_clone.write() {
-                    *st = format!("Ошибка: не удалось привязать порт {}", port);
+                    *st = format!(
+                        "Ошибка: порт {} не занялся ({}). Возможно, он в зарезервированном диапазоне Windows — выбери другой порт.",
+                        port,
+                        if !err_v4.is_empty() { err_v4.as_str() } else { err_v6.as_str() }
+                    );
                 }
                 return;
             }
