@@ -33,6 +33,8 @@ fn main() -> eframe::Result<()> {
     let is_test_capture = args.iter().any(|a| a == "--test-capture");
     let is_test_decoder = args.iter().any(|a| a == "--test-decoder");
     let is_codec_report = args.iter().any(|a| a == "--codecs");
+    let is_nvenc_probe = args.iter().any(|a| a == "--nvenc-probe");
+    let is_test_mf = args.iter().any(|a| a == "--test-mf");
     let upnp_arg = args.iter().position(|a| a == "--upnp");
 
     if is_test_mode
@@ -41,6 +43,8 @@ fn main() -> eframe::Result<()> {
         || is_test_capture
         || is_test_decoder
         || is_codec_report
+        || is_nvenc_probe
+        || is_test_mf
         || upnp_arg.is_some()
     {
         attach_console_if_cli();
@@ -98,6 +102,16 @@ fn main() -> eframe::Result<()> {
             .and_then(|p| p.parse::<u16>().ok())
             .unwrap_or(48120);
         run_upnp_probe(port);
+        return Ok(());
+    }
+
+    if is_nvenc_probe {
+        run_nvenc_probe();
+        return Ok(());
+    }
+
+    if is_test_mf {
+        run_mf_test();
         return Ok(());
     }
 
@@ -321,6 +335,117 @@ fn run_upnp_probe(port: u16) {
     }
 }
 
+/// `--test-mf`: кодирование через Media Foundation и контрольная расшифровка
+/// тем же MF-декодером, что используется на приёмной стороне.
+fn run_mf_test() {
+    let mut lines = Vec::new();
+    // Отчёт пишем рядом с exe: у задачи планировщика рабочий каталог может
+    // быть другим, и относительный путь уводил файл в неизвестном направлении.
+    let report = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("mf_test.txt")))
+        .unwrap_or_else(|| std::path::PathBuf::from("mf_test.txt"));
+    let (width, height) = (1280u32, 720u32);
+    let push = |lines: &mut Vec<String>, text: String| {
+        println!("{text}");
+        lines.push(text);
+    };
+
+    // Кадр с цветными полосами: по нему видно и «позеленело ли», и поехали ли строки.
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let p = (y * width as usize + x) * 4;
+            let band = x * 8 / width as usize;
+            rgba[p] = if band % 3 == 0 { 255 } else { 40 };
+            rgba[p + 1] = if band % 3 == 1 { 255 } else { 40 };
+            rgba[p + 2] = if band % 3 == 2 { 255 } else { 40 };
+            rgba[p + 3] = 255;
+        }
+    }
+
+    // Тот же выбор, что в живом стриме: NVENC -> NVENC HEVC -> Media Foundation.
+    let mut enc = match nanocord::encoder::DesktopEncoder::create(
+        width,
+        height,
+        22,
+        8,
+        30,
+        nanocord::encoder::preset_by_index(0),
+    ) {
+        Some(enc) => enc,
+        None => {
+            push(&mut lines, "ERROR: no encoder available".to_string());
+            if let Err(err) = std::fs::write(&report, format!("{}\n", lines.join("\n"))) {
+                println!("write failed: {err}");
+            }
+            return;
+        }
+    };
+    push(&mut lines, format!("encoder: {}", enc.label()));
+
+    let mut dec = nanocord::decoder::H264Decoder::new().ok();
+    nanocord::diag::log(&format!("mf test: report path {}", report.display()));
+    let flush = |lines: &Vec<String>| {
+        // Пишем после каждого кадра: если декодер упадёт на живом потоке,
+        // отчёт всё равно останется с данными до места падения.
+        let _ = std::fs::write(&report, format!("{}\n", lines.join("\n")));
+    };
+
+    for frame in 1..=30u32 {
+        // Кадр сдвигается: на статичной картинке P-кадры получаются по 19 байт
+        // и по ним не понять, живой ли энкодер.
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let p = (y * width as usize + x) * 4;
+                let shift = (frame as usize * 40) % width as usize;
+                let lit = ((x + shift) / 160) % 2 == 0;
+                rgba[p] = if lit { 235 } else { 20 };
+                rgba[p + 1] = if lit { 200 } else { 30 };
+                rgba[p + 2] = if lit { 120 } else { 60 };
+            }
+        }
+        match enc.encode_rgba_bytes(&rgba, frame == 1) {
+            Ok(nal) => {
+                push(
+                    &mut lines,
+                    format!("frame {frame}: {} bytes, first4={:02X?}", nal.len(), &nal[..4.min(nal.len())]),
+                );
+                if let Some(dec) = dec.as_mut() {
+                    match dec.decode_packet(width, height, &nal) {
+                        Ok(Some((w, h, out))) => push(
+                            &mut lines,
+                            format!("  decoded {w}x{h} {} bytes", out.len()),
+                        ),
+                        Ok(None) => push(&mut lines, "  decoded: buffered".to_string()),
+                        Err(e) => push(&mut lines, format!("  decode error: {e:?}")),
+                    }
+                }
+            }
+            Err(e) => push(&mut lines, format!("frame {frame}: encode error {e:?}")),
+        }
+        flush(&lines);
+    }
+    if let Err(e) = std::fs::write(&report, format!("{}\n", lines.join("\n"))) {
+        println!("write failed: {e}");
+    }
+}
+
+/// `--nvenc-probe`: какая версия NVENC API принимается драйвером.
+fn run_nvenc_probe() {
+    // Пишем в файл: у GUI-сборки stdout при перенаправлении теряется.
+    let mut lines = vec!["NVENC API version probe".to_string()];
+    for (api, struct_ver, status) in nanocord::nvenc::probe_api_versions() {
+        let verdict = if status == 0 { "OK" } else { "rejected" };
+        lines.push(format!(
+            "  apiVersion {api:#010X} struct {struct_ver:#010X} -> status {status} {verdict}"
+        ));
+    }
+    let text = lines.join("\n");
+    println!("{text}");
+    let _ = std::fs::write("nvenc_probe.txt", format!("{text}\n"));
+}
+
 fn attach_console_if_cli() {
     unsafe {
         type AttachConsoleFn = unsafe extern "system" fn(u32) -> i32;
@@ -450,8 +575,15 @@ fn run_synthetic_test(cq_quality: u8, max_bitrate_mbps: u32) {
     }
     let tex = tex.unwrap();
 
-    let mut encoder = NvencEncoder::new(&dev, width, height, cq_quality, max_bitrate_mbps)
-        .expect("Failed to initialize NvencEncoder");
+    let mut encoder = match NvencEncoder::new(&dev, width, height, cq_quality, max_bitrate_mbps) {
+        Ok(encoder) => encoder,
+        Err(e) => {
+            // Паника тут оставляла пустой экран и один panic.txt без причины.
+            println!("ERROR: NVENC init failed: {e:?}");
+            nanocord::diag::log(&format!("nvenc test: init failed {e:?}"));
+            return;
+        }
+    };
 
     println!("\nEncoding 5 test frames...");
     for i in 1..=5 {

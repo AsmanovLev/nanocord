@@ -712,7 +712,7 @@ impl NvencEncoder {
             open_session.version = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
             open_session.deviceType = NV_ENC_DEVICE_TYPE_DIRECTX;
             open_session.device = nvidia_device.as_raw() as *mut c_void;
-            open_session.apiVersion = NVENCAPI_VERSION;
+            open_session.apiVersion = driver_api_version(h_module);
 
             let mut encoder: *mut c_void = std::ptr::null_mut();
             let status = (api.nvEncOpenEncodeSessionEx)(&mut open_session, &mut encoder);
@@ -972,10 +972,17 @@ impl NvencEncoder {
             session_params.version = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
             session_params.deviceType = NV_ENC_DEVICE_TYPE_DIRECTX;
             session_params.device = nvidia_device.as_raw() as *mut c_void;
-            session_params.apiVersion = NVENCAPI_VERSION;
+            // Версию API спрашиваем у драйвера, а не берём свою: иначе на
+            // драйверах с другой версией сессия падает с кодом 15.
+            session_params.apiVersion = driver_api_version(h_module);
+            crate::diag::log(&format!(
+                "nvenc: OpenSessionEx apiVersion={:#010X} device={:?} size={}",
+                session_params.apiVersion,
+                session_params.device,
+                std::mem::size_of::<NvEncOpenEncodeSessionExParams>()
+            ));
 
             let mut encoder: *mut c_void = std::ptr::null_mut();
-            crate::diag::log(&format!("nvenc: OpenSessionEx device={:?} size={}", session_params.device, std::mem::size_of::<NvEncOpenEncodeSessionExParams>()));
             let status = (api.nvEncOpenEncodeSessionEx)(&mut session_params, &mut encoder);
             crate::diag::log(&format!("nvenc: OpenSessionEx status={} handle={:?}", status, encoder));
             if status != NV_ENC_SUCCESS {
@@ -1454,7 +1461,31 @@ fn find_nvidia_adapter() -> Result<IDXGIAdapter1> {
 }
 
 /// Загружает nvEncodeAPI64.dll, создаёт API-инстанс и открывает сессию кодирования.
-fn open_nvenc_session(device: &ID3D11Device) -> Result<(NvEncApiFunctionList, *mut c_void)> {
+/// Версия NVENC API, которую реально поддерживает драйвер.
+///
+/// Зашивать свою нельзя: если она выше драйверной, `nvEncOpenEncodeSessionEx`
+/// отвечает NV_ENC_ERR_INVALID_VERSION (15) и энкодер не открывается вообще.
+fn driver_api_version(h_module: HMODULE) -> u32 {
+    type GetMaxVersionFn = unsafe extern "system" fn(*mut u32) -> u32;
+    unsafe {
+        let name = b"NvEncodeAPIGetMaxSupportedVersion\0";
+        match GetProcAddress(h_module, windows::core::PCSTR(name.as_ptr())) {
+            Some(proc) => {
+                let get_max: GetMaxVersionFn = std::mem::transmute(proc);
+                let mut version = 0u32;
+                if get_max(&mut version) == NV_ENC_SUCCESS && version != 0 {
+                    version.min(NVENCAPI_VERSION)
+                } else {
+                    NVENCAPI_VERSION
+                }
+            }
+            None => NVENCAPI_VERSION,
+        }
+    }
+}
+
+/// Загружает DLL и создаёт таблицу функций NVENC (сессию не открывает).
+fn load_nvenc_api() -> Result<(NvEncApiFunctionList, HMODULE)> {
     unsafe {
         let dll_name: Vec<u16> = "nvEncodeAPI64.dll\0".encode_utf16().collect();
         let h_module = LoadLibraryW(PCWSTR(dll_name.as_ptr()))?;
@@ -1479,18 +1510,38 @@ fn open_nvenc_session(device: &ID3D11Device) -> Result<(NvEncApiFunctionList, *m
             )));
         }
         let api = api_uninit.assume_init();
+        Ok((api, h_module))
+    }
+}
+
+fn open_nvenc_session(device: &ID3D11Device) -> Result<(NvEncApiFunctionList, *mut c_void)> {
+    unsafe {
+        let (api, h_module) = load_nvenc_api()?;
+        let api_version = driver_api_version(h_module);
+        crate::diag::log(&format!(
+            "nvenc: driver api_version={:#010X} compiled={:#010X}",
+            api_version, NVENCAPI_VERSION
+        ));
 
         let mut session_params: NvEncOpenEncodeSessionExParams = zeroed();
         session_params.version = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
         session_params.deviceType = NV_ENC_DEVICE_TYPE_DIRECTX;
         session_params.device = device.as_raw() as *mut c_void;
-        session_params.apiVersion = NVENCAPI_VERSION;
+        session_params.apiVersion = api_version;
 
         let mut encoder: *mut c_void = std::ptr::null_mut();
         let status = (api.nvEncOpenEncodeSessionEx)(&mut session_params, &mut encoder);
         if status != NV_ENC_SUCCESS {
+            let reason = match status {
+                1 => "no encode device",
+                2 => "unsupported device",
+                7 => "encoder busy",
+                15 => "driver does not accept this NVENC API version",
+                20 => "unsupported parameter",
+                _ => "see NVENCSTATUS",
+            };
             return Err(nvenc_error(format!(
-                "nvEncOpenEncodeSessionEx failed with code {status} (NVENC is busy or the GPU has no encoder)"
+                "nvEncOpenEncodeSessionEx failed with code {status} ({reason})"
             )));
         }
 
@@ -1558,6 +1609,86 @@ pub fn resolve_codec_guid(preference: CodecPreference) -> Result<GUID> {
             }
         }
     }
+}
+
+/// Перебор версий NVENC API: показывает, какую драйвер реально принимает.
+///
+/// Драйверы отдают версию в разной упаковке (`0x0100000D` и `0x000000D0` — это
+/// 13.1 и 13<<4), поэтому единственный надёжный способ — попробовать и
+/// посмотреть на NVENCSTATUS.
+pub fn probe_api_versions() -> Vec<(u32, u32, u32)> {
+    // Драйвер проверяет обе величины: apiVersion и версию структуры запроса
+    // (в неё тоже вшит номер API). Поэтому перебираем пары.
+    let api_versions = [
+        NVENCAPI_VERSION,
+        0x0000_000D,
+        0x0000_00D0,
+        0x0000_00C0,
+        0x0100_000C,
+        0x0000_000C,
+    ];
+    let struct_versions = [
+        NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER,
+        0x7001_000D,
+        0x7001_00D0,
+        0x7001_00C0,
+        0x7001_000C,
+        0x7101_000C,
+    ];
+    let mut candidates = Vec::new();
+    for api in api_versions {
+        for sv in struct_versions {
+            candidates.push((api, sv));
+        }
+    }
+
+    let mut results = Vec::new();
+    unsafe {
+        let Ok(adapter) = find_nvidia_adapter() else {
+            return results;
+        };
+        let mut dev: Option<ID3D11Device> = None;
+        let mut ctx: Option<ID3D11DeviceContext> = None;
+        let mut level = D3D_FEATURE_LEVEL_11_0;
+        if D3D11CreateDevice(
+            &adapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            Some(&[D3D_FEATURE_LEVEL_11_0]),
+            D3D11_SDK_VERSION,
+            Some(&mut dev),
+            Some(&mut level),
+            Some(&mut ctx),
+        )
+        .is_err()
+        {
+            return results;
+        }
+        let Some(device) = dev else { return results };
+        let Ok((api, h_module)) = load_nvenc_api() else {
+            return results;
+        };
+        crate::diag::log(&format!(
+            "nvenc probe: driver reports {:#010X}",
+            driver_api_version(h_module)
+        ));
+
+        for (api_version, struct_version) in candidates {
+            let mut params: NvEncOpenEncodeSessionExParams = zeroed();
+            params.version = struct_version;
+            params.deviceType = NV_ENC_DEVICE_TYPE_DIRECTX;
+            params.device = device.as_raw() as *mut c_void;
+            params.apiVersion = api_version;
+            let mut handle: *mut c_void = std::ptr::null_mut();
+            let status = (api.nvEncOpenEncodeSessionEx)(&mut params, &mut handle);
+            if status == NV_ENC_SUCCESS && !handle.is_null() {
+                (api.nvEncDestroyEncoder)(handle);
+            }
+            results.push((api_version, struct_version, status));
+        }
+    }
+    results
 }
 
 static CODEC_PROBE: OnceLock<std::result::Result<Vec<VideoCodec>, String>> = OnceLock::new();

@@ -1417,7 +1417,7 @@ fn run_p2p_socket_session(
     }
     let mut pending_file: Option<PendingOutgoingFile> = None;
 
-    let mut nv_encoder: Option<(crate::nvenc::NvencEncoder, u8)> = None;
+    let mut video_encoder: Option<crate::encoder::DesktopEncoder> = None;
     let mut cur_enc_config = (0u8, 0u32, 0u32, 0u32, 0usize);
     let mut frame_idr_counter = 0u32;
     let mut encode_errors = 0u32;
@@ -1531,55 +1531,23 @@ fn run_p2p_socket_session(
 
             let needed_config = (cq, max_br, frame.width, frame.height, preset_idx);
             if cur_enc_config != needed_config {
-                let preset_guid = match preset_idx {
-                    0 => crate::nvenc::NV_ENC_PRESET_P1_GUID,
-                    1 => crate::nvenc::NV_ENC_PRESET_P3_GUID,
-                    2 => crate::nvenc::NV_ENC_PRESET_P7_GUID,
-                    _ => crate::nvenc::NV_ENC_PRESET_P1_GUID,
-                };
+                let preset_guid = crate::encoder::preset_by_index(preset_idx);
 
-                // H.264 first: it is supported by every NVENC generation and
-                // decodes everywhere. HEVC is opt-in, because a stream the GPU
-                // cannot really encode arrives as a green picture.
-                let mut enc = crate::nvenc::NvencEncoder::new_standalone_h264(
+                // NVENC -> Media Foundation. Раньше здесь был только NVENC, и на
+                // машине, где сессия NVENC не открывается, кадры просто
+                // выбрасывались: видео не появлялось вовсе.
+                video_encoder = crate::encoder::DesktopEncoder::create(
                     frame.width,
                     frame.height,
                     cq,
                     max_br,
                     60,
                     preset_guid,
-                ).map(|e| (e, 2u8));
-
-                if enc.is_err() {
-                    enc = crate::nvenc::NvencEncoder::new_standalone_hevc(
-                        frame.width,
-                        frame.height,
-                        cq,
-                        max_br,
-                        60,
-                        preset_guid,
-                    ).map(|e| (e, 3u8));
-                }
-
-                nv_encoder = match enc {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        crate::diag::log(&format!(
-                            "encoder: init failed {:#010X} {}",
-                            e.code().0,
-                            e.message()
-                        ));
-                        None
-                    }
-                };
+                );
                 cur_enc_config = needed_config;
                 crate::diag::log(&format!(
                     "encoder: {} {}x{} cq={} max={}Mbps",
-                    match nv_encoder.as_ref() {
-                        Some((_, 3)) => "HEVC(NVENC)",
-                        Some((_, 2)) => "H264(NVENC)",
-                        _ => "none",
-                    },
+                    video_encoder.as_ref().map(|e| e.label()).unwrap_or("none"),
                     frame.width,
                     frame.height,
                     cq,
@@ -1595,14 +1563,15 @@ fn run_p2p_socket_session(
             let force_idr = frame_idr_counter % 120 == 0;
             frame_idr_counter = frame_idr_counter.wrapping_add(1);
 
-            let (flags, payload) = match nv_encoder.as_mut() {
-                Some((enc, codec_flag)) => match enc.encode_rgba_bytes(&frame.rgba, force_idr) {
+            let (flags, payload) = match video_encoder.as_mut() {
+                Some(enc) => match enc.encode_rgba_bytes(&frame.rgba, force_idr) {
                     Ok(nal) => {
-                        if !dumped_self && *codec_flag == 2 {
+                        let codec_flag = enc.codec_flag();
+                        if !dumped_self && codec_flag == 2 {
                             dumped_self = true;
                             verify_encoded(&nal, frame.width, frame.height, &frame.rgba);
                         }
-                        (*codec_flag, nal)
+                        (codec_flag, nal)
                     }
                     Err(e) => {
                         encode_errors += 1;
@@ -1620,7 +1589,7 @@ fn run_p2p_socket_session(
                     }
                 },
                 None => {
-                    crate::diag::log_once("encode: no NVENC encoder, desktop frames are dropped");
+                    crate::diag::log_once("encode: no video encoder, desktop frames are dropped");
                     (0u8, Vec::new())
                 }
             };
@@ -1719,7 +1688,7 @@ fn run_p2p_socket_session(
                     .read()
                     .map(|c| c.cq_quality)
                     .unwrap_or(0);
-                t.codec = nv_encoder.as_ref().map(|(_, flag)| *flag).unwrap_or(0);
+                t.codec = video_encoder.as_ref().map(|e| e.codec_flag()).unwrap_or(0);
             }
 
             log_tick += 1;

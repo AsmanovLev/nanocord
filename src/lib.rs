@@ -6,10 +6,12 @@ pub mod camera;
 pub mod capture;
 pub mod decoder;
 pub mod diag;
+pub mod encoder;
 pub mod i18n;
 pub mod latest;
 pub mod network;
 pub mod upnp;
+pub mod mfenc;
 pub mod nvenc;
 pub mod ui;
 
