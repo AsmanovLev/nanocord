@@ -238,6 +238,8 @@ pub struct P2PTelemetry {
     pub frames_sent: u64,
     pub frames_dropped: u64,
     pub quality: u8,
+    /// Кодек, которым реально кодируется поток: 2 = H.264, 3 = HEVC, 0 = ещё нет.
+    pub codec: u8,
     pub encode_errors: u64,
     pub state: &'static str,
 }
@@ -1587,6 +1589,7 @@ fn run_p2p_socket_session(
                     .read()
                     .map(|c| c.cq_quality)
                     .unwrap_or(0);
+                t.codec = nv_encoder.as_ref().map(|(_, flag)| *flag).unwrap_or(0);
             }
 
             log_tick += 1;

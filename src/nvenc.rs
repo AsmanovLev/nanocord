@@ -1,8 +1,9 @@
 #![allow(non_snake_case, dead_code, non_camel_case_types)]
 
 use std::ffi::c_void;
-use std::mem::{size_of, zeroed, MaybeUninit};
-use windows::core::{Interface, GUID, PCWSTR, Result};
+use std::mem::{MaybeUninit, size_of, zeroed};
+use std::sync::OnceLock;
+use windows::core::{GUID, Interface, PCWSTR, Result};
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
@@ -21,9 +22,11 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
-// Real NVIDIA Codec & Preset GUIDs
+// Real NVIDIA Codec & Preset GUIDs (nvEncodeAPI.h, NVENCAPI 13.1)
 pub const NV_ENC_CODEC_H264_GUID: GUID = GUID::from_values(0x6bc82762, 0x4e63, 0x4ca4, [0xaa, 0x85, 0x1e, 0x50, 0xf3, 0x21, 0xf6, 0xbf]);
 pub const NV_ENC_CODEC_HEVC_GUID: GUID = GUID::from_values(0x790cdc88, 0x4522, 0x4d7b, [0x94, 0x25, 0xbd, 0xa9, 0x97, 0x5f, 0x76, 0x03]);
+pub const NV_ENC_H264_PROFILE_HIGH_GUID: GUID = GUID::from_values(0xe7cbc309, 0x4f7a, 0x4b89, [0xaf, 0x2a, 0xd5, 0x37, 0xc9, 0x2b, 0xe3, 0x10]);
+pub const NV_ENC_HEVC_PROFILE_MAIN_GUID: GUID = GUID::from_values(0xb514c39a, 0xb55b, 0x40fa, [0x87, 0x8f, 0xf1, 0x25, 0x3b, 0x4d, 0xfd, 0xec]);
 pub const NV_ENC_PRESET_P1_GUID: GUID = GUID::from_values(0xfc0a8d3e, 0x45f8, 0x4cf8, [0x80, 0xc7, 0x29, 0x88, 0x71, 0x59, 0x0e, 0xbf]);
 pub const NV_ENC_PRESET_P2_GUID: GUID = GUID::from_values(0xf581cfb8, 0x88d6, 0x4381, [0x93, 0xf0, 0xdf, 0x13, 0xf9, 0xc2, 0x7d, 0xab]);
 pub const NV_ENC_PRESET_P3_GUID: GUID = GUID::from_values(0x36850110, 0x3a07, 0x441f, [0x94, 0xd5, 0x36, 0x70, 0x63, 0x1f, 0x91, 0xf6]);
@@ -43,7 +46,8 @@ pub const NV_ENC_PARAMS_RC_CONSTQP: u32 = 0;
 pub const NV_ENC_PARAMS_RC_VBR: u32 = 1;
 pub const NV_ENC_PARAMS_RC_CBR: u32 = 2;
 pub const NV_ENC_PIC_STRUCT_FRAME: u32 = 1;
-pub const NV_ENC_PIC_FLAG_FORCEIDR: u32 = 0x00000004;
+// NV_ENC_PIC_FLAG_FORCEIDR = 0x2 (0x4 — это OUTPUT_SPSPPS, с ним IDR никто не форсировал)
+pub const NV_ENC_PIC_FLAG_FORCEIDR: u32 = 0x00000002;
 
 pub const NVENCAPI_VERSION: u32 = 0x0100000D;
 pub const NV_ENCODE_API_FUNCTION_LIST_VER: u32 = 0x7102000D;
@@ -57,6 +61,144 @@ pub const NV_ENC_REGISTER_RESOURCE_VER: u32 = 0x7105000D;
 pub const NV_ENC_MAP_INPUT_RESOURCE_VER: u32 = 0x7104000D;
 pub const NV_ENC_PIC_PARAMS_VER: u32 = 0xF107000D;
 pub const NV_ENC_LOCK_BITSTREAM_VER: u32 = 0xF102000D;
+
+// ============================ Выбор кодека ============================
+
+/// Аппаратный видеокодек, доступный через NVENC на текущей GPU.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum VideoCodec {
+    /// Baseline/Main/High H.264 — умеет любая GPU с NVENC, включая Maxwell 1 (GTX 750).
+    H264,
+    /// HEVC/H.265 — только Maxwell 2 (GM206+) и новее; на 25–30% дешевле по битрейту.
+    Hevc,
+}
+
+impl VideoCodec {
+    /// Порядок предпочтения при `CodecPreference::Auto`.
+    pub const PREFERRED: [VideoCodec; 2] = [VideoCodec::Hevc, VideoCodec::H264];
+
+    pub fn codec_guid(self) -> GUID {
+        match self {
+            VideoCodec::H264 => NV_ENC_CODEC_H264_GUID,
+            VideoCodec::Hevc => NV_ENC_CODEC_HEVC_GUID,
+        }
+    }
+
+    /// Профиль, который выставляется в `NV_ENC_CONFIG::profileGUID`.
+    pub fn profile_guid(self) -> GUID {
+        match self {
+            VideoCodec::H264 => NV_ENC_H264_PROFILE_HIGH_GUID,
+            VideoCodec::Hevc => NV_ENC_HEVC_PROFILE_MAIN_GUID,
+        }
+    }
+
+    pub fn from_codec_guid(guid: &GUID) -> Option<Self> {
+        if *guid == NV_ENC_CODEC_HEVC_GUID {
+            Some(VideoCodec::Hevc)
+        } else if *guid == NV_ENC_CODEC_H264_GUID {
+            Some(VideoCodec::H264)
+        } else {
+            None
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            VideoCodec::H264 => "H.264 (AVC)",
+            VideoCodec::Hevc => "H.265 (HEVC)",
+        }
+    }
+
+    pub fn short_name(self) -> &'static str {
+        match self {
+            VideoCodec::H264 => "H.264",
+            VideoCodec::Hevc => "H.265",
+        }
+    }
+}
+
+impl std::fmt::Display for VideoCodec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Что просить у драйвера при создании энкодера.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum CodecPreference {
+    /// HEVC, если GPU его умеет, иначе H.264 (поведение по умолчанию).
+    #[default]
+    Auto,
+    /// Только HEVC: если GPU не умеет — ошибка, без молчаливой подмены.
+    Hevc,
+    /// Только H.264 — максимальная совместимость с приёмником.
+    H264,
+}
+
+/// Чистый выбор кодека по списку поддерживаемых драйвером.
+///
+/// `None` — запрошенный кодек не поддерживается (для `Auto` невозможно:
+/// H.264 есть на любой NVENC-карте).
+pub fn choose_codec(available: &[VideoCodec], preference: CodecPreference) -> Option<VideoCodec> {
+    let has = |codec: VideoCodec| available.contains(&codec);
+    match preference {
+        CodecPreference::Hevc => has(VideoCodec::Hevc).then_some(VideoCodec::Hevc),
+        CodecPreference::H264 => has(VideoCodec::H264).then_some(VideoCodec::H264),
+        CodecPreference::Auto => VideoCodec::PREFERRED.iter().copied().find(|c| has(*c)),
+    }
+}
+
+fn nvenc_error(message: impl AsRef<str>) -> windows::core::Error {
+    windows::core::Error::new(windows::Win32::Foundation::E_FAIL, message.as_ref())
+}
+
+type GetEncodeGuidCountFn = unsafe extern "system" fn(*mut c_void, *mut u32) -> u32;
+type GetEncodeGuidsFn = unsafe extern "system" fn(*mut c_void, *mut GUID, u32, *mut u32) -> u32;
+
+/// Спрашивает у драйвера список кодеков, которые он реально умеет на этой GPU.
+///
+/// Требует уже открытой сессии (`nvEncOpenEncodeSessionEx`): nvEncodeAPI не
+/// отдаёт возможности кодека до открытия сессии.
+fn query_supported_codecs(
+    api: &NvEncApiFunctionList,
+    encoder: *mut c_void,
+) -> Result<Vec<VideoCodec>> {
+    unsafe {
+        if api.nvEncGetEncodeGUIDCount.is_null() || api.nvEncGetEncodeGUIDs.is_null() {
+            return Err(nvenc_error(
+                "nvEncodeAPI не отдал nvEncGetEncodeGUIDs (слишком старая версия драйвера)",
+            ));
+        }
+
+        let get_count: GetEncodeGuidCountFn = std::mem::transmute(api.nvEncGetEncodeGUIDCount);
+        let get_guids: GetEncodeGuidsFn = std::mem::transmute(api.nvEncGetEncodeGUIDs);
+
+        let mut count: u32 = 0;
+        let status = get_count(encoder, &mut count);
+        if status != NV_ENC_SUCCESS {
+            return Err(nvenc_error(format!(
+                "nvEncGetEncodeGUIDCount failed with code {status}"
+            )));
+        }
+
+        let mut guids = vec![GUID::from_u128(0); count as usize];
+        let mut written: u32 = 0;
+        if count > 0 {
+            let status = get_guids(encoder, guids.as_mut_ptr(), count, &mut written);
+            if status != NV_ENC_SUCCESS {
+                return Err(nvenc_error(format!(
+                    "nvEncGetEncodeGUIDs failed with code {status}"
+                )));
+            }
+            guids.truncate(written as usize);
+        }
+
+        Ok(guids
+            .iter()
+            .filter_map(VideoCodec::from_codec_guid)
+            .collect())
+    }
+}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -336,6 +478,8 @@ pub struct NvencEncoder {
     width: u32,
     height: u32,
     frame_count: u32,
+    /// Кодек, реально выбранный по возможностям драйвера (HEVC или H.264).
+    pub codec: VideoCodec,
     pub nvidia_device: ID3D11Device,
     pub nvidia_context: ID3D11DeviceContext,
     opt_staging_tex: Option<ID3D11Texture2D>,
@@ -437,6 +581,11 @@ impl NvencEncoder {
         codec_guid: GUID,
         preset_guid: GUID,
     ) -> Result<Self> {
+        let codec = match VideoCodec::from_codec_guid(&codec_guid) {
+            Some(codec) => codec,
+            None => return Err(nvenc_error("unsupported codec GUID for standalone encoder")),
+        };
+        crate::diag::log(&format!("nvenc(standalone): codec {}", codec.name()));
         unsafe {
             let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
             let mut nvidia_adapter: Option<IDXGIAdapter1> = None;
@@ -584,6 +733,7 @@ impl NvencEncoder {
             );
             let mut encode_config = if status == NV_ENC_SUCCESS {
                 let mut cfg = preset_config.presetCfg;
+                cfg.profileGUID = codec.profile_guid();
                 cfg.rcParams.rateControlMode = NV_ENC_PARAMS_RC_VBR;
                 cfg.rcParams.targetQuality = cq;
                 cfg.rcParams.targetQualityLSB = 0;
@@ -665,6 +815,7 @@ impl NvencEncoder {
                 width,
                 height,
                 frame_count: 0,
+                codec,
                 nvidia_device,
                 nvidia_context,
                 opt_staging_tex: staging_tex,
@@ -684,18 +835,19 @@ impl NvencEncoder {
         fps: u32,
         preset_guid: GUID,
     ) -> Result<Self> {
-        Self::new_with_codec_preset_and_fps(
+        Self::new_with_options(
             capture_device,
             width,
             height,
             cq,
             max_bitrate_mbps,
             fps,
-            NV_ENC_CODEC_HEVC_GUID,
             preset_guid,
+            CodecPreference::Auto,
         )
     }
 
+    /// Явный кодек, без опроса драйвера.
     pub fn new_with_codec_preset_and_fps(
         capture_device: &ID3D11Device,
         width: u32,
@@ -706,6 +858,13 @@ impl NvencEncoder {
         codec_guid: GUID,
         preset_guid: GUID,
     ) -> Result<Self> {
+        let codec = match VideoCodec::from_codec_guid(&codec_guid) {
+            Some(codec) => codec,
+            None => {
+                return Err(nvenc_error(format!("unsupported codec GUID {:?}", codec_guid)));
+            }
+        };
+        crate::diag::log(&format!("nvenc: requested codec {}", codec.name()));
         unsafe {
             // 1. Находим адаптер NVIDIA (VendorId == 0x10DE)
             let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
@@ -729,7 +888,7 @@ impl NvencEncoder {
                 Some(a) => a,
                 None => {
                     crate::diag::log("nvenc: no NVIDIA adapter");
-                    return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
+                    return Err(nvenc_error("NVIDIA GPU adapter not found on this system"));
                 }
             };
 
@@ -741,7 +900,7 @@ impl NvencEncoder {
 
             if is_cross_adapter {
                 println!(
-                    "Optimus Laptop detected: Screen is on {}, NVENC is on NVIDIA RTX 3060",
+                    "Optimus Laptop detected: screen is on {}, NVENC runs on the discrete NVIDIA GPU",
                     String::from_utf16_lossy(&capture_desc.Description)
                 );
             }
@@ -790,9 +949,11 @@ impl NvencEncoder {
             let create_instance_proc = GetProcAddress(
                 h_module,
                 windows::core::PCSTR(create_instance_name.as_ptr()),
-            ).ok_or_else(|| windows::core::Error::from_thread())?;
+            )
+            .ok_or_else(|| windows::core::Error::from_thread())?;
+            let create_instance: NvEncodeAPICreateInstanceFn =
+                std::mem::transmute(create_instance_proc);
 
-            let create_instance: NvEncodeAPICreateInstanceFn = std::mem::transmute(create_instance_proc);
 
             crate::diag::log("nvenc: dll loaded, creating API instance");
             let mut api_uninit = MaybeUninit::<NvEncApiFunctionList>::zeroed();
@@ -802,7 +963,7 @@ impl NvencEncoder {
             let status = create_instance(api_ptr);
             crate::diag::log(&format!("nvenc: CreateInstance status={}", status));
             if status != NV_ENC_SUCCESS {
-                return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
+                return Err(nvenc_error(format!("NvEncodeAPICreateInstance failed with code {status}")));
             }
             let api = api_uninit.assume_init();
 
@@ -818,10 +979,10 @@ impl NvencEncoder {
             let status = (api.nvEncOpenEncodeSessionEx)(&mut session_params, &mut encoder);
             crate::diag::log(&format!("nvenc: OpenSessionEx status={} handle={:?}", status, encoder));
             if status != NV_ENC_SUCCESS {
-                return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
+                return Err(nvenc_error(format!("nvEncOpenEncodeSessionEx failed with code {status} (NVENC is busy or the GPU has no encoder)")));
             }
 
-            // 5. Конфигурация пресета и CQ-VBR
+            // 5. Конфигурация пресета и CQ-VBR для выбранного кодека
             let mut preset_config: NvEncPresetConfig = zeroed();
             preset_config.version = NV_ENC_PRESET_CONFIG_VER;
             preset_config.presetCfg.version = NV_ENC_CONFIG_VER;
@@ -833,9 +994,17 @@ impl NvencEncoder {
                 NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY,
                 &mut preset_config,
             );
+            if status != NV_ENC_SUCCESS {
+                let _ = (api.nvEncDestroyEncoder)(encoder);
+                return Err(nvenc_error(format!(
+                    "nvEncGetEncodePresetConfigEx failed with code {status} (codec {}, preset P?)",
+                    codec.name()
+                )));
+            }
 
-            let mut encode_config = if status == NV_ENC_SUCCESS {
+            let mut encode_config = {
                 let mut cfg = preset_config.presetCfg;
+                cfg.profileGUID = codec.profile_guid();
                 cfg.rcParams.rateControlMode = NV_ENC_PARAMS_RC_VBR;
                 cfg.rcParams.targetQuality = cq;
                 cfg.rcParams.targetQualityLSB = 0;
@@ -843,11 +1012,9 @@ impl NvencEncoder {
                 cfg.rcParams.averageBitRate = max_bitrate_mbps * 1_000_000;
                 cfg.rcParams.vbvBufferSize = (max_bitrate_mbps * 1_000_000) / fps.max(1);
                 cfg.rcParams.flags |= 1 << 9; // zeroReorderDelay
-                cfg.gopLength = 30;
-                cfg.frameIntervalP = 1;     // no B-frames
-                Some(cfg)
-            } else {
-                None
+                cfg.gopLength = 30; // IDR раз в секунду (PR #16), не бесконечный GOP
+                cfg.frameIntervalP = 1; // no B-frames
+                cfg
             };
 
             let mut init_params: NvEncInitializeParams = zeroed();
@@ -862,12 +1029,17 @@ impl NvencEncoder {
             init_params.frameRateNum = fps;
             init_params.frameRateDen = 1;
             init_params.enablePTD = 1;
-            init_params.encodeConfig = encode_config.as_mut().map(|c| c as *mut _).unwrap_or(std::ptr::null_mut());
+            init_params.encodeConfig = &mut encode_config as *mut _;
 
             let status = (api.nvEncInitializeEncoder)(encoder, &mut init_params);
             crate::diag::log(&format!("nvenc: InitializeEncoder status={}", status));
             if status != NV_ENC_SUCCESS {
-                return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
+                crate::diag::log(&format!("nvenc: InitializeEncoder status={} codec={}", status, codec.name()));
+                let _ = (api.nvEncDestroyEncoder)(encoder);
+                return Err(nvenc_error(format!(
+                    "nvEncInitializeEncoder failed with code {status} for {}",
+                    codec.name()
+                )));
             }
 
             // 7. Создаем буфер для выходного битстрима (4 МБ)
@@ -877,7 +1049,10 @@ impl NvencEncoder {
 
             let status = (api.nvEncCreateBitstreamBuffer)(encoder, &mut bitstream_params);
             if status != NV_ENC_SUCCESS {
-                return Err(windows::core::Error::from_hresult(windows::core::HRESULT(-2147467259)));
+                let _ = (api.nvEncDestroyEncoder)(encoder);
+                return Err(nvenc_error(format!(
+                    "nvEncCreateBitstreamBuffer failed with code {status}"
+                )));
             }
 
             // 8. Путь загрузки кадров.
@@ -954,8 +1129,13 @@ impl NvencEncoder {
             opt_nv_tex = Some(nt);
 
             println!(
-                "NVENC H.265 (HEVC) Encoder initialized! {}x{} @ {} FPS, CQ: {}, Max: {} Mbps",
-                width, height, fps, cq, max_bitrate_mbps
+                "NVENC {} encoder initialized: {}x{} @ {} FPS, CQ: {}, max bitrate: {} Mbps",
+                codec.name(),
+                width,
+                height,
+                fps,
+                cq,
+                max_bitrate_mbps
             );
 
             Ok(Self {
@@ -966,6 +1146,7 @@ impl NvencEncoder {
                 width,
                 height,
                 frame_count: 0,
+                codec,
                 nvidia_device,
                 nvidia_context,
                 opt_staging_tex,
@@ -976,7 +1157,40 @@ impl NvencEncoder {
         }
     }
 
-    /// Кодирует захваченный кадр в NAL-поток H.265.
+    /// Кодек, которым реально кодирует этот энкодер (может быть H.264 даже
+    /// если просили HEVC — по итогам опроса драйвера).
+    pub fn codec(&self) -> VideoCodec {
+        self.codec
+    }
+
+    /// Конструктор с выбором кодека по возможностям драйвера.
+    ///
+    /// `CodecPreference::Auto` берёт HEVC, если GPU его умеет, иначе H.264;
+    /// явное предпочтение не подменяется молча.
+    pub fn new_with_options(
+        capture_device: &ID3D11Device,
+        width: u32,
+        height: u32,
+        cq: u8,
+        max_bitrate_mbps: u32,
+        fps: u32,
+        preset_guid: GUID,
+        codec_preference: CodecPreference,
+    ) -> Result<Self> {
+        let codec_guid = resolve_codec_guid(codec_preference)?;
+        Self::new_with_codec_preset_and_fps(
+            capture_device,
+            width,
+            height,
+            cq,
+            max_bitrate_mbps,
+            fps,
+            codec_guid,
+            preset_guid,
+        )
+    }
+
+    /// Кодирует захваченный кадр в NAL-поток выбранного кодека.
     pub fn encode_texture(
         &mut self,
         capture_texture: &ID3D11Texture2D,
@@ -1212,5 +1426,245 @@ impl Drop for NvencEncoder {
                 (self.api.nvEncDestroyEncoder)(self.encoder);
             }
         }
+    }
+}
+
+// ===================== Вспомогательные функции NVENC =====================
+
+/// Находит дискретный адаптер NVIDIA (VendorId 0x10DE).
+fn find_nvidia_adapter() -> Result<IDXGIAdapter1> {
+    unsafe {
+        let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
+        for i in 0.. {
+            let adapter = match factory.EnumAdapters1(i) {
+                Ok(a) => a,
+                Err(_) => break,
+            };
+            let desc = adapter.GetDesc1()?;
+            if desc.VendorId == 0x10DE {
+                println!(
+                    "Found NVIDIA GPU: {}",
+                    String::from_utf16_lossy(&desc.Description)
+                );
+                return Ok(adapter);
+            }
+        }
+        Err(nvenc_error("NVIDIA GPU adapter not found on this system"))
+    }
+}
+
+/// Загружает nvEncodeAPI64.dll, создаёт API-инстанс и открывает сессию кодирования.
+fn open_nvenc_session(device: &ID3D11Device) -> Result<(NvEncApiFunctionList, *mut c_void)> {
+    unsafe {
+        let dll_name: Vec<u16> = "nvEncodeAPI64.dll\0".encode_utf16().collect();
+        let h_module = LoadLibraryW(PCWSTR(dll_name.as_ptr()))?;
+
+        let create_instance_name = b"NvEncodeAPICreateInstance\0";
+        let create_instance_proc = GetProcAddress(
+            h_module,
+            windows::core::PCSTR(create_instance_name.as_ptr()),
+        )
+        .ok_or_else(|| windows::core::Error::from_thread())?;
+        let create_instance: NvEncodeAPICreateInstanceFn =
+            std::mem::transmute(create_instance_proc);
+
+        let mut api_uninit = MaybeUninit::<NvEncApiFunctionList>::zeroed();
+        let api_ptr = api_uninit.as_mut_ptr();
+        (*api_ptr).version = NV_ENCODE_API_FUNCTION_LIST_VER;
+
+        let status = create_instance(api_ptr);
+        if status != NV_ENC_SUCCESS {
+            return Err(nvenc_error(format!(
+                "NvEncodeAPICreateInstance failed with code {status}"
+            )));
+        }
+        let api = api_uninit.assume_init();
+
+        let mut session_params: NvEncOpenEncodeSessionExParams = zeroed();
+        session_params.version = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
+        session_params.deviceType = NV_ENC_DEVICE_TYPE_DIRECTX;
+        session_params.device = device.as_raw() as *mut c_void;
+        session_params.apiVersion = NVENCAPI_VERSION;
+
+        let mut encoder: *mut c_void = std::ptr::null_mut();
+        let status = (api.nvEncOpenEncodeSessionEx)(&mut session_params, &mut encoder);
+        if status != NV_ENC_SUCCESS {
+            return Err(nvenc_error(format!(
+                "nvEncOpenEncodeSessionEx failed with code {status} (NVENC is busy or the GPU has no encoder)"
+            )));
+        }
+
+        Ok((api, encoder))
+    }
+}
+
+fn codec_preference_name(preference: CodecPreference) -> &'static str {
+    match preference {
+        CodecPreference::Auto => "auto (HEVC preferred)",
+        CodecPreference::Hevc => "H.265 (HEVC)",
+        CodecPreference::H264 => "H.264 (AVC)",
+    }
+}
+
+fn format_codec_list(codecs: &[VideoCodec]) -> String {
+    if codecs.is_empty() {
+        return "none".to_string();
+    }
+    codecs
+        .iter()
+        .map(|codec| codec.name())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn log_codec_selection(available: &[VideoCodec], codec: VideoCodec) {
+    println!(
+        "       -> NVENC codecs reported by driver: [{}]",
+        format_codec_list(available)
+    );
+    if codec == VideoCodec::H264 && !available.contains(&VideoCodec::Hevc) {
+        println!(
+            "       -> {codec} selected: no HEVC encoder on this GPU/driver (Maxwell 1 or older), fallback active"
+        );
+    } else {
+        println!("       -> {codec} selected");
+    }
+}
+
+/// Кодек под запрошенное предпочтение, по списку, который отдаёт драйвер.
+///
+/// Если опросить драйвер не удалось (нет адаптера, заняты сессии, старый dll),
+/// не падаем: H.264 умеет любая NVENC-карта, поэтому берём его.
+pub fn resolve_codec_guid(preference: CodecPreference) -> Result<GUID> {
+    match probe_available_codecs() {
+        Ok(available) => match choose_codec(&available, preference) {
+            Some(codec) => {
+                log_codec_selection(&available, codec);
+                Ok(codec.codec_guid())
+            }
+            None => Err(nvenc_error(format!(
+                "requested {} is not supported by this GPU/driver (available: {})",
+                codec_preference_name(preference),
+                format_codec_list(&available)
+            ))),
+        },
+        Err(e) => {
+            if preference == CodecPreference::Hevc {
+                Err(nvenc_error(format!("codec probe failed: {e}")))
+            } else {
+                println!("       -> codec probe failed ({e}); falling back to H.264");
+                crate::diag::log(&format!("nvenc: codec probe failed ({e}), using H.264"));
+                Ok(NV_ENC_CODEC_H264_GUID)
+            }
+        }
+    }
+}
+
+static CODEC_PROBE: OnceLock<std::result::Result<Vec<VideoCodec>, String>> = OnceLock::new();
+
+/// Какие видеокодеки умеет NVENC на этой машине.
+///
+/// Открывает собственную короткоживущую сессию NVENC и кэширует ответ на процесс.
+/// `Err` означает, что аппаратного энкодера нет вовсе: нет NVIDIA GPU, слишком
+/// старый драйвер или все NVENC-сессии заняты.
+pub fn probe_available_codecs() -> std::result::Result<Vec<VideoCodec>, String> {
+    CODEC_PROBE
+        .get_or_init(|| probe_available_codecs_uncached().map_err(|e| e.to_string()))
+        .clone()
+}
+
+fn probe_available_codecs_uncached() -> Result<Vec<VideoCodec>> {
+    unsafe {
+        let nvidia_adapter = find_nvidia_adapter()?;
+
+        let mut dev_nv: Option<ID3D11Device> = None;
+        let mut ctx_nv: Option<ID3D11DeviceContext> = None;
+        let mut feature_level = D3D_FEATURE_LEVEL_11_0;
+
+        D3D11CreateDevice(
+            &nvidia_adapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            Some(&[D3D_FEATURE_LEVEL_11_0]),
+            D3D11_SDK_VERSION,
+            Some(&mut dev_nv),
+            Some(&mut feature_level),
+            Some(&mut ctx_nv),
+        )?;
+
+        let nvidia_device =
+            dev_nv.ok_or_else(|| nvenc_error("D3D11CreateDevice returned no device"))?;
+
+        let (api, encoder) = open_nvenc_session(&nvidia_device)?;
+        let codecs = query_supported_codecs(&api, encoder);
+        (api.nvEncDestroyEncoder)(encoder);
+        codecs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_prefers_hevc_when_both_available() {
+        let available = [VideoCodec::H264, VideoCodec::Hevc];
+        assert_eq!(
+            choose_codec(&available, CodecPreference::Auto),
+            Some(VideoCodec::Hevc)
+        );
+    }
+
+    #[test]
+    fn auto_falls_back_to_h264_when_no_hevc() {
+        assert_eq!(
+            choose_codec(&[VideoCodec::H264], CodecPreference::Auto),
+            Some(VideoCodec::H264)
+        );
+    }
+
+    #[test]
+    fn forced_codec_is_never_silently_substituted() {
+        assert_eq!(
+            choose_codec(&[VideoCodec::H264], CodecPreference::Hevc),
+            None
+        );
+        assert_eq!(
+            choose_codec(&[VideoCodec::Hevc], CodecPreference::H264),
+            None
+        );
+        assert_eq!(
+            choose_codec(&[VideoCodec::Hevc, VideoCodec::H264], CodecPreference::H264),
+            Some(VideoCodec::H264)
+        );
+    }
+
+    #[test]
+    fn empty_list_selects_nothing() {
+        assert_eq!(choose_codec(&[], CodecPreference::Auto), None);
+    }
+
+    #[test]
+    fn codec_guids_round_trip() {
+        for codec in VideoCodec::PREFERRED {
+            assert_eq!(
+                VideoCodec::from_codec_guid(&codec.codec_guid()),
+                Some(codec)
+            );
+        }
+        assert_ne!(VideoCodec::H264.codec_guid(), VideoCodec::Hevc.codec_guid());
+        assert_ne!(
+            VideoCodec::H264.profile_guid(),
+            VideoCodec::Hevc.profile_guid()
+        );
+    }
+
+    #[test]
+    fn unknown_codec_guid_is_ignored() {
+        assert_eq!(
+            VideoCodec::from_codec_guid(&GUID::from_u128(0xdead_beef)),
+            None
+        );
     }
 }

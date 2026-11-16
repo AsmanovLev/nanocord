@@ -559,6 +559,10 @@
         <ru>Идет замер кремния...</ru>
         <en>Probing hardware...</en>
     </string>
+    <string name="bench_codec_label">
+        <ru>Кодек замеров</ru>
+        <en>Measured codec</en>
+    </string>
     <string name="bench_rerun_btn">
         <ru>Запустить повторный замер</ru>
         <en>Rerun Benchmark</en>
@@ -590,8 +594,36 @@
 
     <!-- Encoder Settings Tab -->
     <string name="nvenc_heading">
-        <ru>Параметры кодека NVIDIA NVENC (H.265 / HEVC)</ru>
-        <en>NVIDIA NVENC Codec Parameters (H.265 / HEVC)</en>
+        <ru>Параметры аппаратного энкодера NVIDIA NVENC</ru>
+        <en>NVIDIA NVENC Hardware Encoder Parameters</en>
+    </string>
+    <string name="nvenc_codec_title">
+        <ru>Аппаратный кодек на этой GPU</ru>
+        <en>Hardware codec on this GPU</en>
+    </string>
+    <string name="nvenc_codec_detecting">
+        <ru>Опрос NVENC и драйвера...</ru>
+        <en>Probing NVENC and the driver...</en>
+    </string>
+    <string name="nvenc_codec_unavailable">
+        <ru>NVENC недоступен</ru>
+        <en>NVENC unavailable</en>
+    </string>
+    <string name="nvenc_codec_supported">
+        <ru>поддерживается</ru>
+        <en>supported</en>
+    </string>
+    <string name="nvenc_codec_fallback">
+        <ru>HEVC не поддерживается — будет fallback на H.264</ru>
+        <en>HEVC is not supported — falling back to H.264</en>
+    </string>
+    <string name="nvenc_codec_policy">
+        <ru>Поток стартует с H.264 (его декодирует любая система); HEVC включается, если H.264 не заводится.</ru>
+        <en>The stream starts with H.264 (decodable everywhere); HEVC is used only if H.264 fails to start.</en>
+    </string>
+    <string name="nvenc_codec_reported">
+        <ru>Драйвер сообщает</ru>
+        <en>Driver reports</en>
     </string>
     <string name="nvenc_subheading">
         <ru>Низкоуровневая настройка кремниевого энкодера RTX 3060.</ru>
@@ -622,16 +654,16 @@
         <en>Hardware Capture &amp; Compression Architecture:</en>
     </string>
     <string name="nvenc_arch_b1">
-        <ru>• Конфигурация GPU: NVIDIA GeForce RTX 3060 Laptop GPU + Intel(R) UHD Graphics (Optimus)</ru>
-        <en>• GPU Setup: NVIDIA GeForce RTX 3060 Laptop GPU + Intel(R) UHD Graphics (Optimus)</en>
+        <ru>• Конфигурация GPU: определяется на старте (дискретная NVIDIA, при Optimus — вместе с iGPU)</ru>
+        <en>• GPU Setup: detected at startup (discrete NVIDIA, plus iGPU on Optimus systems)</en>
     </string>
     <string name="nvenc_arch_b2">
         <ru>• Интерфейс захвата: DXGI Desktop Duplication API (D3D11 Texture2D Hardware Interop)</ru>
         <en>• Capture Interface: DXGI Desktop Duplication API (D3D11 Texture2D Hardware Interop)</en>
     </string>
     <string name="nvenc_arch_b3">
-        <ru>• Кремниевый энкодер: nvEncodeAPI64.dll — аппаратное сжатие H.265 / HEVC Main Profile</ru>
-        <en>• Silicon Encoder: nvEncodeAPI64.dll — hardware H.265 / HEVC Main Profile</en>
+        <ru>• Кремниевый энкодер: nvEncodeAPI64.dll — H.265 Main Profile, а на GPU без HEVC (Maxwell 1) — H.264 High Profile</ru>
+        <en>• Silicon Encoder: nvEncodeAPI64.dll — H.265 Main Profile, H.264 High Profile on GPUs without HEVC (Maxwell 1)</en>
     </string>
     <string name="nvenc_arch_b4">
         <ru>• Режим задержки: zeroReorderDelay = 1, frameIntervalP = 1 (Zero B-Frames, Sub-Frame P2P Delivery)</ru>

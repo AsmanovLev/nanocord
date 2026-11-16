@@ -2,8 +2,8 @@
 
 use crate::capture::get_screen_resolution;
 use crate::nvenc::{
-    NvencEncoder, NV_ENC_PRESET_P1_GUID, NV_ENC_PRESET_P3_GUID, NV_ENC_PRESET_P4_GUID,
-    NV_ENC_PRESET_P5_GUID, NV_ENC_PRESET_P6_GUID, NV_ENC_PRESET_P7_GUID,
+    NV_ENC_PRESET_P1_GUID, NV_ENC_PRESET_P3_GUID, NV_ENC_PRESET_P4_GUID, NV_ENC_PRESET_P5_GUID,
+    NV_ENC_PRESET_P6_GUID, NV_ENC_PRESET_P7_GUID, NvencEncoder, VideoCodec,
 };
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
@@ -17,6 +17,8 @@ pub struct BenchmarkResult {
     pub height: u32,
     pub preset_name: String,
     pub preset_id: u8,
+    /// Кодек, которым сняты эти цифры: замеры H.264 и HEVC несравнимы напрямую.
+    pub codec: VideoCodec,
     pub avg_latency_ms: f32,
     pub min_latency_ms: f32,
     pub max_fps: u32,
@@ -159,6 +161,7 @@ pub fn run_full_benchmark() -> Vec<BenchmarkResult> {
                     let max_fps = if avg_ms > 0.0 { (1000.0 / avg_ms) as u32 } else { 0 };
 
                     results.push(BenchmarkResult {
+                        codec: encoder.codec(),
                         resolution: res_label.to_string(),
                         width: w,
                         height: h,
