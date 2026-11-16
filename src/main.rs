@@ -572,7 +572,7 @@ fn run_loopback_test() {
     let mut from_server = 0u32;
     let mut cam_from_client = 0u32;
     let mut cam_from_server = 0u32;
-    let mut bytes_sent_estimate = 0usize;
+
     let mut bytes_from_client = 0usize;
     let mut bytes_from_server = 0usize;
     let mut tick = 0u32;
@@ -643,7 +643,6 @@ fn run_loopback_test() {
         while let Ok(_) = client.camera_rx.try_recv() {
             cam_from_server += 1;
         }
-        bytes_sent_estimate += width as usize * 4;
         std::thread::sleep(Duration::from_millis(40));
     }
 

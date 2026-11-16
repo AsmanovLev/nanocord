@@ -49,6 +49,27 @@ fn out_buffer_bytes(transform: &IMFTransform, is_rgb: bool, width: u32, height: 
     }
 }
 
+/// Объявлен ли кадр в полном диапазоне (0..255) вместо студийного (16..235).
+///
+/// Кодеры пишут по-разному, и если читать полный диапазон студийными
+/// коэффициентами, вся картинка темнеет на 10–15 единиц — ровно то, что видно
+/// в логах: источник (45,64,80), декодер (32,50,66).
+fn output_is_full_range(transform: &IMFTransform) -> bool {
+    unsafe {
+        if let Ok(out_type) = transform.GetOutputCurrentType(0) {
+            if let Ok(range) = out_type.GetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE) {
+                // Явно студийный диапазон — единственный случай, когда читаем
+                // с коэффициентом 1.164 и сдвигом -16. Всё остальное (включая
+                // «не указан») считаем полным: NVENC без явного флага пишет
+                // именно полный диапазон, и чтение его как студийного давало
+                // затемнение на 12–14 единиц по всем каналам.
+                return range != MFNominalRange_16_235.0 as u32;
+            }
+        }
+    }
+    true
+}
+
 /// Сколько строк добавляет выравнивание поверхности.
 ///
 /// Media Foundation отдаёт кадр в выровненной поверхности (1080 -> 1088) и
@@ -308,6 +329,11 @@ impl HevcDecoder {
                                     };
                                     let expect = decoder_out_bytes(self.is_rgb, width, height);
                                     crate::diag::log_once(&format!(
+                                        "decoder: range {} (full={})",
+                                        if output_is_full_range(&self.transform) { "0..255" } else { "16..235" },
+                                        output_is_full_range(&self.transform)
+                                    ));
+                                    crate::diag::log_once(&format!(
                                         "decoder: is_rgb={} pitch={} {}x{} len={} expect={}",
                                         self.is_rgb, stride, width, height, cur_len, expect
                                     ));
@@ -336,13 +362,14 @@ impl HevcDecoder {
                                                 }
                                             }
                                         } else {
-                                            nv12_to_rgba_strided_padded(
+                                            nv12_to_rgba_ranged(
                                                 width as usize,
                                                 height as usize,
                                                 stride,
                                                 pad_rows,
                                                 data,
                                                 &mut self.rgba_buffer,
+                                                output_is_full_range(&self.transform),
                                             );
                                         }
                                         res_frame =
@@ -361,7 +388,7 @@ impl HevcDecoder {
                                     ));
                                     let nv12_slice = std::slice::from_raw_parts(p_nv12, len as usize);
                                     let pad_rows = output_pad_rows(&self.transform, height);
-                                    nv12_to_rgba_strided_padded(width as usize, height as usize, stride, pad_rows, nv12_slice, &mut self.rgba_buffer);
+                                    nv12_to_rgba_ranged(width as usize, height as usize, stride, pad_rows, nv12_slice, &mut self.rgba_buffer, output_is_full_range(&self.transform));
                                     let _ = media_buf.Unlock();
                                     res_frame = Some((width, height, self.rgba_buffer.clone()));
                                 }
@@ -645,6 +672,11 @@ impl H264Decoder {
                                     };
                                     let expect = decoder_out_bytes(self.is_rgb, width, height);
                                     crate::diag::log_once(&format!(
+                                        "decoder: range {} (full={})",
+                                        if output_is_full_range(&self.transform) { "0..255" } else { "16..235" },
+                                        output_is_full_range(&self.transform)
+                                    ));
+                                    crate::diag::log_once(&format!(
                                         "decoder: is_rgb={} pitch={} {}x{} len={} expect={}",
                                         self.is_rgb, stride, width, height, cur_len, expect
                                     ));
@@ -673,13 +705,14 @@ impl H264Decoder {
                                                 }
                                             }
                                         } else {
-                                            nv12_to_rgba_strided_padded(
+                                            nv12_to_rgba_ranged(
                                                 width as usize,
                                                 height as usize,
                                                 stride,
                                                 pad_rows,
                                                 data,
                                                 &mut self.rgba_buffer,
+                                                output_is_full_range(&self.transform),
                                             );
                                         }
                                         res_frame =
@@ -698,7 +731,7 @@ impl H264Decoder {
                                     ));
                                     let nv12_slice = std::slice::from_raw_parts(p_nv12, len as usize);
                                     let pad_rows = output_pad_rows(&self.transform, height);
-                                    nv12_to_rgba_strided_padded(width as usize, height as usize, stride, pad_rows, nv12_slice, &mut self.rgba_buffer);
+                                    nv12_to_rgba_ranged(width as usize, height as usize, stride, pad_rows, nv12_slice, &mut self.rgba_buffer, output_is_full_range(&self.transform));
                                     let _ = media_buf.Unlock();
                                     res_frame = Some((width, height, self.rgba_buffer.clone()));
                                 }
@@ -768,6 +801,19 @@ pub fn nv12_to_rgba_strided_padded(
     nv12: &[u8],
     rgba: &mut [u8],
 ) {
+    nv12_to_rgba_ranged(width, height, stride, pad, nv12, rgba, false)
+}
+
+/// То же с явным указанием диапазона: `full_range` — 0..255 вместо 16..235.
+pub fn nv12_to_rgba_ranged(
+    width: usize,
+    height: usize,
+    stride: usize,
+    pad: usize,
+    nv12: &[u8],
+    rgba: &mut [u8],
+    full_range: bool,
+) {
     let y_plane_size = stride * height;
     let base = pad * stride;
     if nv12.len() < base + y_plane_size + (stride * height / 2) || rgba.len() < width * height * 4 {
@@ -789,17 +835,27 @@ pub fn nv12_to_rgba_strided_padded(
             let u_val = uv_plane[uv_idx] as i32;
             let v_val = uv_plane[uv_idx + 1] as i32;
 
-            let c = y_val - 16;
-            let d = u_val - 128;
-            let e = v_val - 128;
+            let u_c = u_val - 128;
+            let v_c = v_val - 128;
 
-            // BT.709, а не BT.601: кодер переводит BGRA в NV12 коэффициентами
-            // 709 (так же поступает Media Foundation для HD). Разные матрицы
-            // на входе и выходе давали устойчивый сдвиг цвета — синий уезжал
-            // вверх на десяток единиц на каждом кадре.
-            let r = ((298 * c + 459 * e + 128) >> 8).clamp(0, 255) as u8;
-            let g = ((298 * c - 55 * d - 136 * e + 128) >> 8).clamp(0, 255) as u8;
-            let b = ((298 * c + 541 * d + 128) >> 8).clamp(0, 255) as u8;
+            // BT.709 в обоих случаях, но диапазон разный: студийный (16..235)
+            // с коэффициентом 1.164 и сдвигом -16, полный (0..255) без сдвига.
+            // Если перепутать, картинка равномерно темнеет — именно это и
+            // показывали логи.
+            let (r, g, b) = if full_range {
+                (
+                    ((256 * y_val + 403 * v_c) >> 8).clamp(0, 255) as u8,
+                    ((256 * y_val - 48 * u_c - 120 * v_c) >> 8).clamp(0, 255) as u8,
+                    ((256 * y_val + 475 * u_c) >> 8).clamp(0, 255) as u8,
+                )
+            } else {
+                let c = y_val - 16;
+                (
+                    ((298 * c + 459 * v_c + 128) >> 8).clamp(0, 255) as u8,
+                    ((298 * c - 55 * u_c - 136 * v_c + 128) >> 8).clamp(0, 255) as u8,
+                    ((298 * c + 541 * u_c + 128) >> 8).clamp(0, 255) as u8,
+                )
+            };
 
             let d_idx = dst_row + x * 4;
             rgba[d_idx] = r;

@@ -268,7 +268,7 @@ fn is_newer(latest: &str, current: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract, is_newer};
+    use super::{extract, is_newer, pick_exe_asset};
 
     #[test]
     fn version_comparison() {

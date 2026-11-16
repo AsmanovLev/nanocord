@@ -331,6 +331,24 @@ impl MfVideoEncoder {
                 let _ = available.SetUINT64(&MF_MT_FRAME_SIZE, size);
                 let _ = available.SetUINT64(&MF_MT_FRAME_RATE, rate);
                 let _ = available.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, par);
+                // Мы подаём студийный диапазон BT.709 — говорим это явно.
+                // Иначе MFT по умолчанию считает вход полным диапазоном, и
+                // приёмник видит затемнение на 10–15 единиц по всем каналам.
+                // Студийный диапазон: MFT-энкодеры его принимают и пишут флаг
+                // в поток. Полный диапазон они игнорируют, из-за чего картинка
+                // темнела на приёме.
+                let _ = available.SetUINT32(
+                    &MF_MT_VIDEO_NOMINAL_RANGE,
+                    MFNominalRange_16_235.0 as u32,
+                );
+                let _ = available.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32);
+                if transform.SetInputType(0, &available, 0).is_ok() {
+                    chosen = Some((format, subtype));
+                    break;
+                }
+                // MFT может не принять эти атрибуты — тогда без них.
+                let _ = available.DeleteItem(&MF_MT_VIDEO_NOMINAL_RANGE);
+                let _ = available.DeleteItem(&MF_MT_YUV_MATRIX);
                 if transform.SetInputType(0, &available, 0).is_ok() {
                     chosen = Some((format, subtype));
                     break;

@@ -320,6 +320,9 @@ pub struct NanocordApp {
 
     // Параметры энкодера
     pub target_fps: u32,
+    /// Масштаб захвата демонстрации в процентах от нативного разрешения.
+    pub capture_scale: u32,
+    capture_scale_applied: u32,
     pub preset_mode: PresetMode,
     pub manual_preset: u8,
     pub cq_quality: u8,
@@ -496,6 +499,8 @@ impl Default for NanocordApp {
             selected_res_idx: default_res_idx,
 
             target_fps: 30,
+            capture_scale: 100,
+            capture_scale_applied: 100,
             preset_mode: PresetMode::AutoSmart,
             manual_preset: 3,
             cq_quality: 22,
@@ -1874,6 +1879,36 @@ impl eframe::App for NanocordApp {
         self.target_fps_shared
             .store(self.target_fps.clamp(1, 120), Ordering::Relaxed);
 
+        // Кодер обязан объявлять ту же частоту, с которой идёт захват.
+        // Раньше это писалось только в панели настроек, поэтому при смене fps
+        // из плашки звонка поток жил с прежним значением.
+        if let Ok(mut cfg) = self.encoder_config.write() {
+            cfg.fps = self.target_fps.clamp(1, 120);
+        }
+
+        // Смена разрешения требует нового захвата: рабочий поток фиксирует
+        // размер кадра при старте.
+        if self.capture_scale != self.capture_scale_applied {
+            let scale = self.capture_scale.clamp(10, 100);
+            let width = (self.native_width * scale / 100).max(64) & !1;
+            let height = (self.native_height * scale / 100).max(64) & !1;
+            let stats = Arc::new(CaptureStats::default());
+            self.preview_rx = Some(start_desktop_preview_worker(
+                width,
+                height,
+                self.target_fps_shared.clone(),
+                self.is_streaming.clone(),
+                stats.clone(),
+            ));
+            self.preview_stats = stats;
+            self.desktop_texture = None;
+            self.capture_scale_applied = self.capture_scale;
+            crate::diag::log(&format!(
+                "capture: resolution {}x{} ({}% of {}x{})",
+                width, height, scale, self.native_width, self.native_height
+            ));
+        }
+
         // Проверяем статус P2P подключения
         let is_srv_connected = self.p2p_server.as_ref().map(|s| s.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
         let is_cli_connected = self.p2p_client.as_ref().map(|c| c.is_connected.load(Ordering::Relaxed)).unwrap_or(false);
@@ -1922,6 +1957,15 @@ impl eframe::App for NanocordApp {
             if ctx.input(|i| i.key_pressed(egui::Key::D)) {
                 self.is_deafened = !self.is_deafened;
             }
+        }
+
+        // Выключили демонстрацию или камеру — превью не должно оставаться
+        // последним кадром: замершая картинка выглядит как живая трансляция.
+        if !self.is_streaming.load(Ordering::Relaxed) {
+            self.desktop_texture = None;
+        }
+        if !self.is_camera_on {
+            self.camera_texture = None;
         }
 
         // 1. Приём настоящих кадров захвата экрана
@@ -3750,6 +3794,46 @@ impl NanocordApp {
                 ui.add_space(4.0);
                 ui.spacing_mut().slider_width = (ui.available_width() * 0.65).clamp(240.0, 700.0);
                 ui.add(egui::Slider::new(&mut self.cq_quality, 16..=32));
+
+                ui.add_space(14.0);
+                ui.separator();
+                ui.add_space(12.0);
+
+                ui.label(egui::RichText::new("Частота кадров демонстрации").strong().size(13.0).color(th.text_main));
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                    for fps in [24u32, 30, 60, 120] {
+                        let is_active = self.target_fps == fps;
+                        let fill = if is_active { Color32::from_rgb(88, 101, 242) } else { th.pill_inactive_bg };
+                        let text_col = if is_active { Color32::WHITE } else { th.text_main };
+                        let btn = egui::Button::new(egui::RichText::new(format!("{fps}")).size(12.0).strong().color(text_col))
+                            .fill(fill)
+                            .stroke(Stroke::new(1.0, if is_active { Color32::from_rgb(71, 82, 196) } else { th.border }))
+                            .corner_radius(CornerRadius::same(6));
+                        if ui.add(btn).clicked() {
+                            self.target_fps = fps;
+                        }
+                    }
+                });
+
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new("Разрешение демонстрации").strong().size(13.0).color(th.text_main));
+                ui.label(egui::RichText::new("Меньше разрешение — заметно легче канал и процессор.").size(11.0).color(th.text_sub));
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                    for (scale, label) in [(100u32, "Нативное"), (75, "75%"), (50, "50%"), (33, "33%")] {
+                        let is_active = self.capture_scale == scale;
+                        let fill = if is_active { Color32::from_rgb(88, 101, 242) } else { th.pill_inactive_bg };
+                        let text_col = if is_active { Color32::WHITE } else { th.text_main };
+                        let btn = egui::Button::new(egui::RichText::new(label).size(12.0).strong().color(text_col))
+                            .fill(fill)
+                            .stroke(Stroke::new(1.0, if is_active { Color32::from_rgb(71, 82, 196) } else { th.border }))
+                            .corner_radius(CornerRadius::same(6));
+                        if ui.add(btn).clicked() {
+                            self.capture_scale = scale;
+                        }
+                    }
+                });
 
                 ui.add_space(16.0);
                 ui.separator();
