@@ -236,13 +236,21 @@ fn run_codec_report() {
                     .map(|codec| codec.name())
                     .collect::<Vec<_>>()
                     .join(", ");
-                lines.push(format!("Supported codecs: {names}"));
-                match nvenc::choose_codec(&codecs, CodecPreference::Auto) {
-                    Some(codec) => lines.push(format!("Auto selection : {}", codec.name())),
-                    None => lines.push("Auto selection : none".to_string()),
-                }
+                lines.push(format!("Driver supports : {names}"));
+                // Порядок предпочтения API и политика живого стрима — разные вещи,
+                // их легко перепутать при чтении отчёта.
+                let preferred = nvenc::choose_codec(&codecs, CodecPreference::Auto)
+                    .map(|codec| codec.name())
+                    .unwrap_or("none");
+                lines.push(format!("Preferred codec : {preferred} (explicit API, CodecPreference::Auto)"));
+                lines.push(
+                    "Stream policy   : H.264 first, HEVC only if H.264 fails to start".to_string(),
+                );
                 if !codecs.contains(&VideoCodec::Hevc) {
-                    lines.push("HEVC is absent => H.264 fallback path will be used".to_string());
+                    lines.push(
+                        "HEVC is absent  : this GPU has no HEVC encoder, H.264 is the only option"
+                            .to_string(),
+                    );
                 }
             }
         }

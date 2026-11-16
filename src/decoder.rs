@@ -5,6 +5,70 @@ use windows::core::{Interface, Result, GUID};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::Media::MediaFoundation::*;
 
+/// Сколько байт занимает декодированный кадр в согласованном выходном формате.
+///
+/// RGB32 — 4 байта на пиксель, NV12 — полтора. Раньше буфер всегда выделялся под
+/// NV12, поэтому при согласованном RGB32 Media Foundation не мог записать весь
+/// кадр, а ошибка MF_E_BUFFERTOOSMALL молча проглатывалась.
+fn decoder_out_bytes(is_rgb: bool, width: u32, height: u32) -> u32 {
+    if is_rgb {
+        width * height * 4
+    } else {
+        width * height * 3 / 2
+    }
+}
+
+/// Шаг строки для случая, когда буфер не отдаёт `IMF2DBuffer`.
+///
+/// Длину буфера использовать нельзя: Media Foundation выравнивает кадр по
+/// высоте (1080 -> 1088 и т.п.), и шаг, посчитанный из длины, выходит больше
+/// реального. Строки тогда читаются со сдвигом — картинка «уезжает» по
+/// диагонали и размазывается. Честный источник — MF_MT_DEFAULT_STRIDE.
+fn output_stride(transform: &IMFTransform, width: u32) -> usize {
+    unsafe {
+        if let Ok(out_type) = transform.GetOutputCurrentType(0) {
+            if let Ok(stride) = out_type.GetUINT32(&MF_MT_DEFAULT_STRIDE) {
+                if stride >= width && stride <= width * 2 {
+                    return stride as usize;
+                }
+            }
+        }
+    }
+    width as usize
+}
+
+/// Средний цвет кадра: по нему сразу видно, где картинка позеленела —
+/// на отправителе или уже на приёмнике.
+pub fn log_frame_color(tag: &str, rgba: &[u8]) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    if n % 60 != 0 || rgba.len() < 4 {
+        return;
+    }
+    let pixels = rgba.len() / 4;
+    let step = (pixels / 4096).max(1);
+    let (mut sr, mut sg, mut sb, mut cnt) = (0u64, 0u64, 0u64, 0u64);
+    let mut i = 0usize;
+    while i < pixels {
+        let o = i * 4;
+        sr += rgba[o] as u64;
+        sg += rgba[o + 1] as u64;
+        sb += rgba[o + 2] as u64;
+        cnt += 1;
+        i += step;
+    }
+    if cnt > 0 {
+        crate::diag::log(&format!(
+            "color: {} mean rgb=({},{},{})",
+            tag,
+            sr / cnt,
+            sg / cnt,
+            sb / cnt
+        ));
+    }
+}
+
 /// Нативный аппаратный декодер HEVC (H.265) на базе Windows Media Foundation / GPU MFT.
 pub struct HevcDecoder {
     transform: IMFTransform,
@@ -147,8 +211,7 @@ impl HevcDecoder {
             out_buffer_desc.dwStreamID = 0;
 
             let out_sample = MFCreateSample()?;
-            let nv12_size = (width * height * 3 / 2) as u32;
-            let out_media_buffer = MFCreateMemoryBuffer(nv12_size)?;
+            let out_media_buffer = MFCreateMemoryBuffer(decoder_out_bytes(self.is_rgb, width, height))?;
             out_sample.AddBuffer(&out_media_buffer)?;
             out_buffer_desc.pSample = std::mem::ManuallyDrop::new(Some(out_sample));
 
@@ -169,11 +232,15 @@ impl HevcDecoder {
                                     // диагональными полосами.
                                     let stride = pitch.max(0) as usize;
                                     let cur_len = media_buf.GetCurrentLength().unwrap_or(0);
-                                    let need = (stride * height as usize * 3 / 2)
-                                        .min(cur_len as usize);
+                                    let need = if self.is_rgb {
+                                        (stride * height as usize).min(cur_len as usize)
+                                    } else {
+                                        (stride * height as usize * 3 / 2).min(cur_len as usize)
+                                    };
+                                    let expect = decoder_out_bytes(self.is_rgb, width, height);
                                     crate::diag::log_once(&format!(
-                                        "decoder: pitch={} width={} height={} len={}",
-                                        stride, width, height, cur_len
+                                        "decoder: is_rgb={} pitch={} {}x{} len={} expect={}",
+                                        self.is_rgb, stride, width, height, cur_len, expect
                                     ));
                                     if stride >= width as usize && need > width as usize * height as usize {
                                         let data = std::slice::from_raw_parts(p, need);
@@ -217,23 +284,11 @@ impl HevcDecoder {
                                 let mut p_nv12: *mut u8 = null_mut();
                                 let mut len = 0u32;
                                 if media_buf.Lock(&mut p_nv12, None, Some(&mut len)).is_ok() {
-                                    let stride = if height > 0 && len >= width * height {
-                                        // Длина буфера может включать резерв, поэтому
-                                        // шаг ограничиваем рамками разумного.
-                                        let raw = (len as usize) * 2 / ((height as usize) * 3);
-                                        let stride_ok = if raw >= width as usize && raw <= width as usize * 2 {
-                                            raw
-                                        } else {
-                                            width as usize
-                                        };
-                                        crate::diag::log_once(&format!(
-                                            "decoder: fallback len={} stride={} width={}",
-                                            len, stride_ok, width
-                                        ));
-                                        stride_ok
-                                    } else {
-                                        width as usize
-                                    };
+                                    let stride = output_stride(&self.transform, width);
+                                    crate::diag::log_once(&format!(
+                                        "decoder: fallback len={} stride={} width={} height={}",
+                                        len, stride, width, height
+                                    ));
                                     let nv12_slice = std::slice::from_raw_parts(p_nv12, len as usize);
                                     nv12_to_rgba_strided(width as usize, height as usize, stride, nv12_slice, &mut self.rgba_buffer);
                                     let _ = media_buf.Unlock();
@@ -248,8 +303,31 @@ impl HevcDecoder {
                     const MF_E_TRANSFORM_STREAM_CHANGE: i32 = -1072861855;
                     if e.code().0 == MF_E_TRANSFORM_STREAM_CHANGE {
                         if let Ok(new_out_type) = self.transform.GetOutputAvailableType(0, 0) {
+                            // После смены типа выход может быть уже не тем, что просили.
+                            // Флаг is_rgb обязан следовать за реальностью: иначе NV12
+                            // читается как BGRA и картинка приходит зелёной.
+                            if let Ok(subtype) = new_out_type.GetGUID(&MF_MT_SUBTYPE) {
+                                let rgb = subtype == MFVideoFormat_RGB32;
+                                if rgb != self.is_rgb {
+                                    crate::diag::log(&format!(
+                                        "decoder: stream change, output is_rgb {} -> {}",
+                                        self.is_rgb, rgb
+                                    ));
+                                }
+                                self.is_rgb = rgb;
+                            }
                             let _ = self.transform.SetOutputType(0, &new_out_type, 0);
                         }
+                    } else if e.code().0 != MF_E_TRANSFORM_NEED_MORE_INPUT {
+                        // BUFFERTOOSMALL и прочее раньше проглатывались молча.
+                        crate::diag::log_throttled(
+                            60,
+                            &format!(
+                                "decoder: ProcessOutput error {:#010X} {}",
+                                e.code().0,
+                                e.message()
+                            ),
+                        );
                     }
                 }
             }
@@ -257,6 +335,10 @@ impl HevcDecoder {
             // CRITICAL: Освобождаем COM sample и events, чтобы не утекала память
             let _ = std::mem::ManuallyDrop::take(&mut out_buffer_desc.pSample);
             let _ = std::mem::ManuallyDrop::take(&mut out_buffer_desc.pEvents);
+
+            if let Some((_, _, ref rgba)) = res_frame {
+                log_frame_color("decoded", rgba);
+            }
 
             Ok(res_frame)
         }
@@ -391,8 +473,7 @@ impl H264Decoder {
             out_buffer_desc.dwStreamID = 0;
 
             let out_sample = MFCreateSample()?;
-            let nv12_size = (width * height * 3 / 2) as u32;
-            let out_media_buffer = MFCreateMemoryBuffer(nv12_size)?;
+            let out_media_buffer = MFCreateMemoryBuffer(decoder_out_bytes(self.is_rgb, width, height))?;
             out_sample.AddBuffer(&out_media_buffer)?;
             out_buffer_desc.pSample = std::mem::ManuallyDrop::new(Some(out_sample));
 
@@ -413,11 +494,15 @@ impl H264Decoder {
                                     // диагональными полосами.
                                     let stride = pitch.max(0) as usize;
                                     let cur_len = media_buf.GetCurrentLength().unwrap_or(0);
-                                    let need = (stride * height as usize * 3 / 2)
-                                        .min(cur_len as usize);
+                                    let need = if self.is_rgb {
+                                        (stride * height as usize).min(cur_len as usize)
+                                    } else {
+                                        (stride * height as usize * 3 / 2).min(cur_len as usize)
+                                    };
+                                    let expect = decoder_out_bytes(self.is_rgb, width, height);
                                     crate::diag::log_once(&format!(
-                                        "decoder: pitch={} width={} height={} len={}",
-                                        stride, width, height, cur_len
+                                        "decoder: is_rgb={} pitch={} {}x{} len={} expect={}",
+                                        self.is_rgb, stride, width, height, cur_len, expect
                                     ));
                                     if stride >= width as usize && need > width as usize * height as usize {
                                         let data = std::slice::from_raw_parts(p, need);
@@ -461,23 +546,11 @@ impl H264Decoder {
                                 let mut p_nv12: *mut u8 = null_mut();
                                 let mut len = 0u32;
                                 if media_buf.Lock(&mut p_nv12, None, Some(&mut len)).is_ok() {
-                                    let stride = if height > 0 && len >= width * height {
-                                        // Длина буфера может включать резерв, поэтому
-                                        // шаг ограничиваем рамками разумного.
-                                        let raw = (len as usize) * 2 / ((height as usize) * 3);
-                                        let stride_ok = if raw >= width as usize && raw <= width as usize * 2 {
-                                            raw
-                                        } else {
-                                            width as usize
-                                        };
-                                        crate::diag::log_once(&format!(
-                                            "decoder: fallback len={} stride={} width={}",
-                                            len, stride_ok, width
-                                        ));
-                                        stride_ok
-                                    } else {
-                                        width as usize
-                                    };
+                                    let stride = output_stride(&self.transform, width);
+                                    crate::diag::log_once(&format!(
+                                        "decoder: fallback len={} stride={} width={} height={}",
+                                        len, stride, width, height
+                                    ));
                                     let nv12_slice = std::slice::from_raw_parts(p_nv12, len as usize);
                                     nv12_to_rgba_strided(width as usize, height as usize, stride, nv12_slice, &mut self.rgba_buffer);
                                     let _ = media_buf.Unlock();
@@ -492,8 +565,31 @@ impl H264Decoder {
                     const MF_E_TRANSFORM_STREAM_CHANGE: i32 = -1072861855; // 0xC00D6D61
                     if e.code().0 == MF_E_TRANSFORM_STREAM_CHANGE {
                         if let Ok(new_out_type) = self.transform.GetOutputAvailableType(0, 0) {
+                            // После смены типа выход может быть уже не тем, что просили.
+                            // Флаг is_rgb обязан следовать за реальностью: иначе NV12
+                            // читается как BGRA и картинка приходит зелёной.
+                            if let Ok(subtype) = new_out_type.GetGUID(&MF_MT_SUBTYPE) {
+                                let rgb = subtype == MFVideoFormat_RGB32;
+                                if rgb != self.is_rgb {
+                                    crate::diag::log(&format!(
+                                        "decoder: stream change, output is_rgb {} -> {}",
+                                        self.is_rgb, rgb
+                                    ));
+                                }
+                                self.is_rgb = rgb;
+                            }
                             let _ = self.transform.SetOutputType(0, &new_out_type, 0);
                         }
+                    } else if e.code().0 != MF_E_TRANSFORM_NEED_MORE_INPUT {
+                        // BUFFERTOOSMALL и прочее раньше проглатывались молча.
+                        crate::diag::log_throttled(
+                            60,
+                            &format!(
+                                "decoder: ProcessOutput error {:#010X} {}",
+                                e.code().0,
+                                e.message()
+                            ),
+                        );
                     }
                 }
             }
@@ -501,6 +597,10 @@ impl H264Decoder {
             // CRITICAL: Освобождаем COM sample и events, чтобы не утекала память
             let _ = std::mem::ManuallyDrop::take(&mut out_buffer_desc.pSample);
             let _ = std::mem::ManuallyDrop::take(&mut out_buffer_desc.pEvents);
+
+            if let Some((_, _, ref rgba)) = res_frame {
+                log_frame_color("decoded", rgba);
+            }
 
             Ok(res_frame)
         }

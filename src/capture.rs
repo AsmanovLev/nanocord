@@ -125,6 +125,39 @@ fn scale_bgra_to_rgba(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8>
         return out;
     }
 
+    // Уменьшение — усреднением по блоку (box filter), а не выбором одного
+    // пикселя. При nearest-neighbour тонкий текст и линии при 1920->1280
+    // рассыпаются в рябь, а при движении картинка «плывёт». Для шаринга
+    // экрана это ровно тот дефект, который видно глазами.
+    if sw > dw && sh > dh {
+        for dy in 0..dh {
+            let sy0 = dy * sh / dh;
+            let sy1 = (((dy + 1) * sh + dh - 1) / dh).max(sy0 + 1).min(sh);
+            let dst_row = dy * dw * 4;
+            for dx in 0..dw {
+                let sx0 = dx * sw / dw;
+                let sx1 = (((dx + 1) * sw + dw - 1) / dw).max(sx0 + 1).min(sw);
+                let (mut br, mut bg, mut bb, mut n) = (0u32, 0u32, 0u32, 0u32);
+                for sy in sy0..sy1 {
+                    let row = sy * sw * 4;
+                    for sx in sx0..sx1 {
+                        let s = row + sx * 4;
+                        bb += src[s] as u32;
+                        bg += src[s + 1] as u32;
+                        br += src[s + 2] as u32;
+                        n += 1;
+                    }
+                }
+                let d = dst_row + dx * 4;
+                out[d] = (br / n) as u8;
+                out[d + 1] = (bg / n) as u8;
+                out[d + 2] = (bb / n) as u8;
+                out[d + 3] = 255;
+            }
+        }
+        return out;
+    }
+
     for dy in 0..dh {
         let sy = dy * sh / dh;
         let src_row = sy * sw * 4;

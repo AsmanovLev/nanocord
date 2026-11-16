@@ -1393,6 +1393,9 @@ fn run_p2p_socket_session(
         }
 
         if let Some(frame) = outbox_desktop.take() {
+            // Средний цвет источника: сравнение с приёмной стороной сразу
+            // показывает, позеленело/поплыло до энкодера или уже в пути.
+            crate::decoder::log_frame_color("source", &frame.rgba);
             let (cq, max_br, preset_idx) = if let Ok(cfg) = encoder_config.read() {
                 (cfg.cq_quality, cfg.max_bitrate_mbps, cfg.preset_index)
             } else {

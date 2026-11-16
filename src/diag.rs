@@ -21,6 +21,16 @@ pub fn log(message: &str) {
     }
 }
 
+/// Логирует не чаще, чем каждый `nth`-й вызов этой точки: сетевые и декодерные
+/// ошибки иначе заливают лог тысячами одинаковых строк.
+pub fn log_throttled(nth: u64, message: &str) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    if COUNTER.fetch_add(1, Ordering::Relaxed) % nth.max(1) == 0 {
+        log(message);
+    }
+}
+
 pub fn log_once(message: &str) {
     static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
