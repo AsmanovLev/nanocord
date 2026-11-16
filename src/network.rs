@@ -1508,6 +1508,7 @@ fn run_p2p_socket_session(
         sent: u64,
     }
     let mut pending_file: Option<PendingOutgoingFile> = None;
+    let mut last_file_send = Instant::now() - Duration::from_secs(1);
 
     let mut video_encoder: Option<crate::encoder::DesktopEncoder> = None;
     let mut camera_encoder: Option<crate::encoder::DesktopEncoder> = None;
@@ -1588,13 +1589,19 @@ fn run_p2p_socket_session(
             }
         }
 
-        // Файл отправляем только когда кадров в очереди нет: иначе один
-        // write_all держит сокет, и видео со звуком встают на всё время куска.
+        // Файл отправляем только когда кадров в очереди нет и не чаще 20 раз в
+        // секунду: иначе один write_all держит сокет, и видео со звуком встают
+        // на всё время куска — даже при маленьком размере порции.
         let video_waiting = !outbox_desktop.is_empty() || !outbox_camera.is_empty();
-        if let Some(pf) = pending_file.as_mut().filter(|_| !video_waiting) {
+        let file_slot_free = last_file_send.elapsed() >= Duration::from_millis(60);
+        if let Some(pf) = pending_file
+            .as_mut()
+            .filter(|_| !video_waiting && file_slot_free)
+        {
+            last_file_send = Instant::now();
             // Кусок файла не должен занимать канал целиком: 64 КБ одним
             // write_all останавливали видео и звук на всё время записи.
-            let mut buf = vec![0u8; 16 * 1024];
+            let mut buf = vec![0u8; 8 * 1024];
             match pf.file.read(&mut buf) {
                 Ok(0) | Err(_) => {
                     let _ = send_packet(&mut writer, 9, 0, &1u32.to_le_bytes());

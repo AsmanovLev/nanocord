@@ -631,6 +631,31 @@ fn run_loopback_test() {
         std::thread::sleep(Duration::from_millis(40));
     }
 
+    // Отправка файла: во время передачи видео обязано продолжать идти.
+    // Замеряем кадры до, во время и после отправки 20 МБ.
+    let file_path = std::env::temp_dir().join("nanocord-loopback.bin");
+    let _ = std::fs::write(&file_path, vec![0x5Au8; 20 * 1024 * 1024]);
+    let before_file = from_server;
+    let _ = client.chat_tx.send(nanocord::network::ChatOutgoing::File(file_path.clone()));
+    let file_start = Instant::now();
+    let mut during_file = 0u32;
+    while file_start.elapsed() < Duration::from_secs(5) {
+        client
+            .outbox_desktop
+            .put(nanocord::network::OutgoingFrame {
+                width,
+                height,
+                rgba: std::sync::Arc::new(frame_b.clone()),
+            });
+        // Файл отправляет клиент, значит и кадры этого направления приходят
+        // на сервер: считать их нужно там.
+        while let Ok(_) = server.desktop_rx.try_recv() {
+            during_file += 1;
+        }
+        std::thread::sleep(Duration::from_millis(33));
+    }
+    let _ = std::fs::remove_file(&file_path);
+
     let connected = client.is_connected.load(std::sync::atomic::Ordering::Relaxed)
         && server.is_connected.load(std::sync::atomic::Ordering::Relaxed);
     let client_codec = client.telemetry.read().map(|t| t.codec).unwrap_or(0);
@@ -646,6 +671,9 @@ fn run_loopback_test() {
     lines.push(format!("bytes received: {bytes_from_server} / {bytes_from_client}"));
     lines.push(format!(
         "camera: client->server {cam_from_client} frames, server->client {cam_from_server} frames"
+    ));
+    lines.push(format!(
+        "file transfer: {during_file} desktop frames arrived in 5 s while sending 20 MB (before: {before_file} total)"
     ));
 
     client.is_running.store(false, std::sync::atomic::Ordering::Relaxed);

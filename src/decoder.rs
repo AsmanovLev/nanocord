@@ -194,7 +194,21 @@ impl HevcDecoder {
             // Foundation, а не наш код, и любой баг разметки строк исчезает.
             out_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)?;
             out_type.SetUINT64(&MF_MT_FRAME_SIZE, ((width as u64) << 32) | (height as u64))?;
-            let mut rgb_ok = self.transform.SetOutputType(0, &out_type, 0).is_ok();
+            // Явно называем матрицу: иначе MF выбирает её сам, и один и тот же
+            // поток на разных машинах получается разного цвета.
+            let _ = out_type.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32);
+            let _ = out_type.SetUINT32(
+                &MF_MT_VIDEO_NOMINAL_RANGE,
+                MFNominalRange_16_235.0 as u32,
+            );
+            // Тестовый режим: заставляет декодер отдавать NV12, как это
+            // происходит на машинах, где RGB32 не согласуется.
+            let force_nv12 = std::env::var("NANOCORD_DECODER_NV12").is_ok();
+            let mut rgb_ok = if force_nv12 {
+                false
+            } else {
+                self.transform.SetOutputType(0, &out_type, 0).is_ok()
+            };
 
             if !rgb_ok {
                 let fallback = MFCreateMediaType()?;
@@ -513,7 +527,21 @@ impl H264Decoder {
             // Foundation, а не наш код, и любой баг разметки строк исчезает.
             out_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)?;
             out_type.SetUINT64(&MF_MT_FRAME_SIZE, ((width as u64) << 32) | (height as u64))?;
-            let mut rgb_ok = self.transform.SetOutputType(0, &out_type, 0).is_ok();
+            // Явно называем матрицу: иначе MF выбирает её сам, и один и тот же
+            // поток на разных машинах получается разного цвета.
+            let _ = out_type.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32);
+            let _ = out_type.SetUINT32(
+                &MF_MT_VIDEO_NOMINAL_RANGE,
+                MFNominalRange_16_235.0 as u32,
+            );
+            // Тестовый режим: заставляет декодер отдавать NV12, как это
+            // происходит на машинах, где RGB32 не согласуется.
+            let force_nv12 = std::env::var("NANOCORD_DECODER_NV12").is_ok();
+            let mut rgb_ok = if force_nv12 {
+                false
+            } else {
+                self.transform.SetOutputType(0, &out_type, 0).is_ok()
+            };
 
             if !rgb_ok {
                 let fallback = MFCreateMediaType()?;
@@ -765,9 +793,13 @@ pub fn nv12_to_rgba_strided_padded(
             let d = u_val - 128;
             let e = v_val - 128;
 
-            let r = ((298 * c + 409 * e + 128) >> 8).clamp(0, 255) as u8;
-            let g = ((298 * c - 100 * d - 208 * e + 128) >> 8).clamp(0, 255) as u8;
-            let b = ((298 * c + 516 * d + 128) >> 8).clamp(0, 255) as u8;
+            // BT.709, а не BT.601: кодер переводит BGRA в NV12 коэффициентами
+            // 709 (так же поступает Media Foundation для HD). Разные матрицы
+            // на входе и выходе давали устойчивый сдвиг цвета — синий уезжал
+            // вверх на десяток единиц на каждом кадре.
+            let r = ((298 * c + 459 * e + 128) >> 8).clamp(0, 255) as u8;
+            let g = ((298 * c - 55 * d - 136 * e + 128) >> 8).clamp(0, 255) as u8;
+            let b = ((298 * c + 541 * d + 128) >> 8).clamp(0, 255) as u8;
 
             let d_idx = dst_row + x * 4;
             rgba[d_idx] = r;

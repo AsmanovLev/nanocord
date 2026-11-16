@@ -192,12 +192,23 @@ impl DesktopEncoder {
     }
 }
 
-/// Пресет по индексу настройки — один для всех путей.
+/// Пресет по номеру настройки (1..7 = P1..P7).
+///
+/// Раньше индексы 3..7 молча превращались в P1: переключатель режимов в UI
+/// выглядел рабочим, а кодек всегда работал на самом быстром пресете.
 pub fn preset_by_index(index: usize) -> GUID {
+    use crate::nvenc::{
+        NV_ENC_PRESET_P1_GUID, NV_ENC_PRESET_P2_GUID, NV_ENC_PRESET_P3_GUID,
+        NV_ENC_PRESET_P4_GUID, NV_ENC_PRESET_P5_GUID, NV_ENC_PRESET_P6_GUID,
+        NV_ENC_PRESET_P7_GUID,
+    };
     match index {
-        0 => NV_ENC_PRESET_P1_GUID,
-        1 => crate::nvenc::NV_ENC_PRESET_P3_GUID,
-        2 => crate::nvenc::NV_ENC_PRESET_P7_GUID,
+        2 => NV_ENC_PRESET_P2_GUID,
+        3 => NV_ENC_PRESET_P3_GUID,
+        4 => NV_ENC_PRESET_P4_GUID,
+        5 => NV_ENC_PRESET_P5_GUID,
+        6 => NV_ENC_PRESET_P6_GUID,
+        7 => NV_ENC_PRESET_P7_GUID,
         _ => NV_ENC_PRESET_P1_GUID,
     }
 }
