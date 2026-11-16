@@ -949,16 +949,29 @@ fn run_wasapi_capture_loop(
 
             match proc_res {
                 Ok((client, fmt)) => (client, fmt),
-                Err(_) => {
-                    // Device loopback hears everything, including the peer's
-                    // voice we are playing right now, and sends it straight
-                    // back: that is the echo users hear. Refuse instead.
-                    crate::diag::log_once(
-                        "loopback: process loopback unavailable, system audio disabled (would echo)",
-                    );
-                    return Err(windows::core::Error::from_hresult(
-                        windows::core::HRESULT(-2147467259),
+                Err(e) => {
+                    // Process loopback недоступен (Windows 10 старее 2004,
+                    // урезанные сборки). Раньше системный звук в этом случае
+                    // просто отключался, и демонстрация шла без звука.
+                    // Теперь берём обычный loopback с устройства вывода:
+                    // пользователь слышит звук демонстрации, а возможное эхо
+                    // регулируется ползунком «Звук демонстрации».
+                    crate::diag::log(&format!(
+                        "loopback: process loopback unavailable ({:#010X}), falling back to device loopback",
+                        e.code().0
                     ));
+                    let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
+                    let client = device.Activate::<IAudioClient>(CLSCTX_ALL, None)?;
+                    let fmt = client.GetMixFormat()?;
+                    client.Initialize(
+                        AUDCLNT_SHAREMODE_SHARED,
+                        AUDCLNT_STREAMFLAGS_LOOPBACK,
+                        1_000_000,
+                        0,
+                        fmt,
+                        None,
+                    )?;
+                    (client, fmt)
                 }
             }
         } else {

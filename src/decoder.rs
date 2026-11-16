@@ -54,6 +54,21 @@ fn out_buffer_bytes(transform: &IMFTransform, is_rgb: bool, width: u32, height: 
 /// Кодеры пишут по-разному, и если читать полный диапазон студийными
 /// коэффициентами, вся картинка темнеет на 10–15 единиц — ровно то, что видно
 /// в логах: источник (45,64,80), декодер (32,50,66).
+/// Матрица цветности, объявленная в потоке: 1 — BT.601, 2 — BT.709.
+///
+/// Жёстко брать 709 нельзя: NVENC и часть MFT пишут 601, и тогда оттенки
+/// уезжают — зелёный и синий особенно. Источник правды — сам поток.
+fn output_is_bt601(transform: &IMFTransform) -> bool {
+    unsafe {
+        if let Ok(out_type) = transform.GetOutputCurrentType(0) {
+            if let Ok(matrix) = out_type.GetUINT32(&MF_MT_YUV_MATRIX) {
+                return matrix == MFVideoTransferMatrix_BT601.0 as u32;
+            }
+        }
+    }
+    false
+}
+
 fn output_is_full_range(transform: &IMFTransform) -> bool {
     unsafe {
         if let Ok(out_type) = transform.GetOutputCurrentType(0) {
@@ -362,7 +377,7 @@ impl HevcDecoder {
                                                 }
                                             }
                                         } else {
-                                            nv12_to_rgba_ranged(
+                                            nv12_to_rgba_matrix(
                                                 width as usize,
                                                 height as usize,
                                                 stride,
@@ -370,6 +385,7 @@ impl HevcDecoder {
                                                 data,
                                                 &mut self.rgba_buffer,
                                                 output_is_full_range(&self.transform),
+                                                output_is_bt601(&self.transform),
                                             );
                                         }
                                         res_frame =
@@ -388,7 +404,7 @@ impl HevcDecoder {
                                     ));
                                     let nv12_slice = std::slice::from_raw_parts(p_nv12, len as usize);
                                     let pad_rows = output_pad_rows(&self.transform, height);
-                                    nv12_to_rgba_ranged(width as usize, height as usize, stride, pad_rows, nv12_slice, &mut self.rgba_buffer, output_is_full_range(&self.transform));
+                                    nv12_to_rgba_matrix(width as usize, height as usize, stride, pad_rows, nv12_slice, &mut self.rgba_buffer, output_is_full_range(&self.transform), output_is_bt601(&self.transform));
                                     let _ = media_buf.Unlock();
                                     res_frame = Some((width, height, self.rgba_buffer.clone()));
                                 }
@@ -705,7 +721,7 @@ impl H264Decoder {
                                                 }
                                             }
                                         } else {
-                                            nv12_to_rgba_ranged(
+                                            nv12_to_rgba_matrix(
                                                 width as usize,
                                                 height as usize,
                                                 stride,
@@ -713,6 +729,7 @@ impl H264Decoder {
                                                 data,
                                                 &mut self.rgba_buffer,
                                                 output_is_full_range(&self.transform),
+                                                output_is_bt601(&self.transform),
                                             );
                                         }
                                         res_frame =
@@ -731,7 +748,7 @@ impl H264Decoder {
                                     ));
                                     let nv12_slice = std::slice::from_raw_parts(p_nv12, len as usize);
                                     let pad_rows = output_pad_rows(&self.transform, height);
-                                    nv12_to_rgba_ranged(width as usize, height as usize, stride, pad_rows, nv12_slice, &mut self.rgba_buffer, output_is_full_range(&self.transform));
+                                    nv12_to_rgba_matrix(width as usize, height as usize, stride, pad_rows, nv12_slice, &mut self.rgba_buffer, output_is_full_range(&self.transform), output_is_bt601(&self.transform));
                                     let _ = media_buf.Unlock();
                                     res_frame = Some((width, height, self.rgba_buffer.clone()));
                                 }
@@ -814,6 +831,20 @@ pub fn nv12_to_rgba_ranged(
     rgba: &mut [u8],
     full_range: bool,
 ) {
+    nv12_to_rgba_matrix(width, height, stride, pad, nv12, rgba, full_range, false)
+}
+
+/// Полный вариант: диапазон и матрица цветности из потока.
+pub fn nv12_to_rgba_matrix(
+    width: usize,
+    height: usize,
+    stride: usize,
+    pad: usize,
+    nv12: &[u8],
+    rgba: &mut [u8],
+    full_range: bool,
+    bt601: bool,
+) {
     let y_plane_size = stride * height;
     let base = pad * stride;
     if nv12.len() < base + y_plane_size + (stride * height / 2) || rgba.len() < width * height * 4 {
@@ -842,19 +873,35 @@ pub fn nv12_to_rgba_ranged(
             // с коэффициентом 1.164 и сдвигом -16, полный (0..255) без сдвига.
             // Если перепутать, картинка равномерно темнеет — именно это и
             // показывали логи.
-            let (r, g, b) = if full_range {
-                (
+            // Коэффициенты: BT.709 (HD) или BT.601 (SD и часть кодеров),
+            // в полном (0..255) или студийном (16..235) диапазоне.
+            let (r, g, b) = match (bt601, full_range) {
+                (false, true) => (
                     ((256 * y_val + 403 * v_c) >> 8).clamp(0, 255) as u8,
                     ((256 * y_val - 48 * u_c - 120 * v_c) >> 8).clamp(0, 255) as u8,
                     ((256 * y_val + 475 * u_c) >> 8).clamp(0, 255) as u8,
-                )
-            } else {
-                let c = y_val - 16;
-                (
-                    ((298 * c + 459 * v_c + 128) >> 8).clamp(0, 255) as u8,
-                    ((298 * c - 55 * u_c - 136 * v_c + 128) >> 8).clamp(0, 255) as u8,
-                    ((298 * c + 541 * u_c + 128) >> 8).clamp(0, 255) as u8,
-                )
+                ),
+                (false, false) => {
+                    let c = y_val - 16;
+                    (
+                        ((298 * c + 459 * v_c + 128) >> 8).clamp(0, 255) as u8,
+                        ((298 * c - 55 * u_c - 136 * v_c + 128) >> 8).clamp(0, 255) as u8,
+                        ((298 * c + 541 * u_c + 128) >> 8).clamp(0, 255) as u8,
+                    )
+                }
+                (true, true) => (
+                    ((256 * y_val + 359 * v_c) >> 8).clamp(0, 255) as u8,
+                    ((256 * y_val - 88 * u_c - 183 * v_c) >> 8).clamp(0, 255) as u8,
+                    ((256 * y_val + 454 * u_c) >> 8).clamp(0, 255) as u8,
+                ),
+                (true, false) => {
+                    let c = y_val - 16;
+                    (
+                        ((298 * c + 409 * v_c + 128) >> 8).clamp(0, 255) as u8,
+                        ((298 * c - 100 * u_c - 208 * v_c + 128) >> 8).clamp(0, 255) as u8,
+                        ((298 * c + 516 * u_c + 128) >> 8).clamp(0, 255) as u8,
+                    )
+                }
             };
 
             let d_idx = dst_row + x * 4;

@@ -1882,8 +1882,21 @@ impl eframe::App for NanocordApp {
         // Кодер обязан объявлять ту же частоту, с которой идёт захват.
         // Раньше это писалось только в панели настроек, поэтому при смене fps
         // из плашки звонка поток жил с прежним значением.
+        // Все настройки кодера пишем здесь, а не в панели настроек: панель
+        // рендерится только в своей вкладке, и правки из плашки звонка до
+        // кодера не доходили.
         if let Ok(mut cfg) = self.encoder_config.write() {
             cfg.fps = self.target_fps.clamp(1, 120);
+            cfg.cq_quality = self.cq_quality;
+            cfg.max_bitrate_mbps = self.max_bitrate_mbps;
+            cfg.preset_index = match self.preset_mode {
+                PresetMode::AutoSmart | PresetMode::ManualP1 => 1,
+                PresetMode::ManualP3 => 3,
+                PresetMode::ManualP4 => 4,
+                PresetMode::ManualP5 => 5,
+                PresetMode::ManualP6 => 6,
+                PresetMode::ManualP7 => 7,
+            };
         }
 
         // Смена разрешения требует нового захвата: рабочий поток фиксирует
@@ -1961,7 +1974,8 @@ impl eframe::App for NanocordApp {
 
         // Выключили демонстрацию или камеру — превью не должно оставаться
         // последним кадром: замершая картинка выглядит как живая трансляция.
-        if !self.is_streaming.load(Ordering::Relaxed) {
+        let streaming_now = self.is_streaming.load(Ordering::Relaxed);
+        if !streaming_now {
             self.desktop_texture = None;
         }
         if !self.is_camera_on {
@@ -1971,8 +1985,14 @@ impl eframe::App for NanocordApp {
         // 1. Приём настоящих кадров захвата экрана
         if let Some(ref slot) = self.preview_rx {
             while let Some(frame) = slot.take() {
+                // Кадры захвата обновляют превью только при включённой
+                // демонстрации. Иначе в простое приходит 1 кадр в секунду,
+                // текстура то появлялась, то гасла — окно мерцало.
+                if !streaming_now {
+                    continue;
+                }
                 // Если собеседник подключен и стрим включен, отправляем захваченный кадр экрана в P2P
-                if is_peer_connected && self.is_streaming.load(Ordering::Relaxed) {
+                if is_peer_connected && streaming_now {
                     let net_frame = crate::network::OutgoingFrame {
                         width: frame.width,
                         height: frame.height,
