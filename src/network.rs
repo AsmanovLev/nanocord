@@ -625,6 +625,40 @@ impl P2PNetworkServer {
                 *st = format!("Ожидание подключения на порту {} (IPv6 + IPv4)...", port);
             }
 
+            // Проброс порта на роутере: без него собеседник из другой сети не
+            // достучится до этой машины. SSDP занимает до нескольких секунд,
+            // поэтому уводим в отдельный поток и не тормозим UI.
+            {
+                let status_upnp = status_clone.clone();
+                thread::spawn(move || match crate::upnp::ensure_mapping(port, "nanocord") {
+                    Ok(mapping) => {
+                        crate::diag::log(&format!(
+                            "upnp: TCP {} -> {}:{} via router, external {}{}",
+                            mapping.external_port,
+                            crate::upnp::local_ipv4()
+                                .map(|ip| ip.to_string())
+                                .unwrap_or_else(|| "?".to_string()),
+                            mapping.internal_port,
+                            mapping.external_ip,
+                            if mapping.external_ip == "?" {
+                                ""
+                            } else {
+                                ":port ready from outside"
+                            }
+                        ));
+                        if mapping.external_ip != "?" {
+                            if let Ok(mut st) = status_upnp.write() {
+                                *st = format!(
+                                    "Порт {} открыт на роутере. Внешний адрес: {}:{}",
+                                    mapping.internal_port, mapping.external_ip, mapping.external_port
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => crate::diag::log(&format!("upnp: port mapping failed: {e}")),
+                });
+            }
+
             while running_clone.load(Ordering::Relaxed) {
                 let mut incoming = None;
                 if let Some(ref l) = l_v6 {
@@ -736,6 +770,20 @@ impl P2PNetworkServer {
     pub fn stop(&self) {
         self.is_running.store(false, Ordering::Relaxed);
         self.is_connected.store(false, Ordering::Relaxed);
+
+        // Проброс на роутере бессрочный (lease 0) — иначе через пару часов он
+        // тихо истечёт посреди созвона. Значит убирать его нужно сами.
+        let port = self.port;
+        thread::spawn(move || {
+            let timeout = Duration::from_secs(3);
+            match crate::upnp::discover(timeout) {
+                Ok(gateway) => match crate::upnp::delete_tcp_mapping(&gateway, port, timeout) {
+                    Ok(()) => crate::diag::log(&format!("upnp: mapping for port {port} removed")),
+                    Err(e) => crate::diag::log(&format!("upnp: delete mapping failed: {e}")),
+                },
+                Err(e) => crate::diag::log(&format!("upnp: gateway not found on stop: {e}")),
+            }
+        });
     }
 }
 

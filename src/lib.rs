@@ -9,6 +9,7 @@ pub mod diag;
 pub mod i18n;
 pub mod latest;
 pub mod network;
+pub mod upnp;
 pub mod nvenc;
 pub mod ui;
 

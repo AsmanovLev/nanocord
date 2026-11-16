@@ -33,6 +33,7 @@ fn main() -> eframe::Result<()> {
     let is_test_capture = args.iter().any(|a| a == "--test-capture");
     let is_test_decoder = args.iter().any(|a| a == "--test-decoder");
     let is_codec_report = args.iter().any(|a| a == "--codecs");
+    let upnp_arg = args.iter().position(|a| a == "--upnp");
 
     if is_test_mode
         || is_bench_mode
@@ -40,6 +41,7 @@ fn main() -> eframe::Result<()> {
         || is_test_capture
         || is_test_decoder
         || is_codec_report
+        || upnp_arg.is_some()
     {
         attach_console_if_cli();
         println!("=================================================");
@@ -87,6 +89,15 @@ fn main() -> eframe::Result<()> {
             }
             Err(e) => println!("ERROR: Failed to initialize HevcDecoder: {:?}", e),
         }
+        return Ok(());
+    }
+
+    if let Some(pos) = upnp_arg {
+        let port = args
+            .get(pos + 1)
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(48120);
+        run_upnp_probe(port);
         return Ok(());
     }
 
@@ -260,6 +271,54 @@ fn run_codec_report() {
     let report = lines.join("\n");
     println!("\n{report}");
     let _ = std::fs::write("codec_report.txt", format!("{report}\n"));
+}
+
+/// `--upnp [порт]`: проверка проброса порта через UPnP без запуска стрима.
+///
+/// Печатает, нашёлся ли шлюз, какой у него внешний адрес и согласился ли он
+/// открыть порт. Роутеры отказывают по-разному, и код ошибки UPnP в логе
+/// говорит больше, чем «не получилось».
+fn run_upnp_probe(port: u16) {
+    println!("UPnP check for TCP port {port}");
+    match nanocord::upnp::local_ipv4() {
+        Some(ip) => println!("  local IPv4    : {ip}"),
+        None => println!("  local IPv4    : не определён"),
+    }
+
+    match nanocord::upnp::discover(std::time::Duration::from_secs(3)) {
+        Ok(gateway) => {
+            println!("  gateway       : {}", gateway.control_url);
+            println!("  service       : {}", gateway.service_type);
+            match nanocord::upnp::external_ip(&gateway, std::time::Duration::from_secs(3)) {
+                Ok(ip) => println!("  external IPv4 : {ip}"),
+                Err(e) => println!("  external IPv4 : {e}"),
+            }
+        }
+        Err(e) => {
+            println!("  gateway       : {e}");
+            return;
+        }
+    }
+
+    match nanocord::upnp::ensure_mapping(port, "nanocord") {
+        Ok(mapping) => {
+            println!(
+                "  mapping       : TCP {} -> {}:{} OK",
+                mapping.external_port,
+                nanocord::upnp::local_ipv4()
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+                mapping.internal_port
+            );
+            if mapping.external_ip != "?" {
+                println!(
+                    "  connect with  : {}:{}",
+                    mapping.external_ip, mapping.external_port
+                );
+            }
+        }
+        Err(e) => println!("  mapping       : {e}"),
+    }
 }
 
 fn attach_console_if_cli() {
