@@ -346,13 +346,20 @@ fn run_loopback_test() {
         code,
     );
 
-    let (width, height) = (1280u32, 720u32);
+    // 1920x1080 — не случайность: Media Foundation выравнивает высоту до 1088,
+    // и на этом размере вылезал MF_E_BUFFERTOOSMALL, из-за которого демонстрация
+    // экрана не показывала ничего.
+    let (width, height) = (1920u32, 1080u32);
+    let (cam_w, cam_h) = (1280u32, 720u32);
     let mut frame_a = vec![0u8; (width * height * 4) as usize];
     let mut frame_b = vec![0u8; (width * height * 4) as usize];
 
     let deadline = Instant::now() + Duration::from_secs(12);
     let mut from_client = 0u32;
     let mut from_server = 0u32;
+    let mut cam_from_client = 0u32;
+    let mut cam_from_server = 0u32;
+    let mut bytes_sent_estimate = 0usize;
     let mut bytes_from_client = 0usize;
     let mut bytes_from_server = 0usize;
     let mut tick = 0u32;
@@ -392,6 +399,23 @@ fn run_loopback_test() {
                 rgba: std::sync::Arc::new(frame_b.clone()),
             });
 
+        // Камера: тот же кадр, но своего размера — проверяем, что сжатие
+        // камеры не мешает демонстрации и наоборот.
+        client
+            .outbox_camera
+            .put(nanocord::network::OutgoingFrame {
+                width: cam_w,
+                height: cam_h,
+                rgba: std::sync::Arc::new(frame_a[..(cam_w * cam_h * 4) as usize].to_vec()),
+            });
+        server
+            .outbox_camera
+            .put(nanocord::network::OutgoingFrame {
+                width: cam_w,
+                height: cam_h,
+                rgba: std::sync::Arc::new(frame_b[..(cam_w * cam_h * 4) as usize].to_vec()),
+            });
+
         while let Ok(frame) = server.desktop_rx.try_recv() {
             from_client += 1;
             bytes_from_client += frame.rgba.len();
@@ -400,6 +424,13 @@ fn run_loopback_test() {
             from_server += 1;
             bytes_from_server += frame.rgba.len();
         }
+        while let Ok(_) = server.camera_rx.try_recv() {
+            cam_from_client += 1;
+        }
+        while let Ok(_) = client.camera_rx.try_recv() {
+            cam_from_server += 1;
+        }
+        bytes_sent_estimate += width as usize * 4;
         std::thread::sleep(Duration::from_millis(40));
     }
 
@@ -416,6 +447,9 @@ fn run_loopback_test() {
         "server -> client: {from_server} frames, codec flag {server_codec}"
     ));
     lines.push(format!("bytes received: {bytes_from_server} / {bytes_from_client}"));
+    lines.push(format!(
+        "camera: client->server {cam_from_client} frames, server->client {cam_from_server} frames"
+    ));
 
     client.is_running.store(false, std::sync::atomic::Ordering::Relaxed);
     server.is_running.store(false, std::sync::atomic::Ordering::Relaxed);

@@ -18,6 +18,37 @@ fn decoder_out_bytes(is_rgb: bool, width: u32, height: u32) -> u32 {
     }
 }
 
+/// Сколько байт нужно, чтобы Media Foundation записала кадр целиком.
+///
+/// Кадр выравнивается: 1920x1080 превращается в 1920x1088, а шаг строки может
+/// быть больше ширины. Буфер, посчитанный как `w*h*3/2`, на 1080p оказывался
+/// мал, декодер отвечал MF_E_BUFFERTOOSMALL, и демонстрация экрана не работала
+/// вовсе — при этом камера шла сырыми байтами и выглядела рабочей.
+fn out_buffer_bytes(transform: &IMFTransform, is_rgb: bool, width: u32, height: u32) -> u32 {
+    let mut frame_w = width;
+    let mut frame_h = height;
+    unsafe {
+        if let Ok(out_type) = transform.GetOutputCurrentType(0) {
+            if let Ok(size) = out_type.GetUINT64(&MF_MT_FRAME_SIZE) {
+                let type_w = (size >> 32) as u32;
+                let type_h = size as u32;
+                if type_w >= width && type_h >= height && type_w <= width * 2 && type_h <= height * 2
+                {
+                    frame_w = type_w;
+                    frame_h = type_h;
+                }
+            }
+        }
+    }
+    let stride = (output_stride(transform, frame_w) as u32).max(frame_w);
+    // Запас в две строки: часть MFT пишет хвост плоскостей с выравниванием.
+    if is_rgb {
+        stride * frame_h + stride * 2
+    } else {
+        (stride * frame_h * 3) / 2 + stride * 2
+    }
+}
+
 /// Шаг строки для случая, когда буфер не отдаёт `IMF2DBuffer`.
 ///
 /// Длину буфера использовать нельзя: Media Foundation выравнивает кадр по
@@ -211,7 +242,8 @@ impl HevcDecoder {
             out_buffer_desc.dwStreamID = 0;
 
             let out_sample = MFCreateSample()?;
-            let out_media_buffer = MFCreateMemoryBuffer(decoder_out_bytes(self.is_rgb, width, height))?;
+            let out_media_buffer =
+                MFCreateMemoryBuffer(out_buffer_bytes(&self.transform, self.is_rgb, width, height))?;
             out_sample.AddBuffer(&out_media_buffer)?;
             out_buffer_desc.pSample = std::mem::ManuallyDrop::new(Some(out_sample));
 
@@ -528,7 +560,8 @@ impl H264Decoder {
             out_buffer_desc.dwStreamID = 0;
 
             let out_sample = MFCreateSample()?;
-            let out_media_buffer = MFCreateMemoryBuffer(decoder_out_bytes(self.is_rgb, width, height))?;
+            let out_media_buffer =
+                MFCreateMemoryBuffer(out_buffer_bytes(&self.transform, self.is_rgb, width, height))?;
             out_sample.AddBuffer(&out_media_buffer)?;
             out_buffer_desc.pSample = std::mem::ManuallyDrop::new(Some(out_sample));
 

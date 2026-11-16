@@ -1254,6 +1254,14 @@ fn run_p2p_socket_session(
             windows::Win32::Media::MediaFoundation::MFVideoFormat_AV1,
         )
         .ok();
+        // У камеры свой поток и своё состояние декодеров: общий декодер
+        // сбивался бы с двух разных разрешений.
+        let mut cam_hevc = crate::decoder::HevcDecoder::new().ok();
+        let mut cam_h264 = crate::decoder::H264Decoder::new().ok();
+        let mut cam_av1 = crate::decoder::H264Decoder::with_subtype(
+            windows::Win32::Media::MediaFoundation::MFVideoFormat_AV1,
+        )
+        .ok();
 
         while r_run.load(Ordering::Relaxed) && r_conn.load(Ordering::Relaxed) {
             match reader.read_exact(&mut header) {
@@ -1405,9 +1413,29 @@ fn run_p2p_socket_session(
                             });
                         }
                     } else if msg_type == 2 {
+                        // Камера тоже может приходить сжатой: 0 — сырые байты
+                        // (старый протокол), 2/3/4 — H.264/HEVC/AV1.
+                        let decoded = if flags == 3 {
+                            cam_hevc
+                                .as_mut()
+                                .and_then(|d| d.decode_packet(width, height, &payload).ok().flatten())
+                                .map(|(_, _, f)| f)
+                        } else if flags == 4 {
+                            cam_av1
+                                .as_mut()
+                                .and_then(|d| d.decode_packet(width, height, &payload).ok().flatten())
+                                .map(|(_, _, f)| f)
+                        } else if flags == 2 {
+                            cam_h264
+                                .as_mut()
+                                .and_then(|d| d.decode_packet(width, height, &payload).ok().flatten())
+                                .map(|(_, _, f)| f)
+                        } else {
+                            Some(payload)
+                        };
                         // A decode failure must drop the frame: rendering the
                         // compressed bytes as pixels paints a frame of noise.
-                        let Some(rgba) = Some(payload).filter(|p| !p.is_empty()) else {
+                        let Some(rgba) = decoded.filter(|p| !p.is_empty()) else {
                             if let Ok(mut t) = r_telem.write() {
                                 t.encode_errors = t.encode_errors.saturating_add(1);
                             }
@@ -1477,7 +1505,9 @@ fn run_p2p_socket_session(
     let mut pending_file: Option<PendingOutgoingFile> = None;
 
     let mut video_encoder: Option<crate::encoder::DesktopEncoder> = None;
+    let mut camera_encoder: Option<crate::encoder::DesktopEncoder> = None;
     let mut cur_enc_config = (0u8, 0u32, 0u32, 0u32, 0usize);
+    let mut cur_cam_config = (0u8, 0u32, 0u32, 0u32, 0usize);
     let mut frame_idr_counter = 0u32;
     let mut encode_errors = 0u32;
     let mut dumped_sent = false;
@@ -1676,9 +1706,45 @@ fn run_p2p_socket_session(
         }
 
         if let Some(frame) = outbox_camera.take() {
-            // Camera goes raw: it is small, and a second NVENC instance is not
-            // worth the complexity for a two-person call.
-            let (flags, payload) = (0u8, (*frame.rgba).clone());
+            // Камеру тоже сжимаем. Сырой кадр 1280x720 — это 3.7 МБ, то есть
+            // сотни Мбит/с; такой поток занимал канал целиком, и демонстрация
+            // экрана не проходила вовсе (в логе: mbps=442 при fps=0).
+            let (cq, max_br, preset_idx) = if let Ok(cfg) = encoder_config.read() {
+                (cfg.cq_quality, cfg.max_bitrate_mbps, cfg.preset_index)
+            } else {
+                (22, 30, 0)
+            };
+            let needed = (cq, max_br, frame.width, frame.height, preset_idx);
+            if cur_cam_config != needed {
+                camera_encoder = crate::encoder::DesktopEncoder::create(
+                    frame.width,
+                    frame.height,
+                    cq,
+                    max_br,
+                    30,
+                    crate::encoder::preset_by_index(preset_idx),
+                    peer_decode.load(Ordering::Relaxed),
+                );
+                cur_cam_config = needed;
+                crate::diag::log(&format!(
+                    "encoder: camera {} {}x{}",
+                    camera_encoder.as_ref().map(|e| e.label()).unwrap_or("raw"),
+                    frame.width,
+                    frame.height
+                ));
+            }
+
+            let (flags, payload) = match camera_encoder.as_mut() {
+                Some(enc) => match enc.encode_rgba_bytes(&frame.rgba, false) {
+                    Ok(nal) if !nal.is_empty() => (enc.codec_flag(), nal),
+                    _ => (0u8, Vec::new()),
+                },
+                // Без кодера — как раньше, сырыми байтами.
+                None => (0u8, (*frame.rgba).clone()),
+            };
+            if payload.is_empty() {
+                continue;
+            }
 
             let mut pkt = Vec::with_capacity(12 + payload.len());
             pkt.extend_from_slice(&0x4E43u16.to_le_bytes());
