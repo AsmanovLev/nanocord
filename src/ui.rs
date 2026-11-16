@@ -1,9 +1,14 @@
 #![allow(dead_code, unused_variables, unused_imports)]
 
-use crate::audio::{start_wasapi_audio_worker, AudioSpectrumPacket, AUDIO_SPECTROGRAM_BINS};
-use crate::benchmark::{build_benchmark_matrix, run_full_benchmark, BenchmarkResult, MatrixCell, MatrixRow};
-use crate::camera::{start_camera_worker, CameraFrame};
-use crate::capture::{capture_desktop_gdi, get_screen_resolution, start_desktop_preview_worker, PreviewFrame};
+use crate::audio::{AUDIO_SPECTROGRAM_BINS, AudioSpectrumPacket, start_wasapi_audio_worker};
+use crate::benchmark::{
+    BenchmarkResult, MatrixCell, MatrixRow, build_benchmark_matrix, run_full_benchmark,
+};
+use crate::camera::{CameraFrame, start_camera_worker};
+use crate::capture::{
+    PreviewFrame, capture_desktop_gdi, get_screen_resolution, start_desktop_preview_worker,
+};
+use crate::nvenc::{self, VideoCodec};
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, Stroke, Vec2};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -344,6 +349,10 @@ pub struct NanocordApp {
     pub local_ipv6_hint: String,
     pub local_ipv4_hint: String,
 
+    // Возможности аппаратного энкодера (NVENC) — опрашиваются один раз в фоне
+    codec_probe: Option<Result<Vec<VideoCodec>, String>>,
+    codec_probe_rx: Option<Receiver<Result<Vec<VideoCodec>, String>>>,
+
     // Бенчмарк матрица
     pub benchmark_results: Option<Vec<BenchmarkResult>>,
     pub benchmark_matrix: Option<Vec<MatrixRow>>,
@@ -386,11 +395,11 @@ impl Default for NanocordApp {
         let game_is_running = Arc::new(AtomicBool::new(true));
         let rx_game = start_wasapi_audio_worker(true, None, game_is_running.clone());
 
-        // 4. Сохранение контрольного скриншота экрана для инспекции
-        if let Some(rgba) = capture_desktop_gdi(native_w, native_h) {
-            let path = "C:\\Users\\User\\.gemini\\antigravity\\brain\\7c6de5f1-98be-4f2e-bcbc-6dffdeafac75\\screenshot.png";
-            let _ = image::save_buffer(path, &rgba, native_w, native_h, image::ColorType::Rgba8);
-        }
+        // 4. Опрос аппаратных кодеков NVENC в фоне: UI не должен ждать драйвер
+        let (codec_probe_tx, codec_probe_rx) = channel();
+        thread::spawn(move || {
+            let _ = codec_probe_tx.send(nvenc::probe_available_codecs());
+        });
 
         let (hint_v6, hint_v4) = crate::network::get_local_ip_hint();
         let in_devs = crate::audio::enumerate_audio_devices(true);
@@ -469,6 +478,9 @@ impl Default for NanocordApp {
             copy_toast: None,
             local_ipv6_hint: hint_v6,
             local_ipv4_hint: hint_v4,
+
+            codec_probe: None,
+            codec_probe_rx: Some(codec_probe_rx),
 
             benchmark_results: None,
             benchmark_matrix: Some(default_matrix),
@@ -1837,7 +1849,15 @@ impl eframe::App for NanocordApp {
             self.active_tab = Tab::Lobby;
         }
 
-        // 5. Приём результатов бенчмарка
+        // 5. Приём отчёта об аппаратных кодеках
+        if let Some(rx) = &self.codec_probe_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.codec_probe = Some(result);
+                self.codec_probe_rx = None;
+            }
+        }
+
+        // 5b. Приём результатов бенчмарка
         if let Some(rx) = &self.bench_rx {
             if let Ok(results) = rx.try_recv() {
                 let matrix = build_benchmark_matrix(&results, self.native_width, self.native_height, self.native_hz);
@@ -2180,7 +2200,15 @@ impl NanocordApp {
 
             let (w, h, res_name) = self.available_resolutions[self.selected_res_idx];
             let (_, p_name) = self.get_effective_preset();
-            ui.label(egui::RichText::new(format!("• {} • {} FPS • HEVC {} • {:.1} ms", res_name, self.target_fps, p_name, self.estimate_latency_ms()))
+            ui.label(
+                egui::RichText::new(format!(
+                    "• {} • {} FPS • {} {} • {:.1} ms",
+                    res_name,
+                    self.target_fps,
+                    self.stream_codec_label(),
+                    p_name,
+                    self.estimate_latency_ms()
+                ))
                 .color(Color32::from_rgb(140, 185, 255))
                 .size(11.5));
 
@@ -2977,8 +3005,37 @@ impl NanocordApp {
         let th = self.app_theme.colors();
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.heading(egui::RichText::new(self.t("bench_heading")).color(th.text_main).strong());
-                ui.label(egui::RichText::new(format!("{}: {}x{} @ {} {}", self.t("bench_desc_prefix"), self.native_width, self.native_height, self.native_hz, self.t("bench_hz_suffix"))).color(th.text_sub));
+                ui.heading(
+                    egui::RichText::new(self.t("bench_heading"))
+                        .color(th.text_main)
+                        .strong(),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}: {}x{} @ {} {}",
+                        self.t("bench_desc_prefix"),
+                        self.native_width,
+                        self.native_height,
+                        self.native_hz,
+                        self.t("bench_hz_suffix")
+                    ))
+                    .color(th.text_sub),
+                );
+                if let Some(codec) = self
+                    .benchmark_results
+                    .as_ref()
+                    .and_then(|results| results.first())
+                    .map(|r| r.codec)
+                {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}: {}",
+                            self.t("bench_codec_label"),
+                            codec.name()
+                        ))
+                        .color(th.text_sub),
+                    );
+                }
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3107,11 +3164,105 @@ impl NanocordApp {
         }
     }
 
+    /// Подпись кодека для статусной плашки.
+    ///
+    /// Пока живой поток кадров идёт через JPEG, это видно в самой подписи:
+    /// `H.265 → JPEG` означает «энкодер умеет H.265, транспорт кадров ещё JPEG».
+    fn stream_codec_label(&self) -> String {
+        let chosen = match &self.codec_probe {
+            Some(Ok(codecs)) => nvenc::choose_codec(codecs, nvenc::CodecPreference::Auto),
+            _ => None,
+        };
+        match chosen {
+            Some(codec) => format!("{} → JPEG", codec.short_name()),
+            None => "JPEG".to_string(),
+        }
+    }
+
     /// Вкладка: Тонкие настройки энкодера NVENC
     fn render_encoder_settings(&mut self, ui: &mut egui::Ui) {
         let th = self.app_theme.colors();
         ui.heading(egui::RichText::new(self.t("nvenc_heading")).color(th.text_main).strong());
         ui.label(egui::RichText::new(self.t("nvenc_subheading")).color(th.text_sub));
+        ui.add_space(12.0);
+
+        // Что драйвер реально умеет: HEVC или только H.264 (fallback)
+        egui::Frame::new()
+            .fill(th.bg_card)
+            .stroke(Stroke::new(1.0, th.border))
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(16.0)
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(self.t("nvenc_codec_title"))
+                        .strong()
+                        .size(13.0)
+                        .color(th.text_main),
+                );
+                ui.add_space(4.0);
+                match &self.codec_probe {
+                    None => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(
+                                egui::RichText::new(self.t("nvenc_codec_detecting"))
+                                    .size(11.5)
+                                    .color(th.text_sub),
+                            );
+                        });
+                    }
+                    Some(Err(e)) => {
+                        ui.label(
+                            egui::RichText::new(self.t("nvenc_codec_unavailable"))
+                                .size(12.0)
+                                .strong()
+                                .color(Color32::from_rgb(218, 55, 60)),
+                        );
+                        ui.label(
+                            egui::RichText::new(e.as_str())
+                                .size(10.5)
+                                .color(th.text_sub),
+                        );
+                    }
+                    Some(Ok(codecs)) => {
+                        let hevc = codecs.contains(&VideoCodec::Hevc);
+                        let (text, color) = if hevc {
+                            (
+                                format!(
+                                    "{} — {}",
+                                    VideoCodec::Hevc.name(),
+                                    self.t("nvenc_codec_supported")
+                                ),
+                                Color32::from_rgb(35, 165, 90),
+                            )
+                        } else {
+                            (
+                                format!(
+                                    "{} — {}",
+                                    VideoCodec::H264.name(),
+                                    self.t("nvenc_codec_fallback")
+                                ),
+                                Color32::from_rgb(217, 119, 6),
+                            )
+                        };
+                        ui.label(egui::RichText::new(text).size(12.5).strong().color(color));
+                        let reported = codecs
+                            .iter()
+                            .map(|codec| codec.name())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}: {}",
+                                self.t("nvenc_codec_reported"),
+                                reported
+                            ))
+                            .size(10.5)
+                            .color(th.text_sub),
+                        );
+                    }
+                }
+            });
         ui.add_space(12.0);
 
         egui::Frame::new()
@@ -3203,26 +3354,240 @@ impl NanocordApp {
 
 fn build_default_matrix(native_w: u32, native_h: u32, native_hz: u32) -> Vec<MatrixRow> {
     let mock_results = vec![
-        BenchmarkResult { resolution: "480p".into(), width: 854, height: 480, preset_name: "P1".into(), preset_id: 1, avg_latency_ms: 2.97, min_latency_ms: 2.77, max_fps: 337, idr_size_kb: 0.1, p_frame_size_kb: 0.1 },
-        BenchmarkResult { resolution: "480p".into(), width: 854, height: 480, preset_name: "P3".into(), preset_id: 3, avg_latency_ms: 3.60, min_latency_ms: 3.32, max_fps: 278, idr_size_kb: 0.1, p_frame_size_kb: 0.1 },
-        BenchmarkResult { resolution: "480p".into(), width: 854, height: 480, preset_name: "P4".into(), preset_id: 4, avg_latency_ms: 3.61, min_latency_ms: 3.50, max_fps: 276, idr_size_kb: 0.1, p_frame_size_kb: 0.1 },
-        BenchmarkResult { resolution: "480p".into(), width: 854, height: 480, preset_name: "P5".into(), preset_id: 5, avg_latency_ms: 3.82, min_latency_ms: 3.65, max_fps: 261, idr_size_kb: 0.1, p_frame_size_kb: 0.1 },
-        BenchmarkResult { resolution: "480p".into(), width: 854, height: 480, preset_name: "P6".into(), preset_id: 6, avg_latency_ms: 4.12, min_latency_ms: 3.95, max_fps: 242, idr_size_kb: 0.1, p_frame_size_kb: 0.1 },
-        BenchmarkResult { resolution: "480p".into(), width: 854, height: 480, preset_name: "P7".into(), preset_id: 7, avg_latency_ms: 4.58, min_latency_ms: 4.31, max_fps: 218, idr_size_kb: 0.1, p_frame_size_kb: 0.1 },
-
-        BenchmarkResult { resolution: "720p".into(), width: 1280, height: 720, preset_name: "P1".into(), preset_id: 1, avg_latency_ms: 5.08, min_latency_ms: 4.92, max_fps: 196, idr_size_kb: 0.1, p_frame_size_kb: 0.1 },
-        BenchmarkResult { resolution: "720p".into(), width: 1280, height: 720, preset_name: "P3".into(), preset_id: 3, avg_latency_ms: 6.62, min_latency_ms: 6.37, max_fps: 150, idr_size_kb: 0.1, p_frame_size_kb: 0.1 },
-        BenchmarkResult { resolution: "720p".into(), width: 1280, height: 720, preset_name: "P4".into(), preset_id: 4, avg_latency_ms: 6.96, min_latency_ms: 6.71, max_fps: 143, idr_size_kb: 0.1, p_frame_size_kb: 0.1 },
-        BenchmarkResult { resolution: "720p".into(), width: 1280, height: 720, preset_name: "P5".into(), preset_id: 5, avg_latency_ms: 7.42, min_latency_ms: 7.15, max_fps: 134, idr_size_kb: 0.1, p_frame_size_kb: 0.1 },
-        BenchmarkResult { resolution: "720p".into(), width: 1280, height: 720, preset_name: "P6".into(), preset_id: 6, avg_latency_ms: 8.15, min_latency_ms: 7.82, max_fps: 122, idr_size_kb: 0.1, p_frame_size_kb: 0.1 },
-        BenchmarkResult { resolution: "720p".into(), width: 1280, height: 720, preset_name: "P7".into(), preset_id: 7, avg_latency_ms: 9.35, min_latency_ms: 8.92, max_fps: 106, idr_size_kb: 0.1, p_frame_size_kb: 0.1 },
-
-        BenchmarkResult { resolution: "1080p".into(), width: 1920, height: 1080, preset_name: "P1".into(), preset_id: 1, avg_latency_ms: 10.90, min_latency_ms: 9.80, max_fps: 91, idr_size_kb: 0.1, p_frame_size_kb: 0.1 },
-        BenchmarkResult { resolution: "1080p".into(), width: 1920, height: 1080, preset_name: "P3".into(), preset_id: 3, avg_latency_ms: 13.85, min_latency_ms: 12.90, max_fps: 72, idr_size_kb: 0.1, p_frame_size_kb: 0.1 },
-        BenchmarkResult { resolution: "1080p".into(), width: 1920, height: 1080, preset_name: "P4".into(), preset_id: 4, avg_latency_ms: 14.29, min_latency_ms: 13.91, max_fps: 69, idr_size_kb: 0.1, p_frame_size_kb: 0.1 },
-        BenchmarkResult { resolution: "1080p".into(), width: 1920, height: 1080, preset_name: "P5".into(), preset_id: 5, avg_latency_ms: 15.30, min_latency_ms: 14.80, max_fps: 65, idr_size_kb: 0.1, p_frame_size_kb: 0.1 },
-        BenchmarkResult { resolution: "1080p".into(), width: 1920, height: 1080, preset_name: "P6".into(), preset_id: 6, avg_latency_ms: 17.10, min_latency_ms: 16.50, max_fps: 58, idr_size_kb: 0.1, p_frame_size_kb: 0.1 },
-        BenchmarkResult { resolution: "1080p".into(), width: 1920, height: 1080, preset_name: "P7".into(), preset_id: 7, avg_latency_ms: 19.80, min_latency_ms: 19.10, max_fps: 50, idr_size_kb: 0.1, p_frame_size_kb: 0.1 },
+        BenchmarkResult {
+            resolution: "480p".into(),
+            width: 854,
+            height: 480,
+            preset_name: "P1".into(),
+            preset_id: 1,
+            codec: VideoCodec::Hevc,
+            avg_latency_ms: 2.97,
+            min_latency_ms: 2.77,
+            max_fps: 337,
+            idr_size_kb: 0.1,
+            p_frame_size_kb: 0.1,
+        },
+        BenchmarkResult {
+            resolution: "480p".into(),
+            width: 854,
+            height: 480,
+            preset_name: "P3".into(),
+            preset_id: 3,
+            codec: VideoCodec::Hevc,
+            avg_latency_ms: 3.60,
+            min_latency_ms: 3.32,
+            max_fps: 278,
+            idr_size_kb: 0.1,
+            p_frame_size_kb: 0.1,
+        },
+        BenchmarkResult {
+            resolution: "480p".into(),
+            width: 854,
+            height: 480,
+            preset_name: "P4".into(),
+            preset_id: 4,
+            codec: VideoCodec::Hevc,
+            avg_latency_ms: 3.61,
+            min_latency_ms: 3.50,
+            max_fps: 276,
+            idr_size_kb: 0.1,
+            p_frame_size_kb: 0.1,
+        },
+        BenchmarkResult {
+            resolution: "480p".into(),
+            width: 854,
+            height: 480,
+            preset_name: "P5".into(),
+            preset_id: 5,
+            codec: VideoCodec::Hevc,
+            avg_latency_ms: 3.82,
+            min_latency_ms: 3.65,
+            max_fps: 261,
+            idr_size_kb: 0.1,
+            p_frame_size_kb: 0.1,
+        },
+        BenchmarkResult {
+            resolution: "480p".into(),
+            width: 854,
+            height: 480,
+            preset_name: "P6".into(),
+            preset_id: 6,
+            codec: VideoCodec::Hevc,
+            avg_latency_ms: 4.12,
+            min_latency_ms: 3.95,
+            max_fps: 242,
+            idr_size_kb: 0.1,
+            p_frame_size_kb: 0.1,
+        },
+        BenchmarkResult {
+            resolution: "480p".into(),
+            width: 854,
+            height: 480,
+            preset_name: "P7".into(),
+            preset_id: 7,
+            codec: VideoCodec::Hevc,
+            avg_latency_ms: 4.58,
+            min_latency_ms: 4.31,
+            max_fps: 218,
+            idr_size_kb: 0.1,
+            p_frame_size_kb: 0.1,
+        },
+        BenchmarkResult {
+            resolution: "720p".into(),
+            width: 1280,
+            height: 720,
+            preset_name: "P1".into(),
+            preset_id: 1,
+            codec: VideoCodec::Hevc,
+            avg_latency_ms: 5.08,
+            min_latency_ms: 4.92,
+            max_fps: 196,
+            idr_size_kb: 0.1,
+            p_frame_size_kb: 0.1,
+        },
+        BenchmarkResult {
+            resolution: "720p".into(),
+            width: 1280,
+            height: 720,
+            preset_name: "P3".into(),
+            preset_id: 3,
+            codec: VideoCodec::Hevc,
+            avg_latency_ms: 6.62,
+            min_latency_ms: 6.37,
+            max_fps: 150,
+            idr_size_kb: 0.1,
+            p_frame_size_kb: 0.1,
+        },
+        BenchmarkResult {
+            resolution: "720p".into(),
+            width: 1280,
+            height: 720,
+            preset_name: "P4".into(),
+            preset_id: 4,
+            codec: VideoCodec::Hevc,
+            avg_latency_ms: 6.96,
+            min_latency_ms: 6.71,
+            max_fps: 143,
+            idr_size_kb: 0.1,
+            p_frame_size_kb: 0.1,
+        },
+        BenchmarkResult {
+            resolution: "720p".into(),
+            width: 1280,
+            height: 720,
+            preset_name: "P5".into(),
+            preset_id: 5,
+            codec: VideoCodec::Hevc,
+            avg_latency_ms: 7.42,
+            min_latency_ms: 7.15,
+            max_fps: 134,
+            idr_size_kb: 0.1,
+            p_frame_size_kb: 0.1,
+        },
+        BenchmarkResult {
+            resolution: "720p".into(),
+            width: 1280,
+            height: 720,
+            preset_name: "P6".into(),
+            preset_id: 6,
+            codec: VideoCodec::Hevc,
+            avg_latency_ms: 8.15,
+            min_latency_ms: 7.82,
+            max_fps: 122,
+            idr_size_kb: 0.1,
+            p_frame_size_kb: 0.1,
+        },
+        BenchmarkResult {
+            resolution: "720p".into(),
+            width: 1280,
+            height: 720,
+            preset_name: "P7".into(),
+            preset_id: 7,
+            codec: VideoCodec::Hevc,
+            avg_latency_ms: 9.35,
+            min_latency_ms: 8.92,
+            max_fps: 106,
+            idr_size_kb: 0.1,
+            p_frame_size_kb: 0.1,
+        },
+        BenchmarkResult {
+            resolution: "1080p".into(),
+            width: 1920,
+            height: 1080,
+            preset_name: "P1".into(),
+            preset_id: 1,
+            codec: VideoCodec::Hevc,
+            avg_latency_ms: 10.90,
+            min_latency_ms: 9.80,
+            max_fps: 91,
+            idr_size_kb: 0.1,
+            p_frame_size_kb: 0.1,
+        },
+        BenchmarkResult {
+            resolution: "1080p".into(),
+            width: 1920,
+            height: 1080,
+            preset_name: "P3".into(),
+            preset_id: 3,
+            codec: VideoCodec::Hevc,
+            avg_latency_ms: 13.85,
+            min_latency_ms: 12.90,
+            max_fps: 72,
+            idr_size_kb: 0.1,
+            p_frame_size_kb: 0.1,
+        },
+        BenchmarkResult {
+            resolution: "1080p".into(),
+            width: 1920,
+            height: 1080,
+            preset_name: "P4".into(),
+            preset_id: 4,
+            codec: VideoCodec::Hevc,
+            avg_latency_ms: 14.29,
+            min_latency_ms: 13.91,
+            max_fps: 69,
+            idr_size_kb: 0.1,
+            p_frame_size_kb: 0.1,
+        },
+        BenchmarkResult {
+            resolution: "1080p".into(),
+            width: 1920,
+            height: 1080,
+            preset_name: "P5".into(),
+            preset_id: 5,
+            codec: VideoCodec::Hevc,
+            avg_latency_ms: 15.30,
+            min_latency_ms: 14.80,
+            max_fps: 65,
+            idr_size_kb: 0.1,
+            p_frame_size_kb: 0.1,
+        },
+        BenchmarkResult {
+            resolution: "1080p".into(),
+            width: 1920,
+            height: 1080,
+            preset_name: "P6".into(),
+            preset_id: 6,
+            codec: VideoCodec::Hevc,
+            avg_latency_ms: 17.10,
+            min_latency_ms: 16.50,
+            max_fps: 58,
+            idr_size_kb: 0.1,
+            p_frame_size_kb: 0.1,
+        },
+        BenchmarkResult {
+            resolution: "1080p".into(),
+            width: 1920,
+            height: 1080,
+            preset_name: "P7".into(),
+            preset_id: 7,
+            codec: VideoCodec::Hevc,
+            avg_latency_ms: 19.80,
+            min_latency_ms: 19.10,
+            max_fps: 50,
+            idr_size_kb: 0.1,
+            p_frame_size_kb: 0.1,
+        },
     ];
     build_benchmark_matrix(&mock_results, native_w, native_h, native_hz)
 }

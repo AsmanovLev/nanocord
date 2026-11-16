@@ -6,7 +6,7 @@ use nanocord::benchmark;
 use nanocord::camera;
 use nanocord::capture::{self, DxgiCapture};
 use nanocord::network;
-use nanocord::nvenc::{self, NvencEncoder};
+use nanocord::nvenc::{self, CodecPreference, NvencEncoder, VideoCodec};
 use nanocord::ui::{self, NanocordApp};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
@@ -22,12 +22,18 @@ fn main() -> eframe::Result<()> {
     let is_bench_mode = args.iter().any(|a| a == "--benchmark");
     let is_cli_mode = args.iter().any(|a| a == "--cli");
     let is_test_capture = args.iter().any(|a| a == "--test-capture");
+    let is_codec_report = args.iter().any(|a| a == "--codecs");
 
-    if is_test_mode || is_bench_mode || is_cli_mode || is_test_capture {
+    if is_test_mode || is_bench_mode || is_cli_mode || is_test_capture || is_codec_report {
         attach_console_if_cli();
         println!("=================================================");
         println!("   NANOCORD - Ultra-Hardcoded Native Streamer    ");
         println!("=================================================");
+    }
+
+    if is_codec_report {
+        run_codec_report();
+        return Ok(());
     }
 
     if is_test_capture {
@@ -151,6 +157,44 @@ fn main() -> eframe::Result<()> {
     res
 }
 
+/// `--codecs`: отчёт о том, что умеет аппаратный энкодер на этой машине.
+///
+/// Открывает короткоживущую NVENC-сессию без захвата экрана, поэтому работает и
+/// без DXGI Desktop Duplication (например, по SSH/RDP). Результат печатается и
+/// дублируется в `codec_report.txt` — у GUI-подсистемы не всегда есть консоль.
+fn run_codec_report() {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push("NVENC codec capability report".to_string());
+    lines.push("-".repeat(50));
+
+    match nvenc::probe_available_codecs() {
+        Ok(codecs) => {
+            if codecs.is_empty() {
+                lines.push("NVENC opened a session but reported no supported codecs".to_string());
+            } else {
+                let names = codecs
+                    .iter()
+                    .map(|codec| codec.name())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                lines.push(format!("Supported codecs: {names}"));
+                match nvenc::choose_codec(&codecs, CodecPreference::Auto) {
+                    Some(codec) => lines.push(format!("Auto selection : {}", codec.name())),
+                    None => lines.push("Auto selection : none".to_string()),
+                }
+                if !codecs.contains(&VideoCodec::Hevc) {
+                    lines.push("HEVC is absent => H.264 fallback path will be used".to_string());
+                }
+            }
+        }
+        Err(e) => lines.push(format!("NVENC unavailable: {e}")),
+    }
+
+    let report = lines.join("\n");
+    println!("\n{report}");
+    let _ = std::fs::write("codec_report.txt", format!("{report}\n"));
+}
+
 fn attach_console_if_cli() {
     unsafe {
         type AttachConsoleFn = unsafe extern "system" fn(u32) -> i32;
@@ -184,7 +228,7 @@ fn run_cli_capture(cq_quality: u8, max_bitrate_mbps: u32) {
         capture.width, capture.height
     );
 
-    println!("[2/2] Initializing NVENC H.265 (HEVC) CQ-VBR Hardware Encoder...");
+    println!("[2/2] Initializing NVENC CQ-VBR hardware encoder (HEVC if supported, else H.264)...");
     let mut encoder = match NvencEncoder::new(
         &capture.device,
         capture.width,
@@ -198,6 +242,7 @@ fn run_cli_capture(cq_quality: u8, max_bitrate_mbps: u32) {
             return;
         }
     };
+    println!("       -> Active codec: {}", encoder.codec().name());
 
     println!("\nCapturing and encoding live desktop frames...");
 
@@ -208,8 +253,9 @@ fn run_cli_capture(cq_quality: u8, max_bitrate_mbps: u32) {
                 match encoder.encode_texture(&texture, &capture.context, is_keyframe) {
                     Ok(nal_bytes) => {
                         println!(
-                            "  [Frame #{:02}] Encoded HEVC size: {} bytes ({})",
+                            "  [Frame #{:02}] Encoded {} size: {} bytes ({})",
                             i,
+                            encoder.codec().short_name(),
                             nal_bytes.len(),
                             if is_keyframe { "Keyframe / IDR" } else { "P-frame" }
                         );
@@ -286,8 +332,9 @@ fn run_synthetic_test(cq_quality: u8, max_bitrate_mbps: u32) {
         let is_keyframe = i == 1;
         let nal_bytes = encoder.encode_texture(&tex, &ctx, is_keyframe).expect("Encoding failed");
         println!(
-            "  [Frame #{:02}] Encoded HEVC size: {} bytes ({})",
+            "  [Frame #{:02}] Encoded {} size: {} bytes ({})",
             i,
+            encoder.codec().short_name(),
             nal_bytes.len(),
             if is_keyframe { "Keyframe / IDR" } else { "P-frame" }
         );
