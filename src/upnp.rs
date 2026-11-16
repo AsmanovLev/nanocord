@@ -248,14 +248,66 @@ fn soap(
     )
 }
 
+/// Порты, на которых домашние роутеры держат описание IGD.
+/// 49152 — стандарт TR-064 и самый частый; остальные — запасные варианты.
+const IGD_PORTS: [u16; 5] = [49152, 5000, 2869, 80, 8080];
+
+/// Кандидаты в адрес шлюза, когда SSDP молчит.
+///
+/// Мультикаст нередко режется (Windows Firewall, изоляция клиентов на Wi-Fi,
+/// IGMP snooping), но само HTTP-описание по адресу шлюза доступно. Адрес берём
+/// из подсети локального интерфейса: .1 и .254 — почти все домашние роутеры.
+fn candidate_gateways() -> Vec<Ipv4Addr> {
+    let mut out = Vec::new();
+    if let Some(ip) = local_ipv4() {
+        let o = ip.octets();
+        for host in [1u8, 254u8] {
+            let candidate = Ipv4Addr::new(o[0], o[1], o[2], host);
+            if !out.contains(&candidate) {
+                out.push(candidate);
+            }
+        }
+    }
+    for fallback in [Ipv4Addr::new(192, 168, 0, 1), Ipv4Addr::new(192, 168, 1, 1)] {
+        if !out.contains(&fallback) {
+            out.push(fallback);
+        }
+    }
+    out
+}
+
+/// Ищет IGD по HTTP, без SSDP.
+fn http_discover(timeout: Duration) -> Option<Gateway> {
+    for gateway_ip in candidate_gateways() {
+        for port in IGD_PORTS {
+            let url = format!("http://{gateway_ip}:{port}/rootDesc.xml");
+            let Ok(xml) = http_request(&url, "GET", &[], "", timeout) else {
+                continue;
+            };
+            if let Some(gateway) = parse_control_url(&xml) {
+                return Some(gateway);
+            }
+        }
+    }
+    None
+}
+
 /// Находит шлюз и читает его описание.
 pub fn discover(timeout: Duration) -> Result<Gateway, String> {
-    let location = ssdp_discover(timeout)
-        .ok_or_else(|| "роутер не ответил на SSDP (UPnP выключен или запрещён)".to_string())?;
-    let xml = http_request(&location, "GET", &[], "", timeout)
-        .map_err(|e| format!("описание шлюза недоступно: {e}"))?;
-    parse_control_url(&xml)
-        .ok_or_else(|| "в описании шлюза нет WANIPConnection/WANPPPConnection".to_string())
+    if let Some(location) = ssdp_discover(timeout) {
+        let xml = http_request(&location, "GET", &[], "", timeout)
+            .map_err(|e| format!("описание шлюза недоступно: {e}"))?;
+        if let Some(gateway) = parse_control_url(&xml) {
+            return Ok(gateway);
+        }
+    }
+
+    // SSDP молчит — пробуем HTTP напрямую. Без этого на сетях, где режется
+    // мультикаст, UPnP считался «выключенным», хотя роутер его поддерживает.
+    http_discover(timeout).ok_or_else(|| {
+        "шлюз UPnP не найден ни по SSDP, ни по HTTP (UPnP выключен на роутере или сеть его блокирует)"
+            .to_string()
+    })
 }
 
 /// Внешний IP по данным роутера (без обращения к внешним сервисам).

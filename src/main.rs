@@ -35,6 +35,7 @@ fn main() -> eframe::Result<()> {
     let is_codec_report = args.iter().any(|a| a == "--codecs");
     let is_nvenc_probe = args.iter().any(|a| a == "--nvenc-probe");
     let is_test_mf = args.iter().any(|a| a == "--test-mf");
+    let listen_arg = args.iter().position(|a| a == "--listen-test");
     let upnp_arg = args.iter().position(|a| a == "--upnp");
 
     if is_test_mode
@@ -45,6 +46,7 @@ fn main() -> eframe::Result<()> {
         || is_codec_report
         || is_nvenc_probe
         || is_test_mf
+        || listen_arg.is_some()
         || upnp_arg.is_some()
     {
         attach_console_if_cli();
@@ -112,6 +114,15 @@ fn main() -> eframe::Result<()> {
 
     if is_test_mf {
         run_mf_test();
+        return Ok(());
+    }
+
+    if let Some(pos) = listen_arg {
+        let port = args
+            .get(pos + 1)
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(48120);
+        run_listen_test(port);
         return Ok(());
     }
 
@@ -292,47 +303,106 @@ fn run_codec_report() {
 /// Печатает, нашёлся ли шлюз, какой у него внешний адрес и согласился ли он
 /// открыть порт. Роутеры отказывают по-разному, и код ошибки UPnP в логе
 /// говорит больше, чем «не получилось».
+/// `--listen-test <port>`: слушает порт в этом же процессе, чтобы проверять
+/// доступность извне. Отдельный процесс не годится: правило Windows Firewall
+/// привязано к nanocord.exe, а не к тому, кто ещё решит послушать порт.
+fn run_listen_test(port: u16) {
+    use std::io::{Read, Write};
+    let report = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("listen_report.txt")))
+        .unwrap_or_else(|| std::path::PathBuf::from("listen_report.txt"));
+
+    let listener = match std::net::TcpListener::bind(("0.0.0.0", port)) {
+        Ok(listener) => listener,
+        Err(e) => {
+            let _ = std::fs::write(&report, format!("bind failed: {e}\n"));
+            return;
+        }
+    };
+    let _ = std::fs::write(&report, format!("listening on 0.0.0.0:{port}\n"));
+
+    let _ = listener.set_nonblocking(false);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+    while std::time::Instant::now() < deadline {
+        listener.set_nonblocking(true).ok();
+        match listener.accept() {
+            Ok((mut stream, peer)) => {
+                let mut buf = [0u8; 128];
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let read = stream.read(&mut buf).unwrap_or(0);
+                let text = String::from_utf8_lossy(&buf[..read]).to_string();
+                let _ = stream.write_all(b"nanocord-listen-ok\n");
+                let _ = std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&report)
+                    .and_then(|mut f| {
+                        use std::io::Write as _;
+                        writeln!(f, "accepted {peer} got={text:?}")
+                    });
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
+        }
+    }
+}
+
 fn run_upnp_probe(port: u16) {
-    println!("UPnP check for TCP port {port}");
+    // Отчёт в файл: у GUI-сборки stdout при перенаправлении теряется, а через
+    // SSH видно только файлы.
+    let report = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("upnp_report.txt")))
+        .unwrap_or_else(|| std::path::PathBuf::from("upnp_report.txt"));
+    let mut lines: Vec<String> = Vec::new();
+    let mut push = |text: String| {
+        println!("{text}");
+        lines.push(text);
+    };
+
+    push(format!("UPnP check for TCP port {port}"));
     match nanocord::upnp::local_ipv4() {
-        Some(ip) => println!("  local IPv4    : {ip}"),
-        None => println!("  local IPv4    : не определён"),
+        Some(ip) => push(format!("  local IPv4    : {ip}")),
+        None => push("  local IPv4    : не определён".to_string()),
     }
 
-    match nanocord::upnp::discover(std::time::Duration::from_secs(3)) {
+    match nanocord::upnp::discover(std::time::Duration::from_secs(4)) {
         Ok(gateway) => {
-            println!("  gateway       : {}", gateway.control_url);
-            println!("  service       : {}", gateway.service_type);
-            match nanocord::upnp::external_ip(&gateway, std::time::Duration::from_secs(3)) {
-                Ok(ip) => println!("  external IPv4 : {ip}"),
-                Err(e) => println!("  external IPv4 : {e}"),
+            push(format!("  gateway       : {}", gateway.control_url));
+            push(format!("  service       : {}", gateway.service_type));
+            match nanocord::upnp::external_ip(&gateway, std::time::Duration::from_secs(4)) {
+                Ok(ip) => push(format!("  external IPv4 : {ip}")),
+                Err(e) => push(format!("  external IPv4 : {e}")),
             }
         }
         Err(e) => {
-            println!("  gateway       : {e}");
+            push(format!("  gateway       : {e}"));
+            let _ = std::fs::write(&report, format!("{}\n", lines.join("\n")));
             return;
         }
     }
 
     match nanocord::upnp::ensure_mapping(port, "nanocord") {
         Ok(mapping) => {
-            println!(
+            push(format!(
                 "  mapping       : TCP {} -> {}:{} OK",
                 mapping.external_port,
                 nanocord::upnp::local_ipv4()
                     .map(|ip| ip.to_string())
                     .unwrap_or_else(|| "?".to_string()),
                 mapping.internal_port
-            );
+            ));
             if mapping.external_ip != "?" {
-                println!(
+                push(format!(
                     "  connect with  : {}:{}",
                     mapping.external_ip, mapping.external_port
-                );
+                ));
             }
         }
-        Err(e) => println!("  mapping       : {e}"),
+        Err(e) => push(format!("  mapping       : {e}")),
     }
+
+    let _ = std::fs::write(&report, format!("{}\n", lines.join("\n")));
 }
 
 /// `--test-mf`: кодирование через Media Foundation и контрольная расшифровка
