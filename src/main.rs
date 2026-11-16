@@ -123,12 +123,14 @@ fn main() -> eframe::Result<()> {
 
     if is_loopback_test {
         run_loopback_test();
-        return Ok(());
+        // Сетевые потоки держат сокеты и не дают main вернуться: процесс
+        // оставался жить, занимая порт и файл exe.
+        std::process::exit(0);
     }
 
     if is_shot_test {
         run_shot_test();
-        return Ok(());
+        std::process::exit(0);
     }
 
     if let Some(pos) = listen_arg {
@@ -528,7 +530,9 @@ fn run_loopback_test() {
         .unwrap_or_else(|| std::path::PathBuf::from("loopback_report.txt"));
     let mut lines: Vec<String> = Vec::new();
 
-    let port = 41777u16;
+    // Порт из диапазона, который не занимают другие тесты: на 41777 остался
+    // висеть процесс старой сборки, и новый экземпляр не мог занять порт.
+    let port = 41791u16;
     let code = "LBT".to_string();
 
     let server = nanocord::network::P2PNetworkServer::start(port, code.clone());
