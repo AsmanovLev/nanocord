@@ -562,20 +562,39 @@ impl P2PNetworkServer {
             // Ошибки bind раньше отбрасывались через .ok(): в логе оставалось
             // «не поднялось», и нельзя было понять почему — занято, запрещено
             // политикой или порт внутри зарезервированного Windows диапазона.
-            let (l_v6, err_v6) = match TcpListener::bind(format!("[::]:{}", port)) {
-                Ok(l) => {
-                    let _ = l.set_nonblocking(true);
-                    (Some(l), String::new())
+            // Порт может быть занят прошлым экземпляром или висеть в TIME_WAIT
+            // после быстрого перезапуска — в этом случае единичный bind падает с
+            // 10048, хотя через несколько секунд всё свободно. Поэтому пробуем
+            // несколько раз, прежде чем сдаться.
+            let mut l_v6 = None;
+            let mut err_v6 = String::new();
+            let mut l_v4 = None;
+            let mut err_v4 = String::new();
+            for attempt in 1..=6u32 {
+                match TcpListener::bind(format!("[::]:{}", port)) {
+                    Ok(l) => {
+                        let _ = l.set_nonblocking(true);
+                        l_v6 = Some(l);
+                        err_v6.clear();
+                    }
+                    Err(e) => err_v6 = format!("{e}"),
                 }
-                Err(e) => (None, format!("{e}")),
-            };
-            let (l_v4, err_v4) = match TcpListener::bind(format!("0.0.0.0:{}", port)) {
-                Ok(l) => {
-                    let _ = l.set_nonblocking(true);
-                    (Some(l), String::new())
+                match TcpListener::bind(format!("0.0.0.0:{}", port)) {
+                    Ok(l) => {
+                        let _ = l.set_nonblocking(true);
+                        l_v4 = Some(l);
+                        err_v4.clear();
+                    }
+                    Err(e) => err_v4 = format!("{e}"),
                 }
-                Err(e) => (None, format!("{e}")),
-            };
+                if l_v6.is_some() || l_v4.is_some() {
+                    break;
+                }
+                crate::diag::log(&format!(
+                    "net: bind attempt {attempt} on port {port} failed: {err_v4}"
+                ));
+                thread::sleep(Duration::from_millis(800));
+            }
             crate::diag::log(&format!(
                 "net: server bind port={} v6={}{} v4={}{}",
                 port,
@@ -589,7 +608,8 @@ impl P2PNetworkServer {
                 // Частая причина на Windows — порт попал в зарезервированный
                 // диапазон (Hyper-V/WSL/Docker): netstat пуст, bind запрещён.
                 crate::diag::log(
-                    "net: hint — проверь `netsh int ipv4 show excludedportrange protocol=tcp` и выбери свободный порт",
+                    "net: hint — порт занят или зарезервирован. Смотреть надо в Windows, не в WSL: \
+                     PowerShell `Get-NetTCPConnection -LocalPort <port>` и `tasklist | findstr nanocord`",
                 );
                 if let Ok(mut st) = status_clone.write() {
                     *st = format!(
