@@ -2304,6 +2304,31 @@ impl eframe::App for NanocordApp {
                             crate::update::check_and_install();
                         }
 
+                        // Прогресс загрузки: без него «скачиваю…» выглядит
+                        // одинаково и когда идёт, и когда всё встало.
+                        if let Some((done, total)) = crate::update::progress() {
+                            let fraction = if total > 0 {
+                                (done as f32 / total as f32).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            let text = if total > 0 {
+                                format!(
+                                    "{:.0}% · {:.1}/{:.1} МБ",
+                                    fraction * 100.0,
+                                    done as f64 / 1_048_576.0,
+                                    total as f64 / 1_048_576.0
+                                )
+                            } else {
+                                format!("{:.1} МБ", done as f64 / 1_048_576.0)
+                            };
+                            ui.add(
+                                egui::ProgressBar::new(fraction)
+                                    .desired_width(170.0)
+                                    .text(text),
+                            );
+                        }
+
                         ui.add_space(14.0);
 
                         let tab_lobby_title = if is_in_room {

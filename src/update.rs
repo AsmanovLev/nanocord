@@ -26,6 +26,24 @@ pub fn status() -> String {
         .unwrap_or_default()
 }
 
+/// Скачано и всего байт — пока идёт загрузка.
+fn progress_slot() -> &'static std::sync::Mutex<Option<(u64, u64)>> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<(u64, u64)>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Прогресс загрузки для интерфейса: `None`, когда ничего не качается.
+pub fn progress() -> Option<(u64, u64)> {
+    progress_slot().lock().ok().and_then(|p| *p)
+}
+
+fn set_progress(value: Option<(u64, u64)>) {
+    if let Ok(mut slot) = progress_slot().lock() {
+        *slot = value;
+    }
+}
+
 fn set_status(text: &str) {
     if let Ok(mut s) = status_slot().lock() {
         *s = text.to_string();
@@ -42,17 +60,53 @@ fn http_get(url: &str) -> Result<String, String> {
     resp.into_string().map_err(|e| format!("чтение: {}", e))
 }
 
-fn http_download(url: &str, path: &Path) -> Result<(), String> {
+fn http_download(url: &str, path: &Path, version: &str) -> Result<(), String> {
     let resp = ureq::get(url)
         .set("User-Agent", "nanocord")
         .timeout(Duration::from_secs(120))
         .call()
         .map_err(|e| format!("запрос: {}", e))?;
 
+    // Размер нужен для процентов: без него пользователь видит «скачиваю…»
+    // и не понимает, идёт дело или загрузка встала.
+    let total: u64 = resp
+        .header("Content-Length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    set_progress(Some((0, total)));
+
     let mut reader = resp.into_reader();
     let mut file = std::fs::File::create(path).map_err(|e| format!("файл: {}", e))?;
-    std::io::copy(&mut reader, &mut file).map_err(|e| format!("запись: {}", e))?;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut done: u64 = 0;
+    let mut last_reported = 0u64;
+    loop {
+        let read = std::io::Read::read(&mut reader, &mut buf).map_err(|e| format!("чтение: {}", e))?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buf[..read]).map_err(|e| format!("запись: {}", e))?;
+        done += read as u64;
+        set_progress(Some((done, total)));
+        // В журнал — по десятым долям, чтобы прогресс был виден и без UI.
+        if total > 0 && done - last_reported >= total / 10 {
+            last_reported = done;
+            crate::diag::log(&format!(
+                "update: скачивание v{version} {}% ({:.1} из {:.1} МБ)",
+                done * 100 / total,
+                done as f64 / 1_048_576.0,
+                total as f64 / 1_048_576.0
+            ));
+            set_status(&format!(
+                "скачиваю v{version}… {}% ({:.1}/{:.1} МБ)",
+                done * 100 / total,
+                done as f64 / 1_048_576.0,
+                total as f64 / 1_048_576.0
+            ));
+        }
+    }
     let _ = file.flush();
+    set_progress(None);
     Ok(())
 }
 
@@ -88,7 +142,7 @@ fn run(install: bool) {
         }
     };
 
-    let tag = match extract(&body, "\"tag_name\":\"") {
+    let tag = match extract(&body, "\"tag_name\"") {
         Some(t) => t,
         None => {
             crate::diag::log("update: в ответе нет tag_name (нет релизов?)");
@@ -123,7 +177,8 @@ fn run(install: bool) {
     let dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
     let new_exe = dir.join("nanocord.new.exe");
 
-    if let Err(e) = http_download(&download, &new_exe) {
+    if let Err(e) = http_download(&download, &new_exe, &latest) {
+        set_progress(None);
         crate::diag::log(&format!("update: скачать не удалось ({})", e));
         return;
     }
@@ -157,30 +212,46 @@ fn run(install: bool) {
     }
 }
 
+/// Ищет в JSON релиза ссылку на ассет с расширением .exe.
 fn pick_exe_asset(body: &str) -> Option<String> {
-    let key = "\"browser_download_url\":\"";
     let mut rest = body;
-    while let Some(start) = rest.find(key) {
-        let after = &rest[start + key.len()..];
-        if let Some(end) = after.find('"') {
-            let url = &after[..end];
-            if url.to_ascii_lowercase().ends_with(".exe") {
-                return Some(url.to_string());
+    while let Some(value) = extract(rest, "\"browser_download_url\"") {
+        if value.to_ascii_lowercase().ends_with(".exe") {
+            return Some(value);
+        }
+        let next = rest.find(&value)? + value.len();
+        if next >= rest.len() {
+            break;
+        }
+        rest = &rest[next..];
+    }
+    None
+}
+
+/// Достаёт строковое значение поля JSON.
+///
+/// GitHub отдаёт pretty-printed JSON с пробелом после двоеточия
+/// (`"tag_name": "v0.3.5"`), а поиск по точному `"tag_name":"` его не находил:
+/// апдейтер считал, что новых релизов нет.
+fn extract(body: &str, key: &str) -> Option<String> {
+    let mut rest = body;
+    while let Some(pos) = rest.find(key) {
+        let after_key = &rest[pos + key.len()..];
+        let trimmed = after_key.trim_start();
+        if let Some(stripped) = trimmed.strip_prefix(':') {
+            let value = stripped.trim_start();
+            if let Some(stripped) = value.strip_prefix('"') {
+                if let Some(end) = stripped.find('"') {
+                    return Some(stripped[..end].to_string());
+                }
             }
         }
-        rest = &after[..];
+        rest = after_key;
     }
-    // Если имён с .exe нет — годится единственный ассет любого вида.
-    extract(body, key)
+    None
 }
 
-fn extract(body: &str, key: &str) -> Option<String> {
-    let start = body.find(key)? + key.len();
-    let rest = &body[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
-}
-
+/// Сравнение версий по компонентам: 0.3.10 новее 0.3.9.
 fn is_newer(latest: &str, current: &str) -> bool {
     let parse = |v: &str| -> Vec<u32> { v.split('.').map(|p| p.parse().unwrap_or(0)).collect() };
     let a = parse(latest);
@@ -209,11 +280,19 @@ mod tests {
 
     #[test]
     fn json_field_extraction() {
-        let body = r#"{"tag_name":"v9.9.9","assets":[{"browser_download_url":"https://x/y.exe"}]}"#;
-        assert_eq!(extract(body, "\"tag_name\":\""), Some("v9.9.9".to_string()));
-        assert_eq!(
-            extract(body, "\"browser_download_url\":\""),
-            Some("https://x/y.exe".to_string())
-        );
+        let compact = r#"{"tag_name":"v9.9.9","assets":[{"browser_download_url":"https://x/y.exe"}]}"#;
+        assert_eq!(extract(compact, "\"tag_name\""), Some("v9.9.9".to_string()));
+        assert_eq!(pick_exe_asset(compact), Some("https://x/y.exe".to_string()));
+
+        // Именно так отвечает api.github.com — с пробелом после двоеточия.
+        let pretty = r#"{
+  "tag_name": "v0.3.5",
+  "assets": [
+    { "name": "nanocord-0.3.5.exe", "browser_download_url": "https://x/a.zip" },
+    { "name": "nanocord-0.3.5.exe", "browser_download_url": "https://x/b.exe" }
+  ]
+}"#;
+        assert_eq!(extract(pretty, "\"tag_name\""), Some("v0.3.5".to_string()));
+        assert_eq!(pick_exe_asset(pretty), Some("https://x/b.exe".to_string()));
     }
 }
