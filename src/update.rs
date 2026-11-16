@@ -57,6 +57,12 @@ fn http_download(url: &str, path: &Path) -> Result<(), String> {
 }
 
 pub fn check_and_install() {
+    // Тестовая сборка не должна сама себя подменять релизом с GitHub:
+    // NANOCORD_NO_UPDATE=1 отключает проверку полностью.
+    if std::env::var("NANOCORD_NO_UPDATE").is_ok() {
+        crate::diag::log("update: disabled by NANOCORD_NO_UPDATE");
+        return;
+    }
     thread::spawn(|| {
         let current = env!("CARGO_PKG_VERSION");
         let url = format!("https://api.github.com/repos/{}/releases/latest", REPO);
