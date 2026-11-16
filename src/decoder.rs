@@ -49,6 +49,26 @@ fn out_buffer_bytes(transform: &IMFTransform, is_rgb: bool, width: u32, height: 
     }
 }
 
+/// Сколько строк добавляет выравнивание поверхности.
+///
+/// Media Foundation отдаёт кадр в выровненной поверхности (1080 -> 1088) и
+/// кладёт картинку вниз, оставляя сверху полосу неописанной памяти: в YUV это
+/// Y=U=V=0, то есть чисто зелёный. Через неё и появлялась зелёная полоса сверху,
+/// хотя ошибка цвета по всему кадру была ниже единицы.
+fn output_pad_rows(transform: &IMFTransform, height: u32) -> usize {
+    unsafe {
+        if let Ok(out_type) = transform.GetOutputCurrentType(0) {
+            if let Ok(size) = out_type.GetUINT64(&MF_MT_FRAME_SIZE) {
+                let surface_h = size as u32;
+                if surface_h > height && surface_h <= height * 2 {
+                    return (surface_h - height) as usize;
+                }
+            }
+        }
+    }
+    0
+}
+
 /// Шаг строки для случая, когда буфер не отдаёт `IMF2DBuffer`.
 ///
 /// Длину буфера использовать нельзя: Media Foundation выравнивает кадр по
@@ -263,11 +283,14 @@ impl HevcDecoder {
                                     // буфера давал неверный шаг, и картинка уезжала
                                     // диагональными полосами.
                                     let stride = pitch.max(0) as usize;
+                                    let pad_rows = output_pad_rows(&self.transform, height);
                                     let cur_len = media_buf.GetCurrentLength().unwrap_or(0);
                                     let need = if self.is_rgb {
-                                        (stride * height as usize).min(cur_len as usize)
+                                        (stride * (height as usize + pad_rows))
+                                            .min(cur_len as usize)
                                     } else {
-                                        (stride * height as usize * 3 / 2).min(cur_len as usize)
+                                        (stride * (height as usize + pad_rows) * 3 / 2)
+                                            .min(cur_len as usize)
                                     };
                                     let expect = decoder_out_bytes(self.is_rgb, width, height);
                                     crate::diag::log_once(&format!(
@@ -285,7 +308,7 @@ impl HevcDecoder {
                                                 self.rgba_buffer = vec![0u8; need_rgba];
                                             }
                                             for y in 0..height as usize {
-                                                let src_row = y * stride;
+                                                let src_row = (y + pad_rows) * stride;
                                                 let dst_row = y * width as usize * 4;
                                                 for x in 0..width as usize {
                                                     let s4 = src_row + x * 4;
@@ -299,10 +322,11 @@ impl HevcDecoder {
                                                 }
                                             }
                                         } else {
-                                            nv12_to_rgba_strided(
+                                            nv12_to_rgba_strided_padded(
                                                 width as usize,
                                                 height as usize,
                                                 stride,
+                                                pad_rows,
                                                 data,
                                                 &mut self.rgba_buffer,
                                             );
@@ -322,7 +346,8 @@ impl HevcDecoder {
                                         len, stride, width, height
                                     ));
                                     let nv12_slice = std::slice::from_raw_parts(p_nv12, len as usize);
-                                    nv12_to_rgba_strided(width as usize, height as usize, stride, nv12_slice, &mut self.rgba_buffer);
+                                    let pad_rows = output_pad_rows(&self.transform, height);
+                                    nv12_to_rgba_strided_padded(width as usize, height as usize, stride, pad_rows, nv12_slice, &mut self.rgba_buffer);
                                     let _ = media_buf.Unlock();
                                     res_frame = Some((width, height, self.rgba_buffer.clone()));
                                 }
@@ -581,11 +606,14 @@ impl H264Decoder {
                                     // буфера давал неверный шаг, и картинка уезжала
                                     // диагональными полосами.
                                     let stride = pitch.max(0) as usize;
+                                    let pad_rows = output_pad_rows(&self.transform, height);
                                     let cur_len = media_buf.GetCurrentLength().unwrap_or(0);
                                     let need = if self.is_rgb {
-                                        (stride * height as usize).min(cur_len as usize)
+                                        (stride * (height as usize + pad_rows))
+                                            .min(cur_len as usize)
                                     } else {
-                                        (stride * height as usize * 3 / 2).min(cur_len as usize)
+                                        (stride * (height as usize + pad_rows) * 3 / 2)
+                                            .min(cur_len as usize)
                                     };
                                     let expect = decoder_out_bytes(self.is_rgb, width, height);
                                     crate::diag::log_once(&format!(
@@ -603,7 +631,7 @@ impl H264Decoder {
                                                 self.rgba_buffer = vec![0u8; need_rgba];
                                             }
                                             for y in 0..height as usize {
-                                                let src_row = y * stride;
+                                                let src_row = (y + pad_rows) * stride;
                                                 let dst_row = y * width as usize * 4;
                                                 for x in 0..width as usize {
                                                     let s4 = src_row + x * 4;
@@ -617,10 +645,11 @@ impl H264Decoder {
                                                 }
                                             }
                                         } else {
-                                            nv12_to_rgba_strided(
+                                            nv12_to_rgba_strided_padded(
                                                 width as usize,
                                                 height as usize,
                                                 stride,
+                                                pad_rows,
                                                 data,
                                                 &mut self.rgba_buffer,
                                             );
@@ -640,7 +669,8 @@ impl H264Decoder {
                                         len, stride, width, height
                                     ));
                                     let nv12_slice = std::slice::from_raw_parts(p_nv12, len as usize);
-                                    nv12_to_rgba_strided(width as usize, height as usize, stride, nv12_slice, &mut self.rgba_buffer);
+                                    let pad_rows = output_pad_rows(&self.transform, height);
+                                    nv12_to_rgba_strided_padded(width as usize, height as usize, stride, pad_rows, nv12_slice, &mut self.rgba_buffer);
                                     let _ = media_buf.Unlock();
                                     res_frame = Some((width, height, self.rgba_buffer.clone()));
                                 }
@@ -698,13 +728,27 @@ impl H264Decoder {
 /// Быстрое целочисленное преобразование цветового пространства NV12 (Y-plane + interleaved UV) в RGBA8888 с учетом аппаратного stride
 #[inline]
 pub fn nv12_to_rgba_strided(width: usize, height: usize, stride: usize, nv12: &[u8], rgba: &mut [u8]) {
+    nv12_to_rgba_strided_padded(width, height, stride, 0, nv12, rgba)
+}
+
+/// То же, но с учётом выравнивания: `pad` строк сверху не принадлежат кадру.
+pub fn nv12_to_rgba_strided_padded(
+    width: usize,
+    height: usize,
+    stride: usize,
+    pad: usize,
+    nv12: &[u8],
+    rgba: &mut [u8],
+) {
     let y_plane_size = stride * height;
-    if nv12.len() < y_plane_size + (stride * height / 2) || rgba.len() < width * height * 4 {
+    let base = pad * stride;
+    if nv12.len() < base + y_plane_size + (stride * height / 2) || rgba.len() < width * height * 4 {
         return;
     }
 
-    let y_plane = &nv12[..y_plane_size];
-    let uv_plane = &nv12[y_plane_size..];
+    let y_plane = &nv12[base..base + y_plane_size];
+    // Плоскость UV идёт сразу за всей плоскостью Y выровненной поверхности.
+    let uv_plane = &nv12[base + y_plane_size..];
 
     for y in 0..height {
         let y_row = y * stride;

@@ -37,6 +37,7 @@ fn main() -> eframe::Result<()> {
     let is_test_mf = args.iter().any(|a| a == "--test-mf");
     let listen_arg = args.iter().position(|a| a == "--listen-test");
     let is_loopback_test = args.iter().any(|a| a == "--loopback-test");
+    let is_shot_test = args.iter().any(|a| a == "--test-shot");
     let upnp_arg = args.iter().position(|a| a == "--upnp");
 
     if is_test_mode
@@ -49,6 +50,7 @@ fn main() -> eframe::Result<()> {
         || is_test_mf
         || listen_arg.is_some()
         || is_loopback_test
+        || is_shot_test
         || upnp_arg.is_some()
     {
         attach_console_if_cli();
@@ -121,6 +123,11 @@ fn main() -> eframe::Result<()> {
 
     if is_loopback_test {
         run_loopback_test();
+        return Ok(());
+    }
+
+    if is_shot_test {
+        run_shot_test();
         return Ok(());
     }
 
@@ -321,6 +328,192 @@ fn run_codec_report() {
 /// Печатает, нашёлся ли шлюз, какой у него внешний адрес и согласился ли он
 /// открыть порт. Роутеры отказывают по-разному, и код ошибки UPnP в логе
 /// говорит больше, чем «не получилось».
+/// Средняя ошибка по каналам, средний цвет верхних 8 строк и середины.
+fn color_metrics(
+    source: &[u8],
+    decoded: &[u8],
+    width: usize,
+    height: usize,
+) -> (f32, (u8, u8, u8), (u8, u8, u8)) {
+    let band = |rows: std::ops::Range<usize>| {
+        let mut acc = [0u64; 3];
+        let mut count = 0u64;
+        for y in rows {
+            for x in 0..width {
+                let p = (y * width + x) * 4;
+                if p + 2 >= decoded.len() {
+                    continue;
+                }
+                for c in 0..3 {
+                    acc[c] += decoded[p + c] as u64;
+                }
+                count += 1;
+            }
+        }
+        let n = count.max(1);
+        (
+            (acc[0] / n) as u8,
+            (acc[1] / n) as u8,
+            (acc[2] / n) as u8,
+        )
+    };
+
+    let mut total = 0.0f64;
+    let mut counted = 0u64;
+    let pixels = (width * height).min(source.len() / 4).min(decoded.len() / 4);
+    for i in 0..pixels {
+        let p = i * 4;
+        for c in 0..3 {
+            total += (source[p + c] as f64 - decoded[p + c] as f64).abs();
+        }
+        counted += 3;
+    }
+    (
+        (total / counted.max(1) as f64) as f32,
+        band(0..8usize),
+        band((height / 2).saturating_sub(4)..(height / 2 + 4).min(height)),
+    )
+}
+
+/// `--test-shot`: один кадр рабочего стола через кодек и обратно, с дампами
+/// BMP. Нужен, чтобы видеть дефект (полоса, сдвиг цвета) на реальной картинке,
+/// а не догадываться по среднему цвету.
+fn run_shot_test() {
+    let report = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("shot_report.txt")))
+        .unwrap_or_else(|| std::path::PathBuf::from("shot_report.txt"));
+    let mut lines: Vec<String> = Vec::new();
+
+    let (width, height) = nanocord::capture::get_screen_resolution();
+    lines.push(format!("screen {width}x{height}"));
+
+    let source = match nanocord::capture::DxgiCapture::new() {
+        Ok(mut capture) => {
+            let mut frame = None;
+            for _ in 0..20 {
+                match capture.capture_preview_rgba(width, height) {
+                    Ok(Some(rgba)) => {
+                        frame = Some(rgba);
+                        break;
+                    }
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(80)),
+                    Err(e) => {
+                        lines.push(format!("capture error {:#010X} {}", e.code().0, e.message()));
+                        break;
+                    }
+                }
+            }
+            frame
+        }
+        Err(e) => {
+            lines.push(format!("DXGI init failed {:#010X}", e.code().0));
+            None
+        }
+    };
+    let source = source.or_else(|| {
+        lines.push("falling back to GDI".to_string());
+        nanocord::capture::capture_desktop_gdi(width, height)
+    });
+
+    let Some(source) = source else {
+        lines.push("no frame captured".to_string());
+        let _ = std::fs::write(&report, format!("{}\n", lines.join("\n")));
+        return;
+    };
+    nanocord::diag::dump_frame("shot_src", width, height, &source);
+
+    let mut enc = match nanocord::encoder::DesktopEncoder::create(
+        width,
+        height,
+        22,
+        8,
+        30,
+        nanocord::encoder::preset_by_index(0),
+        0b111,
+    ) {
+        Some(enc) => enc,
+        None => {
+            lines.push("no encoder".to_string());
+            let _ = std::fs::write(&report, format!("{}\n", lines.join("\n")));
+            return;
+        }
+    };
+    lines.push(format!("encoder {}", enc.label()));
+
+    let dec_subtype = match enc.codec() {
+        nanocord::nvenc::VideoCodec::Av1 => {
+            windows::Win32::Media::MediaFoundation::MFVideoFormat_AV1
+        }
+        nanocord::nvenc::VideoCodec::Hevc => {
+            windows::Win32::Media::MediaFoundation::MFVideoFormat_HEVC
+        }
+        nanocord::nvenc::VideoCodec::H264 => {
+            windows::Win32::Media::MediaFoundation::MFVideoFormat_H264
+        }
+    };
+    let mut dec = nanocord::decoder::H264Decoder::with_subtype(dec_subtype).ok();
+
+    // Кодеру нужно несколько кадров на разгон, поэтому гоним один и тот же кадр.
+    let mut decoded = None;
+    for attempt in 1..=20u32 {
+        match enc.encode_rgba_bytes(&source, attempt == 1) {
+            Ok(nal) if !nal.is_empty() => {
+                if let Some(dec) = dec.as_mut() {
+                    if let Ok(Some((w, h, out))) = dec.decode_packet(width, height, &nal) {
+                        lines.push(format!("attempt {attempt}: {w}x{h} {} bytes", out.len()));
+                        decoded = Some((w, h, out));
+                        break;
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                lines.push(format!("encode error {e:?}"));
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    if let Some((w, h, out)) = decoded {
+        nanocord::diag::dump_frame("shot_decoded", w, h, &out);
+        let (mean, top8, mid) = color_metrics(&source, &out, w as usize, h as usize);
+        lines.push(format!("mean_err={mean:.1} top8={top8:?} mid={mid:?}"));
+        lines.push(format!(
+            "source top8={:?}",
+            source_top_color(&source, w as usize)
+        ));
+    } else {
+        lines.push("nothing decoded".to_string());
+    }
+
+    for line in &lines {
+        println!("{line}");
+    }
+    let _ = std::fs::write(&report, format!("{}\n", lines.join("\n")));
+}
+
+/// Средний цвет первых восьми строк исходника.
+fn source_top_color(rgba: &[u8], width: usize) -> (u8, u8, u8) {
+    let mut acc = [0u64; 3];
+    let mut count = 0u64;
+    for y in 0..8usize {
+        for x in 0..width {
+            let p = (y * width + x) * 4;
+            if p + 2 >= rgba.len() {
+                continue;
+            }
+            for c in 0..3 {
+                acc[c] += rgba[p + c] as u64;
+            }
+            count += 1;
+        }
+    }
+    let n = count.max(1);
+    ((acc[0] / n) as u8, (acc[1] / n) as u8, (acc[2] / n) as u8)
+}
+
 /// `--loopback-test`: полный сеанс в одном процессе — рукопожатие NC03,
 /// выбор кодека по маскам, транспорт и декодирование на обеих сторонах.
 ///
@@ -639,8 +832,9 @@ fn run_mf_test() {
         for y in 0..height as usize {
             for x in 0..width as usize {
                 let p = (y * width as usize + x) * 4;
-                let shift = (frame as usize * 40) % width as usize;
-                let lit = ((x + shift) / 160) % 2 == 0;
+                // Кадр статичный: при движении декодер отстаёт на кадр и
+                // метрика цвета мерила бы задержку, а не искажение.
+                let lit = (x / 160) % 2 == 0;
                 rgba[p] = if lit { 235 } else { 20 };
                 rgba[p + 1] = if lit { 200 } else { 30 };
                 rgba[p + 2] = if lit { 120 } else { 60 };
@@ -654,10 +848,22 @@ fn run_mf_test() {
                 );
                 if let Some(dec) = dec.as_mut() {
                     match dec.decode_packet(width, height, &nal) {
-                        Ok(Some((w, h, out))) => push(
-                            &mut lines,
-                            format!("  decoded {w}x{h} {} bytes", out.len()),
-                        ),
+                        Ok(Some((w, h, out))) => {
+                            // Сравнение с исходником: «цвета съезжают» и
+                            // «зелёная полоса сверху» надо измерять, а не
+                            // обсуждать на глаз.
+                            let metrics = color_metrics(&rgba, &out, w as usize, h as usize);
+                            push(
+                                &mut lines,
+                                format!(
+                                    "  decoded {w}x{h} {} bytes; mean_err={:.1} top8={:?} mid={:?}",
+                                    out.len(),
+                                    metrics.0,
+                                    metrics.1,
+                                    metrics.2
+                                ),
+                            );
+                        }
                         Ok(None) => push(&mut lines, "  decoded: buffered".to_string()),
                         Err(e) => push(&mut lines, format!("  decode error: {e:?}")),
                     }

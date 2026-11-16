@@ -3742,6 +3742,8 @@ impl NanocordApp {
                 if let Ok(mut cfg) = self.encoder_config.write() {
                     cfg.cq_quality = self.cq_quality;
                     cfg.max_bitrate_mbps = self.max_bitrate_mbps;
+                    // Захват идёт с этой частотой — кодер обязан её объявлять.
+                    cfg.fps = self.target_fps.clamp(1, 120);
                     cfg.preset_index = match self.preset_mode {
                         PresetMode::AutoSmart | PresetMode::ManualP1 => 1,
                         PresetMode::ManualP3 => 3,

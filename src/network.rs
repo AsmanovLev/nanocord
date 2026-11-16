@@ -489,6 +489,10 @@ pub struct VideoEncoderConfig {
     pub cq_quality: u8,
     pub max_bitrate_mbps: u32,
     pub preset_index: usize,
+    /// Частота кадров, с которой идёт захват. Кодер обязан объявлять ту же:
+    /// иначе в потоке зашита одна частота, а кадры приходят с другой, и
+    /// воспроизведение «плывёт».
+    pub fps: u32,
 }
 
 impl Default for VideoEncoderConfig {
@@ -497,6 +501,7 @@ impl Default for VideoEncoderConfig {
             cq_quality: 22,
             max_bitrate_mbps: 30,
             preset_index: 1,
+            fps: 30,
         }
     }
 }
@@ -1506,8 +1511,8 @@ fn run_p2p_socket_session(
 
     let mut video_encoder: Option<crate::encoder::DesktopEncoder> = None;
     let mut camera_encoder: Option<crate::encoder::DesktopEncoder> = None;
-    let mut cur_enc_config = (0u8, 0u32, 0u32, 0u32, 0usize);
-    let mut cur_cam_config = (0u8, 0u32, 0u32, 0u32, 0usize);
+    let mut cur_enc_config = (0u8, 0u32, 0u32, 0u32, 0usize, 0u32);
+    let mut cur_cam_config = (0u8, 0u32, 0u32, 0u32, 0usize, 0u32);
     let mut frame_idr_counter = 0u32;
     let mut encode_errors = 0u32;
     let mut dumped_sent = false;
@@ -1583,8 +1588,13 @@ fn run_p2p_socket_session(
             }
         }
 
-        if let Some(pf) = pending_file.as_mut() {
-            let mut buf = vec![0u8; 64 * 1024];
+        // Файл отправляем только когда кадров в очереди нет: иначе один
+        // write_all держит сокет, и видео со звуком встают на всё время куска.
+        let video_waiting = !outbox_desktop.is_empty() || !outbox_camera.is_empty();
+        if let Some(pf) = pending_file.as_mut().filter(|_| !video_waiting) {
+            // Кусок файла не должен занимать канал целиком: 64 КБ одним
+            // write_all останавливали видео и звук на всё время записи.
+            let mut buf = vec![0u8; 16 * 1024];
             match pf.file.read(&mut buf) {
                 Ok(0) | Err(_) => {
                     let _ = send_packet(&mut writer, 9, 0, &1u32.to_le_bytes());
@@ -1612,13 +1622,14 @@ fn run_p2p_socket_session(
             // Средний цвет источника: сравнение с приёмной стороной сразу
             // показывает, позеленело/поплыло до энкодера или уже в пути.
             crate::decoder::log_frame_color("source", &frame.rgba);
-            let (cq, max_br, preset_idx) = if let Ok(cfg) = encoder_config.read() {
-                (cfg.cq_quality, cfg.max_bitrate_mbps, cfg.preset_index)
+            let (cq, max_br, preset_idx, fps) = if let Ok(cfg) = encoder_config.read() {
+                (cfg.cq_quality, cfg.max_bitrate_mbps, cfg.preset_index, cfg.fps)
             } else {
-                (22, 30, 0)
+                (22, 30, 0, 30)
             };
+            let fps = fps.clamp(1, 120);
 
-            let needed_config = (cq, max_br, frame.width, frame.height, preset_idx);
+            let needed_config = (cq, max_br, frame.width, frame.height, preset_idx, fps);
             if cur_enc_config != needed_config {
                 let preset_guid = crate::encoder::preset_by_index(preset_idx);
 
@@ -1630,7 +1641,7 @@ fn run_p2p_socket_session(
                     frame.height,
                     cq,
                     max_br,
-                    60,
+                    fps,
                     preset_guid,
                     peer_decode.load(Ordering::Relaxed),
                 );
@@ -1709,19 +1720,20 @@ fn run_p2p_socket_session(
             // Камеру тоже сжимаем. Сырой кадр 1280x720 — это 3.7 МБ, то есть
             // сотни Мбит/с; такой поток занимал канал целиком, и демонстрация
             // экрана не проходила вовсе (в логе: mbps=442 при fps=0).
-            let (cq, max_br, preset_idx) = if let Ok(cfg) = encoder_config.read() {
-                (cfg.cq_quality, cfg.max_bitrate_mbps, cfg.preset_index)
+            let (cq, max_br, preset_idx, fps) = if let Ok(cfg) = encoder_config.read() {
+                (cfg.cq_quality, cfg.max_bitrate_mbps, cfg.preset_index, cfg.fps)
             } else {
-                (22, 30, 0)
+                (22, 30, 0, 30)
             };
-            let needed = (cq, max_br, frame.width, frame.height, preset_idx);
+            let fps = fps.clamp(1, 120);
+            let needed = (cq, max_br, frame.width, frame.height, preset_idx, fps);
             if cur_cam_config != needed {
                 camera_encoder = crate::encoder::DesktopEncoder::create(
                     frame.width,
                     frame.height,
                     cq,
                     max_br,
-                    30,
+                    fps,
                     crate::encoder::preset_by_index(preset_idx),
                     peer_decode.load(Ordering::Relaxed),
                 );
