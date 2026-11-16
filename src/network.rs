@@ -567,6 +567,14 @@ impl P2PNetworkServer {
             if let Some(ref l) = l_v4 {
                 let _ = l.set_nonblocking(true);
             }
+            // Без этой строки в логе невозможно отличить «сервер не поднялся» от
+            // «никто не пришёл»: оба случая выглядят одинаково пустым логом.
+            crate::diag::log(&format!(
+                "net: server bind port={} v6={} v4={}",
+                port,
+                if l_v6.is_some() { "ok" } else { "fail" },
+                if l_v4.is_some() { "ok" } else { "fail" }
+            ));
 
             if l_v6.is_none() && l_v4.is_none() {
                 if let Ok(mut st) = status_clone.write() {
@@ -595,6 +603,7 @@ impl P2PNetworkServer {
                 }
 
                 if let Some((mut stream, addr)) = incoming {
+                    crate::diag::log(&format!("net: server accept {}", addr));
                     let _ = stream.set_nonblocking(false);
                     let _ = stream.set_nodelay(true);
                     let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
@@ -763,6 +772,13 @@ impl P2PNetworkClient {
                     };
                 }
 
+                crate::diag::log(&format!(
+                    "net: client attempt {} host={:?} port={} code_len={}",
+                    attempt + 1,
+                    host_clone,
+                    port,
+                    code_to_send.len()
+                ));
                 match client_connect_once(
                     &host_clone,
                     port,
@@ -799,6 +815,11 @@ impl P2PNetworkClient {
                         }
                     }
                     Err(message) => {
+                        crate::diag::log(&format!(
+                            "net: client attempt {} failed: {}",
+                            attempt + 1,
+                            message
+                        ));
                         if let Ok(mut st) = status_clone.write() {
                             *st = message;
                         }
@@ -814,6 +835,10 @@ impl P2PNetworkClient {
                     if let Ok(mut s) = state_clone.write() {
                         *s = SessionState::Failed;
                     }
+                    crate::diag::log(&format!(
+                        "net: client giving up after {} attempts",
+                        MAX_RECONNECT_ATTEMPTS
+                    ));
                     if let Ok(mut st) = status_clone.write() {
                         *st = "Не удалось подключиться. Проверь адрес и код комнаты.".to_string();
                     }
@@ -886,17 +911,29 @@ fn client_connect_once(
 
     let addrs: Vec<SocketAddr> = match resolve_target.to_socket_addrs() {
         Ok(iter) => iter.collect(),
-        Err(e) => return Err(format!("Ошибка адреса: {}", e)),
+        Err(e) => {
+            crate::diag::log(&format!("net: client resolve {} failed: {}", resolve_target, e));
+            return Err(format!("Ошибка адреса: {}", e));
+        }
     };
     if addrs.is_empty() {
+        crate::diag::log(&format!("net: client resolve {} gave no addresses", resolve_target));
         return Err(format!("Не удалось разрешить адрес {}", resolve_target));
     }
+    crate::diag::log(&format!(
+        "net: client target={} addrs={:?}",
+        resolve_target, addrs
+    ));
 
     let mut connected_stream = None;
     for sa in &addrs {
-        if let Ok(s) = TcpStream::connect_timeout(sa, Duration::from_secs(3)) {
-            connected_stream = Some(s);
-            break;
+        match TcpStream::connect_timeout(sa, Duration::from_secs(3)) {
+            Ok(s) => {
+                crate::diag::log(&format!("net: client connect {} ok", sa));
+                connected_stream = Some(s);
+                break;
+            }
+            Err(e) => crate::diag::log(&format!("net: client connect {} failed: {}", sa, e)),
         }
     }
 
@@ -923,6 +960,10 @@ fn client_connect_once(
         return Err("Сервер разорвал соединение".to_string());
     }
 
+    crate::diag::log(&format!(
+        "net: client handshake reply={:?}",
+        String::from_utf8_lossy(&reply)
+    ));
     match &reply {
         b"NCOK" => {
             if let Ok(mut st) = status.write() {
