@@ -36,6 +36,7 @@ fn main() -> eframe::Result<()> {
     let is_nvenc_probe = args.iter().any(|a| a == "--nvenc-probe");
     let is_test_mf = args.iter().any(|a| a == "--test-mf");
     let listen_arg = args.iter().position(|a| a == "--listen-test");
+    let is_loopback_test = args.iter().any(|a| a == "--loopback-test");
     let upnp_arg = args.iter().position(|a| a == "--upnp");
 
     if is_test_mode
@@ -47,6 +48,7 @@ fn main() -> eframe::Result<()> {
         || is_nvenc_probe
         || is_test_mf
         || listen_arg.is_some()
+        || is_loopback_test
         || upnp_arg.is_some()
     {
         attach_console_if_cli();
@@ -114,6 +116,11 @@ fn main() -> eframe::Result<()> {
 
     if is_test_mf {
         run_mf_test();
+        return Ok(());
+    }
+
+    if is_loopback_test {
+        run_loopback_test();
         return Ok(());
     }
 
@@ -314,6 +321,111 @@ fn run_codec_report() {
 /// Печатает, нашёлся ли шлюз, какой у него внешний адрес и согласился ли он
 /// открыть порт. Роутеры отказывают по-разному, и код ошибки UPnP в логе
 /// говорит больше, чем «не получилось».
+/// `--loopback-test`: полный сеанс в одном процессе — рукопожатие NC03,
+/// выбор кодека по маскам, транспорт и декодирование на обеих сторонах.
+///
+/// Это единственная проверка, которая ловит разрыв именно между частями:
+/// энкодер сам по себе (`--test-mf`) может работать, а сеанс — нет.
+fn run_loopback_test() {
+    use std::time::{Duration, Instant};
+
+    let report = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("loopback_report.txt")))
+        .unwrap_or_else(|| std::path::PathBuf::from("loopback_report.txt"));
+    let mut lines: Vec<String> = Vec::new();
+
+    let port = 41777u16;
+    let code = "LBT".to_string();
+
+    let server = nanocord::network::P2PNetworkServer::start(port, code.clone());
+    std::thread::sleep(Duration::from_millis(400));
+    let client = nanocord::network::P2PNetworkClient::connect(
+        "127.0.0.1".to_string(),
+        port,
+        code,
+    );
+
+    let (width, height) = (1280u32, 720u32);
+    let mut frame_a = vec![0u8; (width * height * 4) as usize];
+    let mut frame_b = vec![0u8; (width * height * 4) as usize];
+
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let mut from_client = 0u32;
+    let mut from_server = 0u32;
+    let mut bytes_from_client = 0usize;
+    let mut bytes_from_server = 0usize;
+    let mut tick = 0u32;
+
+    while Instant::now() < deadline {
+        // Кадры сдвигаются: на статичной картинке разница энкодеров не видна.
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let p = (y * width as usize + x) * 4;
+                let shift = (tick as usize * 17) % width as usize;
+                let lit = ((x + shift) / 120) % 2 == 0;
+                frame_a[p] = if lit { 240 } else { 30 };
+                frame_a[p + 1] = if lit { 190 } else { 40 };
+                frame_a[p + 2] = if lit { 90 } else { 60 };
+                frame_a[p + 3] = 255;
+                let lit_b = ((x + shift * 2) / 200) % 2 == 0;
+                frame_b[p] = if lit_b { 60 } else { 200 };
+                frame_b[p + 1] = if lit_b { 220 } else { 70 };
+                frame_b[p + 2] = if lit_b { 240 } else { 40 };
+                frame_b[p + 3] = 255;
+            }
+        }
+        tick += 1;
+
+        client
+            .outbox_desktop
+            .put(nanocord::network::OutgoingFrame {
+                width,
+                height,
+                rgba: std::sync::Arc::new(frame_a.clone()),
+            });
+        server
+            .outbox_desktop
+            .put(nanocord::network::OutgoingFrame {
+                width,
+                height,
+                rgba: std::sync::Arc::new(frame_b.clone()),
+            });
+
+        while let Ok(frame) = server.desktop_rx.try_recv() {
+            from_client += 1;
+            bytes_from_client += frame.rgba.len();
+        }
+        while let Ok(frame) = client.desktop_rx.try_recv() {
+            from_server += 1;
+            bytes_from_server += frame.rgba.len();
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+
+    let connected = client.is_connected.load(std::sync::atomic::Ordering::Relaxed)
+        && server.is_connected.load(std::sync::atomic::Ordering::Relaxed);
+    let client_codec = client.telemetry.read().map(|t| t.codec).unwrap_or(0);
+    let server_codec = server.telemetry.read().map(|t| t.codec).unwrap_or(0);
+
+    lines.push(format!("handshake: {}", if connected { "OK" } else { "FAILED" }));
+    lines.push(format!(
+        "client -> server: {from_client} frames, codec flag {client_codec}"
+    ));
+    lines.push(format!(
+        "server -> client: {from_server} frames, codec flag {server_codec}"
+    ));
+    lines.push(format!("bytes received: {bytes_from_server} / {bytes_from_client}"));
+
+    client.is_running.store(false, std::sync::atomic::Ordering::Relaxed);
+    server.is_running.store(false, std::sync::atomic::Ordering::Relaxed);
+
+    for line in &lines {
+        println!("{line}");
+    }
+    let _ = std::fs::write(&report, format!("{}\n", lines.join("\n")));
+}
+
 /// `--listen-test <port>`: слушает порт в этом же процессе, чтобы проверять
 /// доступность извне. Отдельный процесс не годится: правило Windows Firewall
 /// привязано к nanocord.exe, а не к тому, кто ещё решит послушать порт.
