@@ -63,10 +63,10 @@ fn friendly_name(activate: &IMFActivate) -> String {
 }
 
 /// Все подходящие MFT-энкодеры H.264: сначала аппаратные, потом программные.
-fn encoder_candidates() -> Vec<(IMFTransform, String)> {
+fn encoder_candidates(codec: crate::nvenc::VideoCodec) -> Vec<(IMFTransform, String)> {
     let output_info = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
-        guidSubtype: MFVideoFormat_H264,
+        guidSubtype: mf_subtype(codec),
     };
     let groups = [
         (
@@ -116,6 +116,15 @@ fn encoder_candidates() -> Vec<(IMFTransform, String)> {
     found
 }
 
+/// MF-подтип для кодека.
+fn mf_subtype(codec: crate::nvenc::VideoCodec) -> GUID {
+    match codec {
+        crate::nvenc::VideoCodec::Av1 => MFVideoFormat_AV1,
+        crate::nvenc::VideoCodec::Hevc => MFVideoFormat_HEVC,
+        crate::nvenc::VideoCodec::H264 => MFVideoFormat_H264,
+    }
+}
+
 /// Формат кадра на входе энкодера: MFT-ы принимают разное.
 #[derive(Clone, Copy, PartialEq)]
 enum InputFormat {
@@ -123,14 +132,54 @@ enum InputFormat {
     I420,
 }
 
-/// Кодировщик H.264 на Media Foundation.
-pub struct MfH264Encoder {
+/// Есть ли в системе MFT-энкодер под этот кодек.
+pub fn encoder_available(codec: crate::nvenc::VideoCodec) -> bool {
+    // Без MFStartup на этом потоке перечисление MFT возвращает пустой список —
+    // и возможный кодек ошибочно считается недоступным.
+    mf_ready().is_ok() && !encoder_candidates(codec).is_empty()
+}
+
+/// Есть ли в системе MFT-декодер под этот кодек.
+pub fn decoder_available(codec: crate::nvenc::VideoCodec) -> bool {
+    if mf_ready().is_err() {
+        return false;
+    }
+    let input_info = MFT_REGISTER_TYPE_INFO {
+        guidMajorType: MFMediaType_Video,
+        guidSubtype: mf_subtype(codec),
+    };
+    unsafe {
+        let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
+        let mut count = 0u32;
+        let result = MFTEnumEx(
+            MFT_CATEGORY_VIDEO_DECODER,
+            MFT_ENUM_FLAG_SORTANDFILTER,
+            Some(&input_info),
+            None,
+            &mut activates,
+            &mut count,
+        );
+        if !activates.is_null() {
+            for index in 0..count as usize {
+                if let Some(activate) = (*activates.add(index)).clone() {
+                    drop(activate);
+                }
+            }
+            windows::Win32::System::Com::CoTaskMemFree(Some(activates as *const _));
+        }
+        result.is_ok() && count > 0
+    }
+}
+
+/// Кодировщик видео на Media Foundation.
+pub struct MfVideoEncoder {
     transform: IMFTransform,
     width: u32,
     height: u32,
     fps: u32,
     frame_index: i64,
     label: String,
+    codec: crate::nvenc::VideoCodec,
     frame_buf: Vec<u8>,
     input_format: InputFormat,
     started: bool,
@@ -139,17 +188,23 @@ pub struct MfH264Encoder {
     output_buffer_size: u32,
 }
 
-impl MfH264Encoder {
-    pub fn new(width: u32, height: u32, fps: u32, bitrate_bps: u32) -> Result<Self> {
+impl MfVideoEncoder {
+    pub fn new(
+        codec: crate::nvenc::VideoCodec,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate_bps: u32,
+    ) -> Result<Self> {
         mf_ready()?;
-        let candidates = encoder_candidates();
+        let candidates = encoder_candidates(codec);
         if candidates.is_empty() {
-            return Err(hr(0x80004005u32 as i32)); // E_FAIL: ни одного H.264 MFT
+            return Err(hr(0x80004005u32 as i32)); // E_FAIL: нет MFT под этот кодек
         }
 
         let mut failures = Vec::new();
         for (transform, label) in candidates {
-            match Self::configure(transform, width, height, fps, bitrate_bps, label.clone()) {
+            match Self::configure(transform, codec, width, height, fps, bitrate_bps, label.clone()) {
                 Ok(mut encoder) => {
                     // Проверяем энкодер чёрным кадром сразу: у NVIDIA MFT
                     // внутри тот же сломанный NVENC, и падать лучше на старте,
@@ -157,7 +212,11 @@ impl MfH264Encoder {
                     let probe = vec![0u8; (width * height * 4) as usize];
                     match encoder.encode_rgba_bytes(&probe, true) {
                         Ok(_) => {
-                            crate::diag::log(&format!("mfenc: using {label} {}x{fps}", width));
+                            crate::diag::log(&format!(
+                                "mfenc: using {label} {} {}x{fps}",
+                                codec.short_name(),
+                                width
+                            ));
                             return Ok(encoder);
                         }
                         Err(e) => failures.push(format!("{label}: {} ({:#010X})", e.message(), e.code().0)),
@@ -176,6 +235,7 @@ impl MfH264Encoder {
 
     fn configure(
         transform: IMFTransform,
+        codec: crate::nvenc::VideoCodec,
         width: u32,
         height: u32,
         fps: u32,
@@ -209,11 +269,13 @@ impl MfH264Encoder {
                     .map(|g| fourcc(&g))
                     .unwrap_or_default();
                 output_types.push(subtype.clone());
-                if subtype != "H264" {
+                if subtype != fourcc(&mf_subtype(codec)) {
                     continue;
                 }
                 let _ = available.SetUINT32(&MF_MT_AVG_BITRATE, bitrate_bps);
-                let _ = available.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32);
+                if codec == crate::nvenc::VideoCodec::H264 {
+                    let _ = available.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32);
+                }
                 let _ = available.SetUINT32(
                     &MF_MT_INTERLACE_MODE,
                     MFVideoInterlace_Progressive.0 as u32,
@@ -290,6 +352,7 @@ impl MfH264Encoder {
                 fps,
                 frame_index: 0,
                 label,
+                codec,
                 frame_buf: vec![0u8; (width * height * 3 / 2) as usize],
                 input_format,
                 started: false,
@@ -355,7 +418,11 @@ impl MfH264Encoder {
     }
 
     pub fn codec_flag(&self) -> u8 {
-        2 // H.264
+        self.codec.wire_flag()
+    }
+
+    pub fn codec(&self) -> crate::nvenc::VideoCodec {
+        self.codec
     }
 
     fn ensure_started(&mut self) {

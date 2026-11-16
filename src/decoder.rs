@@ -349,6 +349,8 @@ impl HevcDecoder {
 /// Не требует внешних DLL (FFmpeg), работает из коробки на любой версии Windows 10/11.
 pub struct H264Decoder {
     transform: IMFTransform,
+    /// Подтип на входе: H.264, AV1 и т.д. Логика разбора кадра общая.
+    subtype: GUID,
     pub width: u32,
     /// true — MF отдаёт BGRA (RGB32) и наша YUV-конвертация не нужна вовсе.
     is_rgb: bool,
@@ -370,6 +372,59 @@ impl H264Decoder {
 
             Ok(Self {
                 transform,
+                subtype: MFVideoFormat_H264,
+                width: 0,
+                height: 0,
+                is_rgb: false,
+                is_stream_started: false,
+                rgba_buffer: Vec::new(),
+                pts_hns: 0,
+            })
+        }
+    }
+
+    /// Декодер под произвольный подтип (AV1, HEVC): Windows выбирает MFT сама.
+    pub fn with_subtype(subtype: GUID) -> Result<Self> {
+        unsafe {
+            let _ = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
+            let input_info = windows::Win32::Media::MediaFoundation::MFT_REGISTER_TYPE_INFO {
+                guidMajorType: windows::Win32::Media::MediaFoundation::MFMediaType_Video,
+                guidSubtype: subtype,
+            };
+            let mut activates: *mut Option<
+                windows::Win32::Media::MediaFoundation::IMFActivate,
+            > = std::ptr::null_mut();
+            let mut count = 0u32;
+            let enumerated = windows::Win32::Media::MediaFoundation::MFTEnumEx(
+                windows::Win32::Media::MediaFoundation::MFT_CATEGORY_VIDEO_DECODER,
+                windows::Win32::Media::MediaFoundation::MFT_ENUM_FLAG_SORTANDFILTER,
+                Some(&input_info),
+                None,
+                &mut activates,
+                &mut count,
+            );
+            let mut transform: Option<IMFTransform> = None;
+            if enumerated.is_ok() && !activates.is_null() {
+                for index in 0..count as usize {
+                    if let Some(activate) = (*activates.add(index)).clone() {
+                        if let Ok(candidate) = activate.ActivateObject::<IMFTransform>() {
+                            transform = Some(candidate);
+                        }
+                    }
+                }
+                windows::Win32::System::Com::CoTaskMemFree(Some(activates as *const _));
+            }
+            let Some(transform) = transform else {
+                return Err(windows::core::Error::from_hresult(
+                    windows::Win32::Media::MediaFoundation::MF_E_TOPO_CODEC_NOT_FOUND,
+                ));
+            };
+            if let Ok(attrs) = transform.GetAttributes() {
+                let _ = attrs.SetUINT32(&MF_LOW_LATENCY, 1);
+            }
+            Ok(Self {
+                transform,
+                subtype,
                 width: 0,
                 height: 0,
                 is_rgb: false,
@@ -390,7 +445,7 @@ impl H264Decoder {
             crate::diag::log(&format!("decoder: H264 configure {}x{}", width, height));
             let in_type = MFCreateMediaType()?;
             in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-            in_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
+            in_type.SetGUID(&MF_MT_SUBTYPE, &self.subtype)?;
             in_type.SetUINT64(&MF_MT_FRAME_SIZE, ((width as u64) << 32) | (height as u64))?;
             self.transform.SetInputType(0, &in_type, 0)?;
 

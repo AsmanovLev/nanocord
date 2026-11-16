@@ -27,6 +27,9 @@ pub const NV_ENC_CODEC_H264_GUID: GUID = GUID::from_values(0x6bc82762, 0x4e63, 0
 pub const NV_ENC_CODEC_HEVC_GUID: GUID = GUID::from_values(0x790cdc88, 0x4522, 0x4d7b, [0x94, 0x25, 0xbd, 0xa9, 0x97, 0x5f, 0x76, 0x03]);
 pub const NV_ENC_H264_PROFILE_HIGH_GUID: GUID = GUID::from_values(0xe7cbc309, 0x4f7a, 0x4b89, [0xaf, 0x2a, 0xd5, 0x37, 0xc9, 0x2b, 0xe3, 0x10]);
 pub const NV_ENC_HEVC_PROFILE_MAIN_GUID: GUID = GUID::from_values(0xb514c39a, 0xb55b, 0x40fa, [0x87, 0x8f, 0xf1, 0x25, 0x3b, 0x4d, 0xfd, 0xec]);
+/// AV1: только Ada (RTX 40) и новее.
+pub const NV_ENC_CODEC_AV1_GUID: GUID = GUID::from_values(0x0a352289, 0x0aa7, 0x4759, [0x86, 0x2d, 0x5d, 0x15, 0xcd, 0x16, 0xd2, 0x54]);
+pub const NV_ENC_AV1_PROFILE_MAIN_GUID: GUID = GUID::from_values(0x5f2a39f5, 0xf14e, 0x4f95, [0x9a, 0x9e, 0xb7, 0x6d, 0x56, 0x8f, 0xcf, 0x97]);
 pub const NV_ENC_PRESET_P1_GUID: GUID = GUID::from_values(0xfc0a8d3e, 0x45f8, 0x4cf8, [0x80, 0xc7, 0x29, 0x88, 0x71, 0x59, 0x0e, 0xbf]);
 pub const NV_ENC_PRESET_P2_GUID: GUID = GUID::from_values(0xf581cfb8, 0x88d6, 0x4381, [0x93, 0xf0, 0xdf, 0x13, 0xf9, 0xc2, 0x7d, 0xab]);
 pub const NV_ENC_PRESET_P3_GUID: GUID = GUID::from_values(0x36850110, 0x3a07, 0x441f, [0x94, 0xd5, 0x36, 0x70, 0x63, 0x1f, 0x91, 0xf6]);
@@ -67,6 +70,8 @@ pub const NV_ENC_LOCK_BITSTREAM_VER: u32 = 0xF102000D;
 /// Аппаратный видеокодек, доступный через NVENC на текущей GPU.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum VideoCodec {
+    /// AV1 — Ada (RTX 40) и новее; на треть дешевле HEVC по битрейту.
+    Av1,
     /// Baseline/Main/High H.264 — умеет любая GPU с NVENC, включая Maxwell 1 (GTX 750).
     H264,
     /// HEVC/H.265 — только Maxwell 2 (GM206+) и новее; на 25–30% дешевле по битрейту.
@@ -75,10 +80,12 @@ pub enum VideoCodec {
 
 impl VideoCodec {
     /// Порядок предпочтения при `CodecPreference::Auto`.
-    pub const PREFERRED: [VideoCodec; 2] = [VideoCodec::Hevc, VideoCodec::H264];
+    pub const PREFERRED: [VideoCodec; 3] =
+        [VideoCodec::Av1, VideoCodec::Hevc, VideoCodec::H264];
 
     pub fn codec_guid(self) -> GUID {
         match self {
+            VideoCodec::Av1 => NV_ENC_CODEC_AV1_GUID,
             VideoCodec::H264 => NV_ENC_CODEC_H264_GUID,
             VideoCodec::Hevc => NV_ENC_CODEC_HEVC_GUID,
         }
@@ -87,13 +94,16 @@ impl VideoCodec {
     /// Профиль, который выставляется в `NV_ENC_CONFIG::profileGUID`.
     pub fn profile_guid(self) -> GUID {
         match self {
+            VideoCodec::Av1 => NV_ENC_AV1_PROFILE_MAIN_GUID,
             VideoCodec::H264 => NV_ENC_H264_PROFILE_HIGH_GUID,
             VideoCodec::Hevc => NV_ENC_HEVC_PROFILE_MAIN_GUID,
         }
     }
 
     pub fn from_codec_guid(guid: &GUID) -> Option<Self> {
-        if *guid == NV_ENC_CODEC_HEVC_GUID {
+        if *guid == NV_ENC_CODEC_AV1_GUID {
+            Some(VideoCodec::Av1)
+        } else if *guid == NV_ENC_CODEC_HEVC_GUID {
             Some(VideoCodec::Hevc)
         } else if *guid == NV_ENC_CODEC_H264_GUID {
             Some(VideoCodec::H264)
@@ -104,6 +114,7 @@ impl VideoCodec {
 
     pub fn name(self) -> &'static str {
         match self {
+            VideoCodec::Av1 => "AV1",
             VideoCodec::H264 => "H.264 (AVC)",
             VideoCodec::Hevc => "H.265 (HEVC)",
         }
@@ -111,8 +122,36 @@ impl VideoCodec {
 
     pub fn short_name(self) -> &'static str {
         match self {
+            VideoCodec::Av1 => "AV1",
             VideoCodec::H264 => "H.264",
             VideoCodec::Hevc => "H.265",
+        }
+    }
+
+    /// Бит для согласования с собеседником: 0 — H.264, 1 — HEVC, 2 — AV1.
+    pub fn bit(self) -> u8 {
+        match self {
+            VideoCodec::H264 => 1,
+            VideoCodec::Hevc => 2,
+            VideoCodec::Av1 => 4,
+        }
+    }
+
+    /// Флаг кодека в протоколе (2 — H.264, 3 — HEVC, 4 — AV1).
+    pub fn wire_flag(self) -> u8 {
+        match self {
+            VideoCodec::H264 => 2,
+            VideoCodec::Hevc => 3,
+            VideoCodec::Av1 => 4,
+        }
+    }
+
+    pub fn from_wire_flag(flag: u8) -> Option<Self> {
+        match flag {
+            2 => Some(VideoCodec::H264),
+            3 => Some(VideoCodec::Hevc),
+            4 => Some(VideoCodec::Av1),
+            _ => None,
         }
     }
 }

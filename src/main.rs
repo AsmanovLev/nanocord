@@ -261,6 +261,16 @@ fn run_codec_report() {
     let mut lines: Vec<String> = Vec::new();
     lines.push("NVENC codec capability report".to_string());
     lines.push("-".repeat(50));
+    // Согласование: что умеем отправлять и что умеем принимать. Кодер
+    // поднимается на пересечении с возможностями собеседника.
+    lines.push(format!(
+        "Encode (ours)   : {}",
+        nanocord::encoder::mask_names(nanocord::encoder::encode_caps())
+    ));
+    lines.push(format!(
+        "Decode (ours)   : {}",
+        nanocord::encoder::mask_names(nanocord::encoder::decode_caps())
+    ));
 
     match nvenc::probe_available_codecs() {
         Ok(codecs) => {
@@ -280,7 +290,8 @@ fn run_codec_report() {
                     .unwrap_or("none");
                 lines.push(format!("Preferred codec : {preferred} (explicit API, CodecPreference::Auto)"));
                 lines.push(
-                    "Stream policy   : H.264 first, HEVC only if H.264 fails to start".to_string(),
+                    "Stream policy   : AV1 -> HEVC -> H.264, restricted by what the peer decodes"
+                        .to_string(),
                 );
                 if !codecs.contains(&VideoCodec::Hevc) {
                     lines.push(
@@ -442,6 +453,7 @@ fn run_mf_test() {
         8,
         30,
         nanocord::encoder::preset_by_index(0),
+        0b111, // локальный тест: считаем, что собеседник понимает всё
     ) {
         Some(enc) => enc,
         None => {
@@ -454,7 +466,20 @@ fn run_mf_test() {
     };
     push(&mut lines, format!("encoder: {}", enc.label()));
 
-    let mut dec = nanocord::decoder::H264Decoder::new().ok();
+    // Декодер — под фактически выбранный кодек: HEVC, разобранный H.264-декодером,
+    // молча остаётся «buffered» и выглядит как отсутствие картинки.
+    let dec_subtype = match enc.codec() {
+        nanocord::nvenc::VideoCodec::Av1 => {
+            windows::Win32::Media::MediaFoundation::MFVideoFormat_AV1
+        }
+        nanocord::nvenc::VideoCodec::Hevc => {
+            windows::Win32::Media::MediaFoundation::MFVideoFormat_HEVC
+        }
+        nanocord::nvenc::VideoCodec::H264 => {
+            windows::Win32::Media::MediaFoundation::MFVideoFormat_H264
+        }
+    };
+    let mut dec = nanocord::decoder::H264Decoder::with_subtype(dec_subtype).ok();
     nanocord::diag::log(&format!("mf test: report path {}", report.display()));
     let flush = |lines: &Vec<String>| {
         // Пишем после каждого кадра: если декодер упадёт на живом потоке,

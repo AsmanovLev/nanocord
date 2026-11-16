@@ -2,7 +2,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
@@ -518,6 +518,8 @@ pub struct P2PNetworkServer {
     pub telemetry: Arc<RwLock<P2PTelemetry>>,
     pub encoder_config: Arc<RwLock<VideoEncoderConfig>>,
     pub state: Arc<RwLock<SessionState>>,
+    /// Что собеседник умеет ДЕКОДИРОВАТЬ (биты VideoCodec::bit).
+    pub peer_decode: Arc<AtomicU8>,
     pub chat_rx: Receiver<ChatEvent>,
     pub chat_tx: SyncSender<ChatOutgoing>,
 }
@@ -534,6 +536,9 @@ impl P2PNetworkServer {
         let peer_addr = Arc::new(RwLock::new(String::new()));
         let status = Arc::new(RwLock::new("Запуск сервера...".to_string()));
         let telemetry = Arc::new(RwLock::new(P2PTelemetry::default()));
+        // До рукопожатия считаем, что собеседник понимает только H.264:
+        // отправлять ему что-то новее без подтверждения нельзя.
+        let peer_decode = Arc::new(AtomicU8::new(crate::nvenc::VideoCodec::H264.bit()));
 
         let (in_dt_tx, in_dt_rx) = sync_channel(4);
         let (in_cam_tx, in_cam_rx) = sync_channel(4);
@@ -553,6 +558,7 @@ impl P2PNetworkServer {
         let peer_addr_clone = peer_addr.clone();
         let status_clone = status.clone();
         let telem_clone = telemetry.clone();
+        let peer_decode_clone = peer_decode.clone();
         let expected_code = room_code.clone();
         let enc_config_clone = encoder_config.clone();
         let chat_evt_sess = chat_evt_tx.clone();
@@ -680,14 +686,21 @@ impl P2PNetworkServer {
                     let _ = stream.set_nodelay(true);
                     let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
 
-                    // Рукопожатие
+                    // Рукопожатие NC03: код комнаты + битовая маска декодеров
+                    // клиента. Без неё нельзя выбрать кодек, который собеседник
+                    // действительно разберёт.
                     let mut magic = [0u8; 4];
-                    let hs_ok = if stream.read_exact(&mut magic).is_ok() && &magic == b"NC02" {
+                    let mut client_decode = crate::nvenc::VideoCodec::H264.bit();
+                    let hs_ok = if stream.read_exact(&mut magic).is_ok() && &magic == b"NC03" {
                         let mut len_b = [0u8; 1];
                         if stream.read_exact(&mut len_b).is_ok() {
                             let len = len_b[0] as usize;
                             let mut code_b = vec![0u8; len];
-                            if stream.read_exact(&mut code_b).is_ok() {
+                            let mut caps_b = [0u8; 1];
+                            if stream.read_exact(&mut code_b).is_ok()
+                                && stream.read_exact(&mut caps_b).is_ok()
+                            {
+                                client_decode = caps_b[0];
                                 let client_code = String::from_utf8_lossy(&code_b).trim().to_string();
                                 client_code == expected_code.trim()
                             } else { false }
@@ -695,8 +708,18 @@ impl P2PNetworkServer {
                     } else { false };
 
                     if hs_ok {
-                        let _ = stream.write_all(b"NCOK");
+                        peer_decode_clone.store(
+                            client_decode & crate::encoder::decode_caps(),
+                            Ordering::Relaxed,
+                        );
+                        let reply = [b'N', b'C', b'O', b'K', crate::encoder::decode_caps()];
+                        let _ = stream.write_all(&reply);
                         let _ = stream.flush();
+                        crate::diag::log(&format!(
+                            "net: handshake ok, peer decodes [{}], we decode [{}]",
+                            crate::encoder::mask_names(client_decode),
+                            crate::encoder::mask_names(crate::encoder::decode_caps())
+                        ));
                         connected_clone.store(true, Ordering::Relaxed);
                         if let Ok(mut pa) = peer_addr_clone.write() {
                             *pa = addr.to_string();
@@ -724,6 +747,7 @@ impl P2PNetworkServer {
                             enc_config_clone.clone(),
                             chat_evt_sess.clone(),
                             chat_out_sess.clone(),
+                            peer_decode_clone.clone(),
                         );
 
                         connected_clone.store(false, Ordering::Relaxed);
@@ -747,6 +771,7 @@ impl P2PNetworkServer {
         });
 
         Self {
+            peer_decode,
             is_running,
             is_connected,
             port,
@@ -803,6 +828,8 @@ pub struct P2PNetworkClient {
     pub telemetry: Arc<RwLock<P2PTelemetry>>,
     pub encoder_config: Arc<RwLock<VideoEncoderConfig>>,
     pub state: Arc<RwLock<SessionState>>,
+    /// Что собеседник умеет ДЕКОДИРОВАТЬ (биты VideoCodec::bit).
+    pub peer_decode: Arc<AtomicU8>,
     pub chat_rx: Receiver<ChatEvent>,
     pub chat_tx: SyncSender<ChatOutgoing>,
 }
@@ -818,6 +845,9 @@ impl P2PNetworkClient {
         let state = Arc::new(RwLock::new(SessionState::Idle));
         let status = Arc::new(RwLock::new(format!("Подключение к {}:{}...", target_host, port)));
         let telemetry = Arc::new(RwLock::new(P2PTelemetry::default()));
+        // До рукопожатия считаем, что собеседник понимает только H.264:
+        // отправлять ему что-то новее без подтверждения нельзя.
+        let peer_decode = Arc::new(AtomicU8::new(crate::nvenc::VideoCodec::H264.bit()));
 
         let (in_dt_tx, in_dt_rx) = sync_channel(4);
         let (in_cam_tx, in_cam_rx) = sync_channel(4);
@@ -836,6 +866,7 @@ impl P2PNetworkClient {
         let state_clone = state.clone();
         let status_clone = status.clone();
         let telem_clone = telemetry.clone();
+        let peer_decode_clone = peer_decode.clone();
         let code_to_send = room_code.clone();
         let host_clone = target_host.clone();
         let enc_config_clone = encoder_config.clone();
@@ -871,6 +902,7 @@ impl P2PNetworkClient {
                     &code_to_send,
                     &status_clone,
                     &telem_clone,
+                    &peer_decode_clone,
                 ) {
                     Ok(stream) => {
                         attempt = 0;
@@ -893,6 +925,7 @@ impl P2PNetworkClient {
                             enc_config_clone.clone(),
                             chat_evt_sess.clone(),
                             chat_out_sess.clone(),
+                            peer_decode_clone.clone(),
                         );
 
                         connected_clone.store(false, Ordering::Relaxed);
@@ -947,6 +980,7 @@ impl P2PNetworkClient {
         });
 
         Self {
+            peer_decode,
             is_running,
             is_connected,
             target_addr: target_host,
@@ -986,6 +1020,7 @@ fn client_connect_once(
     room_code: &str,
     status: &Arc<RwLock<String>>,
     telemetry: &Arc<RwLock<P2PTelemetry>>,
+    peer_decode: &AtomicU8,
 ) -> std::result::Result<TcpStream, String> {
     let resolve_target = if host.starts_with('[') && host.ends_with(']') {
         format!("{}:{}", host, port)
@@ -1032,25 +1067,34 @@ fn client_connect_once(
     let _ = stream.set_read_timeout(Some(Duration::from_millis(3000)));
 
     let code_bytes = room_code.as_bytes();
-    let mut hs_packet = Vec::with_capacity(5 + code_bytes.len());
-    hs_packet.extend_from_slice(b"NC02");
+    let my_caps = crate::encoder::decode_caps();
+    let mut hs_packet = Vec::with_capacity(6 + code_bytes.len());
+    hs_packet.extend_from_slice(b"NC03");
     hs_packet.push(code_bytes.len() as u8);
     hs_packet.extend_from_slice(code_bytes);
+    hs_packet.push(my_caps);
 
     if stream.write_all(&hs_packet).is_err() || stream.flush().is_err() {
         return Err("Сбой отправки данных".to_string());
     }
 
-    let mut reply = [0u8; 4];
+    let mut reply = [0u8; 5];
     if stream.read_exact(&mut reply).is_err() {
         return Err("Сервер разорвал соединение".to_string());
     }
+    let server_decode = reply[4];
+    peer_decode.store(server_decode & my_caps, Ordering::Relaxed);
+    crate::diag::log(&format!(
+        "net: server decodes [{}], negotiated [{}]",
+        crate::encoder::mask_names(server_decode),
+        crate::encoder::mask_names(server_decode & my_caps)
+    ));
 
     crate::diag::log(&format!(
         "net: client handshake reply={:?}",
         String::from_utf8_lossy(&reply)
     ));
-    match &reply {
+    match &reply[..4] {
         b"NCOK" => {
             if let Ok(mut st) = status.write() {
                 *st = "Успешно подключено к серверу!".to_string();
@@ -1175,6 +1219,7 @@ fn run_p2p_socket_session(
     encoder_config: Arc<RwLock<VideoEncoderConfig>>,
     chat_evt_tx: SyncSender<ChatEvent>,
     chat_out_rx: Arc<Mutex<Receiver<ChatOutgoing>>>,
+    peer_decode: Arc<AtomicU8>,
 ) {
     let mut reader = match stream.try_clone() {
         Ok(s) => s,
@@ -1204,6 +1249,11 @@ fn run_p2p_socket_session(
         let mut rx_log = Instant::now();
         let mut hevc_decoder = crate::decoder::HevcDecoder::new().ok();
         let mut h264_decoder = crate::decoder::H264Decoder::new().ok();
+        // AV1 декодируется тем же кодом, что H.264, только с другим подтипом.
+        let mut av1_decoder = crate::decoder::H264Decoder::with_subtype(
+            windows::Win32::Media::MediaFoundation::MFVideoFormat_AV1,
+        )
+        .ok();
 
         while r_run.load(Ordering::Relaxed) && r_conn.load(Ordering::Relaxed) {
             match reader.read_exact(&mut header) {
@@ -1301,6 +1351,15 @@ fn run_p2p_socket_session(
                     if msg_type == 1 {
                         let rgba_opt = if flags == 3 {
                             if let Some(ref mut dec) = hevc_decoder {
+                                match dec.decode_packet(width, height, &payload) {
+                                    Ok(Some((_, _, frame_rgba))) => Some(frame_rgba),
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            }
+                        } else if flags == 4 {
+                            if let Some(ref mut dec) = av1_decoder {
                                 match dec.decode_packet(width, height, &payload) {
                                     Ok(Some((_, _, frame_rgba))) => Some(frame_rgba),
                                     _ => None,
@@ -1543,6 +1602,7 @@ fn run_p2p_socket_session(
                     max_br,
                     60,
                     preset_guid,
+                    peer_decode.load(Ordering::Relaxed),
                 );
                 cur_enc_config = needed_config;
                 crate::diag::log(&format!(
